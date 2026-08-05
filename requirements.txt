@@ -13,3 +13,4 @@ cloudinary
 rich
 tqdm
 pytest
+PySide6

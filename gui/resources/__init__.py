@@ -1,0 +1,1 @@
+"""BillboardAI GUI resources (stylesheets, assets, etc.)."""

@@ -1,0 +1,1 @@
+"""Views (pages) for the BillboardAI GUI."""

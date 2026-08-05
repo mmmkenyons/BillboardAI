@@ -1,0 +1,1 @@
+"""BillboardAI GUI data models (dataclasses)."""
