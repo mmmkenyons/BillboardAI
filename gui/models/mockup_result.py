@@ -10,14 +10,16 @@ from datetime import datetime
 class MockupResult:
     """The outcome of a mockup generation request.
 
-    Fields are placeholders for the data the GUI will need once the engine
-    pipeline is wired up. They default to empty/neutral values so the model
-    can be constructed before any real generation happens.
+    Fields are populated by the engine bridge after a generation run.
+    Unavailable information is left blank rather than invented.
     """
 
     success: bool = False
     message: str = ""
+    website: str = ""
     output_path: str = ""
+    preview_path: str = ""
+    upload_url: str = ""
 
     # Content fields produced by the engine (populated later).
     company_name: str = ""
@@ -27,5 +29,7 @@ class MockupResult:
     quality_score: float = 0.0
 
     # Metadata.
+    elapsed_time: float = 0.0
+    warnings: list = field(default_factory=list)
     created_at: datetime | None = None
     extra: dict = field(default_factory=dict)

@@ -151,13 +151,19 @@ class WebsiteScraper:
                 asset_paths.append(path)
         return sorted(asset_paths)
 
-    def run(self):
+    def run(self, progress_callback=None):
         os.makedirs(config.ASSETS_FOLDER, exist_ok=True)
         os.makedirs(config.HTML_FOLDER, exist_ok=True)
         os.makedirs(config.JSON_FOLDER, exist_ok=True)
 
+        def _report(percent, message, stage=None):
+            if progress_callback:
+                progress_callback(percent, message, stage)
+
         start = time.time()
+        _report(10, "Scraping Website", "scrape")
         self.load()
+        _report(25, "Downloading Assets", "assets")
         html_path = self.save_html()
         self.logo_url, self.logo_score = pick_best_logo(self.html, self.url)
         self.logo_path = self.download_resource(self.logo_url, config.ASSETS_FOLDER, prefix="logo") if self.logo_url else None
@@ -182,7 +188,9 @@ class WebsiteScraper:
             "metadata": self.metadata,
         }
 
+        _report(40, "Analyzing Brand", "analyze")
         data = analyze_scrape_data(data, self.html, self.screenshot_path)
+        _report(55, "Generating Copy", "copy")
 
         out_path = os.path.join(config.JSON_FOLDER, f"{self.filename_base}.json")
         with open(out_path, "w", encoding="utf-8") as handle:
@@ -192,15 +200,20 @@ class WebsiteScraper:
         print(f"Loaded {self.url} in {time.time() - start:.1f}s")
         return data
 
-    def render_billboard(self, template_name="contractor", output_path=None):
+    def render_billboard(self, template_name="contractor", output_path=None, progress_callback=None):
         if not self.last_data:
-            self.run()
+            self.run(progress_callback=progress_callback)
 
         os.makedirs(config.IMAGE_FOLDER, exist_ok=True)
         output_path = output_path or os.path.join(
             config.IMAGE_FOLDER, f"{self.filename_base}_{template_name}.png"
         )
 
+        def _report(percent, message, stage=None):
+            if progress_callback:
+                progress_callback(percent, message, stage)
+
+        _report(70, "Rendering Mockup", "render")
         billboard_spec = generate_billboard(self.last_data, template_name)
         render_billboard(billboard_spec, output_path)
 
@@ -221,6 +234,8 @@ class WebsiteScraper:
                 self.last_data["regenerated"] = True
                 output_path = alt_output_path
 
+        _report(90, "Saving Files", "save")
+        _report(100, "Complete", "done")
         return output_path
 
     def extract_company_name(self):

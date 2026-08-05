@@ -126,6 +126,15 @@ class HomePage(QWidget):
     # Backward-compatible attribute access
     # ------------------------------------------------------------------
     @property
+    def selected_template(self) -> str:
+        """Return the template value for the currently selected display name."""
+        display = self.template_combo.currentText()
+        for name, value in self.TEMPLATES:
+            if name == display:
+                return value
+        return "contractor"
+
+    @property
     def output_folder_input(self) -> QLineEdit:
         """Backward-compatible access to the output folder line edit."""
         return self.output_selector.output_folder_input
