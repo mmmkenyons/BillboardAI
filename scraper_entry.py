@@ -13,6 +13,9 @@ from sklearn.cluster import KMeans
 import tldextract
 
 from config import *
+from scraper import WebsiteScraper
+
+__all__ = ["WebsiteScraper"]
 
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(JSON_FOLDER, exist_ok=True)

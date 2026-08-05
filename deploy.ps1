@@ -5,7 +5,11 @@ param(
     [string]$BatchFile = "urls.txt",
     [string]$OutputCsv = "output/smartlead.csv",
     [string]$Template = "auto",
-    [switch]$Upload
+    [switch]$Upload,
+    [switch]$LaunchApp,
+    [switch]$RegisterTask,
+    [string]$TaskName = "BillboardAI Daily Batch",
+    [string]$TaskTime = "08:00"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,6 +71,29 @@ Write-Host "Installing Playwright browsers..."
 if (-Not (Test-Path $BatchFile)) {
     Write-Host "Batch file $BatchFile not found. Creating placeholder with https://example.com"
     "https://example.com" | Out-File -Encoding utf8 -NoBom $BatchFile
+}
+
+if ($LaunchApp) {
+    Write-Host "Launching the BillboardAI desktop app..."
+    & $pythonExe -m app
+    Write-Host "Desktop app closed."
+    exit 0
+}
+
+if ($RegisterTask) {
+    Write-Host "Registering Windows scheduled task '$TaskName' to run at $TaskTime..."
+    $uploadFlag = ""
+    if ($Upload) {
+        $uploadFlag = "--upload"
+    }
+
+    $actionArguments = "main.py --batch-file `"$BatchFile`" --output-csv `"$OutputCsv`" --template $Template $uploadFlag"
+    $action = New-ScheduledTaskAction -Execute $pythonExe -Argument $actionArguments
+    $trigger = New-ScheduledTaskTrigger -Daily -At $TaskTime
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Description "Run BillboardAI batch processing daily." -Force | Out-Null
+
+    Write-Host "Scheduled task '$TaskName' registered."
+    exit 0
 }
 
 $uploadFlag = ""

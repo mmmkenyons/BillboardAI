@@ -1,0 +1,1 @@
+"""BillboardAI desktop application package."""

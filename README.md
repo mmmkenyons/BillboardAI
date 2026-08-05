@@ -64,6 +64,46 @@ The CSV includes the following fields:
 
 For local deployment, clone the repo, install dependencies, configure `.env`, and run `python main.py` as shown above. For server deployment, repeat these steps on a managed instance and use a scheduled task or script to execute batch commands.
 
+## Desktop app
+
+Start the desktop interface with one of these commands:
+
+```powershell
+python -m app
+```
+
+Or run directly from the `app` package:
+
+```powershell
+python -m app.main
+```
+
+The app lets you:
+
+- Enter a website URL for a single scrape
+- Load a batch URL text file
+- Choose a hero/background image
+- Select an output folder
+- Generate billboard mockups with an auto or fixed template
+
+## deploy.ps1 enhancements
+
+The deployment helper now supports:
+
+- `.
+deploy.ps1 -LaunchApp` to open the desktop UI
+- `.
+deploy.ps1 -RegisterTask` to register a Windows scheduled task
+
+Example task registration:
+
+```powershell
+.
+deploy.ps1 -RegisterTask -TaskName "BillboardAI Daily Batch" -TaskTime "08:00"
+```
+
+This creates a daily scheduled task that runs the batch command in the local repo.
+
 ## Project structure
 
 - `main.py` - entry point

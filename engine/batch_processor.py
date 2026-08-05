@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import config
-from scraper.site import WebsiteScraper
-from smartlead import build_lead_entry
-from uploader import upload_asset
+from .smartlead import build_lead_entry
+from engine.uploader import upload_asset
+from engine.scraper.site import WebsiteScraper
 
 
 def _log(message: str) -> None:
@@ -77,7 +77,7 @@ def run_batch(batch_file: str, output_csv: str, template: str = "contractor", up
             _log(f"Failed: {url} -> {exc}")
 
     if entries:
-        from smartlead import write_csv
+        from .smartlead import write_csv
         write_csv(entries, output_csv)
         _log(f"Smartlead CSV written: {output_csv}")
 

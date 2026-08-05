@@ -1,4 +1,4 @@
-"""BillboardAI renderer wrapper module."""
+"""BillboardAI renderer compatibility wrapper."""
 
 from engine.renderer.renderer import render_billboard
 

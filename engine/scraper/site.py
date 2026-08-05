@@ -11,18 +11,17 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 import tldextract
 
-import config
-from analyzer import analyze_scrape_data
-from designer import generate_billboard
-from renderer.renderer import render_billboard
-from analyzer import analyze_scrape_data
-from scraper.assets import discover_assets
-from scraper.color import extract_brand_colors
-from scraper.css import extract_inline_styles, extract_stylesheet_urls
-from scraper.headline import extract_headline
-from scraper.hero import pick_hero_image
-from scraper.logo import pick_best_logo
-from scraper.metadata import extract_metadata
+from .. import config
+from ..analyzer import analyze_scrape_data
+from ..designer import generate_billboard
+from ..renderer.renderer import render_billboard
+from .assets import discover_assets
+from .color import extract_brand_colors
+from .css import extract_inline_styles, extract_stylesheet_urls
+from .headline import extract_headline
+from .hero import pick_hero_image
+from .logo import pick_best_logo
+from .metadata import extract_metadata
 
 
 def _safe_filename(url, prefix=None):
@@ -123,6 +122,8 @@ class WebsiteScraper:
 
     def save_css(self, page):
         css_paths = []
+        os.makedirs(config.CSS_FOLDER, exist_ok=True)
+
         for href in extract_stylesheet_urls(self.html, self.url):
             path = self.download_resource(href, config.CSS_FOLDER, prefix="style")
             if path:
