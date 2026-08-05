@@ -489,36 +489,34 @@ Every image feels custom.
 
 I would not dump 3,000 lines into one file. I would build it like commercial software:
 
-### Milestone 1 (Week 1)
+### Milestone Tracking
 
-- ✅ Website scraper (Playwright)
-- ✅ Logo detection
-- ✅ Brand color extraction
-- ✅ Asset caching
-- ✅ JSON output
+- [x] Milestone 1 (Week 1)
+  - [x] Website scraper (Playwright)
+  - [x] Logo detection
+  - [x] Brand color extraction
+  - [x] Asset caching
+  - [x] JSON output
 
-### Milestone 2 (Week 2)
+- [x] Milestone 2 (Week 2)
+  - [x] Billboard design engine
+  - [x] Dynamic typography
+  - [x] Multiple templates
+  - [x] Perspective rendering
+  - [x] Local image output
 
-- ✅ Billboard design engine
-- ✅ Dynamic typography
-- ✅ Multiple templates
-- ✅ Perspective rendering
-- ✅ Local image output
+- [x] Milestone 3 (Week 3)
+  - [x] Cloudinary uploads
+  - [x] Smartlead CSV generation
+  - [x] Batch processing
+  - [x] Resume/retry support
+  - [x] Detailed logging
 
-### Milestone 3 (Week 3)
-
-- ✅ Cloudinary uploads
-- ✅ Smartlead CSV generation
-- ✅ Batch processing
-- ✅ Resume/retry support
-- ✅ Detailed logging
-
-### Milestone 4 (Week 4)
-
-- ✅ AI copy extraction
-- ✅ AI layout selection
-- ✅ Quality scoring
-- ✅ Automatic regeneration of weak mockups
+- [x] Milestone 4 (Week 4)
+  - [x] AI copy extraction
+  - [x] AI layout selection
+  - [x] Quality scoring
+  - [ ] Automatic regeneration of weak mockups
 
 ## How to get started
 
@@ -552,6 +550,18 @@ playwright install chromium
 7. Create the folder structure shown above.
 8. Add your fonts (Montserrat is a great default) and your cart corral background image.
 9. Commit the empty project to Git so you can safely iterate:
+
+## Batch usage
+
+Use the main script in batch mode to process multiple URLs and export Smartlead data:
+
+```
+python main.py --batch-file urls.txt --output-csv output/smartlead.csv --template contractor --upload
+```
+
+The batch processor will save progress in `output/batch_status.json` and resume skipped URLs on the next run.
+
+10. Commit frequently after each milestone.
 
 ```
 git init

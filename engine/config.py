@@ -1,7 +1,11 @@
 """BillboardAI configuration."""
 
 from pathlib import Path
+import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "output"
@@ -18,6 +22,26 @@ USER_AGENT = (
 )
 
 TIMEOUT = 30000
+
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+
+SMARTLEAD_FIELDS = [
+    "First Name",
+    "Last Name",
+    "Email",
+    "Company",
+    "Website",
+    "Custom_Image",
+    "Headline",
+    "Quality Score",
+    "Quality Label",
+    "Vision Score",
+    "Vision Label",
+]
+
+BATCH_STATUS_FILE = str(OUTPUT_DIR / "batch_status.json")
 
 CONFIG = {
     "project_name": "BillboardAI",

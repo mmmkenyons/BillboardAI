@@ -12,8 +12,10 @@ from playwright.sync_api import sync_playwright
 import tldextract
 
 import config
+from analyzer import analyze_scrape_data
 from designer import generate_billboard
 from renderer.renderer import render_billboard
+from analyzer import analyze_scrape_data
 from scraper.assets import discover_assets
 from scraper.color import extract_brand_colors
 from scraper.css import extract_inline_styles, extract_stylesheet_urls
@@ -162,6 +164,7 @@ class WebsiteScraper:
 
         data = {
             "url": self.url,
+            "html": self.html,
             "html_file": html_path,
             "screenshot_file": self.screenshot_path,
             "company": self.extract_company_name(),
@@ -177,6 +180,8 @@ class WebsiteScraper:
             "asset_urls": self.asset_urls,
             "metadata": self.metadata,
         }
+
+        data = analyze_scrape_data(data, self.html, self.screenshot_path)
 
         out_path = os.path.join(config.JSON_FOLDER, f"{self.filename_base}.json")
         with open(out_path, "w", encoding="utf-8") as handle:
@@ -194,8 +199,27 @@ class WebsiteScraper:
         output_path = output_path or os.path.join(
             config.IMAGE_FOLDER, f"{self.filename_base}_{template_name}.png"
         )
+
         billboard_spec = generate_billboard(self.last_data, template_name)
         render_billboard(billboard_spec, output_path)
+
+        self.last_data["render_template"] = billboard_spec["template"]
+        self.last_data["render_path"] = output_path
+        self.last_data["rendered_templates"] = [billboard_spec["template"]]
+        self.last_data["regenerated"] = False
+
+        if self.last_data.get("quality_label") == "needs improvement" or self.last_data.get("vision_label") == "needs improvement":
+            alt_spec = generate_billboard(self.last_data, "auto")
+            if alt_spec["template"] != billboard_spec["template"]:
+                base_path, ext = os.path.splitext(output_path)
+                alt_output_path = f"{base_path}_{alt_spec['template']}{ext}"
+                render_billboard(alt_spec, alt_output_path)
+                self.last_data["render_template"] = alt_spec["template"]
+                self.last_data["render_path"] = alt_output_path
+                self.last_data["rendered_templates"].append(alt_spec["template"])
+                self.last_data["regenerated"] = True
+                output_path = alt_output_path
+
         return output_path
 
     def extract_company_name(self):
