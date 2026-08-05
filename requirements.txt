@@ -1,0 +1,15 @@
+playwright
+pillow
+opencv-python
+numpy
+beautifulsoup4
+lxml
+requests
+scikit-learn
+colorthief
+tldextract
+python-dotenv
+cloudinary
+rich
+tqdm
+pytest

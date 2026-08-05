@@ -1,0 +1,9 @@
+"""Contractor billboard template."""
+
+TEMPLATE_NAME = "contractor"
+BACKGROUND_COLOR = "#F5F6FA"
+PRIMARY_COLOR = "#1F2937"
+ACCENT_COLOR = "#1F77B4"
+TEXT_COLOR = "#111827"
+BUTTON_COLOR = "#EF6C00"
+FONT_FAMILY = "arial.ttf"

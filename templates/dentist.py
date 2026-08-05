@@ -1,0 +1,9 @@
+"""Dentist billboard template."""
+
+TEMPLATE_NAME = "dentist"
+BACKGROUND_COLOR = "#E9F7FF"
+PRIMARY_COLOR = "#0B3D91"
+ACCENT_COLOR = "#00A3E0"
+TEXT_COLOR = "#102A43"
+BUTTON_COLOR = "#2878C8"
+FONT_FAMILY = "arial.ttf"

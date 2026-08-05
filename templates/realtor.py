@@ -1,0 +1,9 @@
+"""Realtor billboard template."""
+
+TEMPLATE_NAME = "realtor"
+BACKGROUND_COLOR = "#FEF8E7"
+PRIMARY_COLOR = "#1F2937"
+ACCENT_COLOR = "#B76E79"
+TEXT_COLOR = "#1D1D1F"
+BUTTON_COLOR = "#8B4513"
+FONT_FAMILY = "arial.ttf"
