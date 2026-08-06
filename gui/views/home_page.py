@@ -1,7 +1,8 @@
 """Home page for the BillboardAI GUI.
 
 Assembles the reusable widgets into a vertical layout where the generated
-mockup preview is the visual centerpiece.
+mockup preview is the visual centerpiece. A concept gallery sits above
+the preview so users can switch between concepts without regenerating.
 """
 
 from __future__ import annotations
@@ -21,7 +22,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui.models.mockup_concept import MockupConcept
 from gui.models.mockup_result import MockupResult
+from gui.widgets.concept_gallery import ConceptGallery
 from gui.widgets.header import Header
 from gui.widgets.mockup_details_panel import MockupDetailsPanel
 from gui.widgets.output_selector import OutputSelector
@@ -31,7 +34,7 @@ from gui.widgets.recent_websites import RecentWebsites
 
 
 class HomePage(QWidget):
-    """Main home view: input form, preview, details, and recent websites."""
+    """Main home view: input form, concept gallery, preview, details."""
 
     TEMPLATES = [
         ("Contractor", "contractor"),
@@ -58,19 +61,24 @@ class HomePage(QWidget):
         self.progress_panel = ProgressPanel(self)
         root_layout.addWidget(self.progress_panel)
 
-        # Resizable content area: preview / details / recent websites.
+        # Resizable content area: gallery / preview / details / recent websites.
         self.splitter = QSplitter(Qt.Orientation.Vertical, self)
+
+        self.concept_gallery = ConceptGallery(self.splitter)
+        self.concept_gallery.setObjectName("conceptGalleryArea")
 
         self.preview_panel = PreviewPanel(self.splitter)
         self.details_panel = MockupDetailsPanel(self.splitter)
         self.recent_websites = RecentWebsites(self.splitter)
 
+        self.splitter.addWidget(self.concept_gallery)
         self.splitter.addWidget(self.preview_panel)
         self.splitter.addWidget(self.details_panel)
         self.splitter.addWidget(self.recent_websites)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 1)
-        self.splitter.setStretchFactor(2, 1)
+        self.splitter.setStretchFactor(0, 1)  # gallery
+        self.splitter.setStretchFactor(1, 4)  # preview (largest)
+        self.splitter.setStretchFactor(2, 1)  # details
+        self.splitter.setStretchFactor(3, 1)  # recent websites
 
         root_layout.addWidget(self.splitter, stretch=1)
 
@@ -128,10 +136,29 @@ class HomePage(QWidget):
         self.preview_panel.set_image(result.preview_path)
         self.details_panel.set_result(result)
 
+    def set_concept(self, concept: MockupConcept) -> None:
+        """Populate the preview and details panels from a concept."""
+        self.preview_panel.set_concept(concept)
+        self.details_panel.set_concept(concept)
+
     def clear_result(self) -> None:
         """Reset the preview and details panels to their empty states."""
         self.preview_panel.clear()
         self.details_panel.clear()
+
+    def add_concept(self, concept: MockupConcept) -> None:
+        """Add a concept to the gallery and display it."""
+        self.concept_gallery.add_concept(concept)
+        self.set_concept(concept)
+
+    def set_concepts(self, concepts: list[MockupConcept]) -> None:
+        """Populate the gallery with concepts and select the active one."""
+        self.concept_gallery.set_concepts(concepts)
+        selected = next(
+            (c for c in concepts if c.selected), concepts[0] if concepts else None
+        )
+        if selected:
+            self.set_concept(selected)
 
     # ------------------------------------------------------------------
     # Backward-compatible attribute access

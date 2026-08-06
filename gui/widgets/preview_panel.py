@@ -14,6 +14,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui.models.mockup_concept import MockupConcept
+from gui.widgets.quality_badge import QualityBadge
+
 _PLACEHOLDER_TEXT = "No mockup generated yet."
 
 
@@ -92,6 +95,13 @@ class PreviewPanel(QFrame):
         self.preview_label.setWordWrap(False)
         self._update_scaled_pixmap()
         self._set_buttons_enabled(True)
+
+    def set_concept(self, concept: MockupConcept) -> None:
+        """Display the image from a MockupConcept.
+
+        Uses the concept's ``image_path`` to load the pixmap.
+        """
+        self.set_image(concept.image_path)
 
     def clear(self) -> None:
         """Restore the placeholder text and disable action buttons."""

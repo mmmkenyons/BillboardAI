@@ -1,5 +1,52 @@
 # BillboardAI Roadmap
 
+## Version 0.1 (Current) — Professional Desktop Renderer
+
+- Desktop application for scraping websites and producing billboard mockups
+- Single-site and batch processing
+- Playwright-based scraping with asset caching
+- Template-based billboard design engine
+- PIL-based image rendering with dynamic typography
+- SmartLead CSV export
+- Cloudinary upload support
+
+## Version 0.2 — Creative Workspace
+
+- Project management
+- Multiple concepts per project
+- Gallery view
+- Autosave
+- Editable copy
+
+## Version 0.3 — Sales Studio
+
+- Batch generation
+- CSV import
+- SmartLead export
+- Cold email generation
+- Campaign packaging
+
+## Version 0.4 — Creative Intelligence
+
+- Multiple AI-generated concepts
+- Headline scoring
+- CTA scoring
+- Brand consistency scoring
+- Automatic best concept selection
+
+## Version 1.0 — Commercial Release
+
+- Installer
+- Licensing
+- Auto-update
+- Crash reporting
+- User settings
+- Documentation
+
+---
+
+## Project Structure
+
 ```
 BillboardAI/
 
@@ -53,7 +100,9 @@ Nothing is mixed together.
 
 ---
 
-# SCRAPER 2.0
+## Technical Design Notes
+
+### Scraper 2.0
 
 Instead of
 
@@ -85,7 +134,7 @@ We now have everything.
 
 ---
 
-# Logo Detection 2.0
+### Logo Detection 2.0
 
 Instead of
 
@@ -137,7 +186,7 @@ Use screenshot crop.
 
 ---
 
-# Color Detection
+### Color Detection
 
 Don't read CSS.
 
@@ -173,7 +222,7 @@ This is how Adobe does it.
 
 ---
 
-# AI Headline
+### AI Headline
 
 Instead of
 
@@ -209,7 +258,7 @@ Much better.
 
 ---
 
-# Hero Image
+### Hero Image
 
 We'll locate
 
@@ -225,7 +274,7 @@ Use as billboard background.
 
 ---
 
-# Designer
+### Designer
 
 We'll build templates.
 
@@ -277,7 +326,7 @@ The AI picks one.
 
 ---
 
-# Dynamic Fonts
+### Dynamic Fonts
 
 Instead of
 
@@ -289,7 +338,6 @@ always...
 
 ```
 while width > max
-
 font -= 2
 ```
 
@@ -297,7 +345,7 @@ Perfect fit.
 
 ---
 
-# Perspective
+### Perspective
 
 Current
 
@@ -345,7 +393,7 @@ Looks installed.
 
 ---
 
-# AI Quality Check
+### AI Quality Check
 
 Before upload
 
@@ -371,7 +419,7 @@ Generate another layout.
 
 ---
 
-# Logging
+### Logging
 
 Console becomes
 
@@ -403,7 +451,7 @@ ABC Roofing
 
 ---
 
-# Smartlead
+### Smartlead
 
 Output
 
@@ -427,7 +475,7 @@ Ready to import.
 
 ---
 
-# Even Better...
+### Even Better...
 
 I wouldn't stop there.
 
@@ -451,7 +499,7 @@ Generate another.
 
 ---
 
-# My Favorite Feature
+### My Favorite Feature
 
 This is the one I think will make people reply.
 
@@ -485,7 +533,7 @@ Every image feels custom.
 
 ---
 
-# How I'd Build This
+## How I'd Build This
 
 I would not dump 3,000 lines into one file. I would build it like commercial software:
 
@@ -529,6 +577,7 @@ mkdir BillboardAI
 cd BillboardAI
 python -m venv .venv
 ```
+
 4. Activate the virtual environment:
 
 - Windows:
@@ -536,17 +585,20 @@ python -m venv .venv
 ```
 .venv\Scripts\activate
 ```
+
 - macOS/Linux:
 
 ```
 source .venv/bin/activate
 ```
+
 5. Install the packages listed above.
 6. Run:
 
 ```
 playwright install chromium
 ```
+
 7. Create the folder structure shown above.
 8. Add your fonts (Montserrat is a great default) and your cart corral background image.
 9. Commit the empty project to Git so you can safely iterate:

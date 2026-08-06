@@ -19,8 +19,9 @@ import sys
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QThread, QTimer
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 
+from gui.engine_bridge import generate
 from gui.models.app_settings import DEFAULT_OUTPUT_FOLDER, AppSettings
 from gui.models.mockup_concept import MockupConcept
 from gui.models.mockup_request import MockupRequest
@@ -68,15 +69,6 @@ class BillboardController:
         """Return the current project (or None if no project is open)."""
         return self._project
 
-    def _require_window(self) -> MainWindow:
-        """Return the attached main window.
-
-        Raises RuntimeError if called before :meth:`attach`.
-        """
-        if self._window is None:
-            raise RuntimeError("Controller is not attached to a MainWindow")
-        return self._window
-
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -106,27 +98,22 @@ class BillboardController:
         if not last_path or not os.path.isfile(last_path):
             return
 
-        window = self._require_window()
+        if self._window is None:
+            return
 
-        msg = QMessageBox(window)
+        msg = QMessageBox(self._window)
         msg.setWindowTitle("BillboardAI")
         msg.setText(f"A previous project was found:\n{last_path}")
         msg.setInformativeText("Restore the previous project?")
-        # Qt6 has no RestoreButton; Yes/No with custom labels is the
-        # type-safe equivalent of the old Restore/Discard pattern.
-        msg.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        msg.setEscapeButton(QMessageBox.StandardButton.No)
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setEscapeButton(QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.Yes)
 
         # Relabel buttons.
-        restore_btn = msg.button(QMessageBox.StandardButton.Yes)
-        if restore_btn is not None:
-            restore_btn.setText("Restore")
-        discard_btn = msg.button(QMessageBox.StandardButton.No)
-        if discard_btn is not None:
-            discard_btn.setText("New Project")
+        restore_btn = msg.button(QMessageBox.Yes)
+        restore_btn.setText("Restore")
+        discard_btn = msg.button(QMessageBox.No)
+        discard_btn.setText("New Project")
 
         msg.exec()
         if msg.clickedButton() is restore_btn:
@@ -136,12 +123,11 @@ class BillboardController:
 
     def _restore_project(self, project_path: str) -> None:
         """Load an existing project from disk."""
-        window = self._require_window()
         try:
             self._project = Project.load(project_path)
             self._settings.update_last_project(project_path)
             self._populate_project_ui()
-            window.set_status(f"Project loaded: {self._project.company}")
+            self._window.set_status(f"Project loaded: {self._project.company}")
             logger.info("Restored project: %s", project_path)
         except (OSError, KeyError, ValueError) as exc:
             logger.error("Could not restore project: %s", exc)
@@ -153,11 +139,10 @@ class BillboardController:
 
     def _new_project(self) -> None:
         """Clear any existing project and reset to a blank state."""
-        window = self._require_window()
         self._project = None
-        window.home_page.clear_result()
-        window.home_page.set_concepts([])
-        window.set_status("Ready — enter a URL and click Generate Mockup.")
+        self._window.home_page.clear_result()
+        self._window.home_page.set_concepts([])
+        self._window.set_status("Ready — enter a URL and click Generate Mockup.")
 
     # ------------------------------------------------------------------
     # Output folder
@@ -166,18 +151,15 @@ class BillboardController:
         """Open a folder picker and update the output selector."""
         if self._window is None:
             return
-        window = self._window
-        selector = window.home_page.output_selector
+        selector = self._window.home_page.output_selector
         current = selector.folder() or DEFAULT_OUTPUT_FOLDER
-        from PySide6.QtWidgets import QFileDialog
-
         selected = QFileDialog.getExistingDirectory(
-            window, "Select Output Folder", current
+            self._window, "Select Output Folder", current
         )
         if selected:
             selector.set_folder(selected)
-            window.set_output_folder_status(selected)
-            window.set_status(f"Output folder set to: {selected}")
+            self._window.set_output_folder_status(selected)
+            self._window.set_status(f"Output folder set to: {selected}")
             logger.info("Output folder set to: %s", selected)
 
     def open_output_folder(self) -> None:
@@ -221,14 +203,13 @@ class BillboardController:
         """Copy the generated image path to the clipboard."""
         if self._window is None:
             return
-        window = self._window
-        path = window.home_page.preview_panel.image_path()
+        path = self._window.home_page.preview_panel.image_path()
         if not path:
             return
         from PySide6.QtWidgets import QApplication
 
         QApplication.clipboard().setText(path)
-        window.set_status("File path copied to clipboard.")
+        self._window.set_status("File path copied to clipboard.")
         logger.info("Copied file path to clipboard: %s", path)
 
     # ------------------------------------------------------------------
@@ -239,8 +220,7 @@ class BillboardController:
         if self._window is None or self._is_running():
             return
 
-        window = self._window
-        page = window.home_page
+        page = self._window.home_page
 
         # Normalize and validate the URL.
         url = normalize_url(page.url_input.text())
@@ -270,7 +250,7 @@ class BillboardController:
         )
 
         self._set_busy(True)
-        window.set_status("Generating billboard...")
+        self._window.set_status("Generating billboard...")
         page.progress_panel.reset()
         page.clear_result()
 
@@ -281,11 +261,10 @@ class BillboardController:
         """Clear the current result and focus the URL field."""
         if self._window is None:
             return
-        window = self._window
-        page = window.home_page
+        page = self._window.home_page
         page.clear_result()
         page.progress_panel.reset()
-        window.set_status("Ready")
+        self._window.set_status("Ready")
         page.url_input.setFocus()
         logger.info("New mockup requested")
 
@@ -313,17 +292,15 @@ class BillboardController:
         """Update the progress bar, stage label, and status bar."""
         if self._window is None:
             return
-        window = self._window
-        page = window.home_page
+        page = self._window.home_page
         page.progress_panel.set_progress(percent, message, stage)
-        window.set_status(message)
+        self._window.set_status(message)
 
     def _on_finished(self, result: MockupResult) -> None:
         """Handle a completed generation."""
         if self._window is None:
             return
-        window = self._window
-        page = window.home_page
+        page = self._window.home_page
 
         if result.success:
             self._handle_successful_generation(result)
@@ -331,9 +308,9 @@ class BillboardController:
             page.recent_websites.set_websites(self._recent.websites())
             logger.info("Generation completed: %s", result.preview_path)
         else:
-            window.set_status("Generation failed")
+            self._window.set_status("Generation failed")
             QMessageBox.critical(
-                window,
+                self._window,
                 "Generation Failed",
                 result.message or "An unknown error occurred.",
             )
@@ -343,8 +320,7 @@ class BillboardController:
 
     def _handle_successful_generation(self, result: MockupResult) -> None:
         """Create or update the project with a new concept from the result."""
-        window = self._require_window()
-        page = window.home_page
+        page = self._window.home_page
 
         # Create or reuse the project.
         if self._project is None:
@@ -387,7 +363,7 @@ class BillboardController:
         page.add_concept(concept)
         page.set_result(result)
         self._populate_project_ui()
-        window.set_status("✓ Mockup generated successfully")
+        self._window.set_status("✓ Mockup generated successfully")
         self._show_success_notification()
 
     def _populate_project_ui(self) -> None:
@@ -406,23 +382,21 @@ class BillboardController:
         """Handle gallery selection — update project and UI, no regeneration."""
         if self._project is None or self._window is None:
             return
-        window = self._window
         self._project.select_concept(concept_id)
         concept = self._project.get_concept(concept_id)
         if concept:
-            page = window.home_page
+            page = self._window.home_page
             page.preview_panel.set_concept(concept)
             page.details_panel.set_concept(concept)
-            window.set_status(f"Selected concept {concept_id[:8]}...")
+            self._window.set_status(f"Selected concept {concept_id[:8]}...")
 
     def _on_failed(self, error: str) -> None:
         """Handle an unexpected worker failure."""
         if self._window is None:
             return
-        window = self._window
-        window.set_status("Generation failed")
+        self._window.set_status("Generation failed")
         QMessageBox.critical(
-            window,
+            self._window,
             "Generation Failed",
             f"An unexpected error occurred:\n{error}",
         )
@@ -451,9 +425,8 @@ class BillboardController:
         """Populate the URL field when a recent website is selected."""
         if self._window is None:
             return
-        window = self._window
-        window.home_page.url_input.setText(url)
-        window.set_status(f"Selected: {url}")
+        self._window.home_page.url_input.setText(url)
+        self._window.set_status(f"Selected: {url}")
         logger.info("Recent website selected: %s", url)
 
     # ------------------------------------------------------------------
@@ -466,30 +439,25 @@ class BillboardController:
         """Enable/disable interactive controls during generation."""
         if self._window is None:
             return
-        window = self._window
-        page = window.home_page
+        page = self._window.home_page
         page.url_input.setEnabled(not busy)
         page.template_combo.setEnabled(not busy)
         page.output_selector.setEnabled(not busy)
         page.generate_button.setEnabled(not busy)
-        window.toolbar_generate.setEnabled(not busy)
+        self._window.toolbar_generate.setEnabled(not busy)
 
     def _show_success_notification(self) -> None:
         """Briefly show a success message in the status bar."""
         if self._window is None:
             return
-        window = self._window
         if self._success_timer is not None:
             self._success_timer.stop()
-        window.set_status("✓ Mockup generated successfully")
-
-        def _reset_status() -> None:
-            if self._window is not None:
-                self._window.set_status("✓ Ready")
-
-        timer = QTimer(window)
+        self._window.set_status("✓ Mockup generated successfully")
+        timer = QTimer(self._window)
         timer.setSingleShot(True)
-        timer.timeout.connect(_reset_status)
+        timer.timeout.connect(
+            lambda: self._window.set_status("✓ Ready") if self._window else None
+        )
         timer.start(4000)
         self._success_timer = timer
 
