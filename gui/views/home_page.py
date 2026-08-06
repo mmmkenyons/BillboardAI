@@ -1,6 +1,7 @@
 """Home page for the BillboardAI GUI.
 
-Assembles the reusable widgets into the main input/preview layout.
+Assembles the reusable widgets into a vertical layout where the generated
+mockup preview is the visual centerpiece.
 """
 
 from __future__ import annotations
@@ -15,18 +16,22 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
+from gui.models.mockup_result import MockupResult
 from gui.widgets.header import Header
+from gui.widgets.mockup_details_panel import MockupDetailsPanel
 from gui.widgets.output_selector import OutputSelector
 from gui.widgets.preview_panel import PreviewPanel
 from gui.widgets.progress_panel import ProgressPanel
+from gui.widgets.recent_websites import RecentWebsites
 
 
 class HomePage(QWidget):
-    """Main home view: input form, preview, progress, and status."""
+    """Main home view: input form, preview, details, and recent websites."""
 
     TEMPLATES = [
         ("Contractor", "contractor"),
@@ -50,19 +55,24 @@ class HomePage(QWidget):
         root_layout.addWidget(self._build_input_form(), stretch=0)
         root_layout.addWidget(self._build_action_row())
 
-        # Content area: preview panel on the right, status/progress bottom.
-        content_layout = QHBoxLayout()
-        content_layout.setSpacing(16)
-
-        self.preview_panel = PreviewPanel(self)
-        content_layout.addWidget(self.preview_panel, stretch=3)
-
-        root_layout.addLayout(content_layout, stretch=1)
-
         self.progress_panel = ProgressPanel(self)
         root_layout.addWidget(self.progress_panel)
 
-        root_layout.addWidget(self._build_status_bar())
+        # Resizable content area: preview / details / recent websites.
+        self.splitter = QSplitter(Qt.Orientation.Vertical, self)
+
+        self.preview_panel = PreviewPanel(self.splitter)
+        self.details_panel = MockupDetailsPanel(self.splitter)
+        self.recent_websites = RecentWebsites(self.splitter)
+
+        self.splitter.addWidget(self.preview_panel)
+        self.splitter.addWidget(self.details_panel)
+        self.splitter.addWidget(self.recent_websites)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 1)
+
+        root_layout.addWidget(self.splitter, stretch=1)
 
     def _build_input_form(self) -> QFrame:
         """Build the URL / template / output folder input section."""
@@ -110,17 +120,18 @@ class HomePage(QWidget):
 
         return container
 
-    def _build_status_bar(self) -> QWidget:
-        """Build the status message label."""
-        container = QWidget(self)
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_result(self, result: MockupResult) -> None:
+        """Populate the preview and details panels from a result."""
+        self.preview_panel.set_image(result.preview_path)
+        self.details_panel.set_result(result)
 
-        self.status_label = QLabel("Ready", container)
-        self.status_label.setObjectName("statusLabel")
-
-        layout.addWidget(self.status_label)
-        return container
+    def clear_result(self) -> None:
+        """Reset the preview and details panels to their empty states."""
+        self.preview_panel.clear()
+        self.details_panel.clear()
 
     # ------------------------------------------------------------------
     # Backward-compatible attribute access

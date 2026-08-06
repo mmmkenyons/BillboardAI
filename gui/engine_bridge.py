@@ -14,6 +14,7 @@ from engine.scraper.site import WebsiteScraper
 
 from gui.models.mockup_request import MockupRequest
 from gui.models.mockup_result import MockupResult
+from gui.models.project import create_project
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +45,10 @@ def generate(
         scraper = WebsiteScraper(request.url)
         data = scraper.run(progress_callback=progress_callback)
 
-        # Render into the user's chosen output folder.
-        os.makedirs(request.output_folder, exist_ok=True)
+        # Organize output into a per-project folder.
+        project = create_project(request.output_folder, scraper.filename_base)
         output_path = os.path.join(
-            request.output_folder,
+            project.image_path,
             f"{scraper.filename_base}_{request.template}.png",
         )
         rendered_path = scraper.render_billboard(

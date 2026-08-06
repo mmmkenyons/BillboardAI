@@ -1,7 +1,7 @@
 """BillboardAI design spec generator."""
 
 from importlib import import_module
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class BillboardDesignError(Exception):
@@ -74,7 +74,7 @@ def generate_billboard(scrape_data: Dict[str, Any], template_name: str = "contra
     company = scrape_data.get("company") or scrape_data.get("metadata", {}).get("title") or "Brand"
     headline = scrape_data.get("ad_copy") or scrape_data.get("headline") or scrape_data.get("metadata", {}).get("description") or "Make your message unforgettable"
     subtitle = scrape_data.get("metadata", {}).get("description") or ""
-    logo_path = scrape_data.get("logo_path") or scrape_data.get("screenshot_path")
+    logo_path = scrape_data.get("logo_path")
     hero_path = scrape_data.get("hero_url") or scrape_data.get("screenshot_path")
     brand_colors = scrape_data.get("brand_colors") or []
 

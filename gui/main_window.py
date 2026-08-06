@@ -1,24 +1,28 @@
 """BillboardAI main window.
 
-Thin shell hosting the application views in a stacked widget. The Home
-page is shown by default; the other pages are placeholders kept hidden so
-the application appearance is unchanged.
+Thin shell hosting the application views in a stacked widget, with a
+professional menu bar, toolbar, status bar, and keyboard shortcuts.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QStackedWidget,
+    QToolBar,
 )
 
+from gui.resources import APP_VERSION
 from gui.views.batch_page import BatchPage
 from gui.views.history_page import HistoryPage
 from gui.views.home_page import HomePage
@@ -33,12 +37,16 @@ class MainWindow(QMainWindow):
 
     def __init__(self, controller: BillboardController | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("BillboardAI")
+        self.setWindowTitle(f"BillboardAI v{APP_VERSION}")
         self.setMinimumSize(960, 640)
 
         self._controller = controller
 
         self._build_ui()
+        self._build_menu()
+        self._build_toolbar()
+        self._build_status_bar()
+        self._build_shortcuts()
 
         if self._controller is not None:
             self._controller.attach(self)
@@ -63,9 +71,104 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self._stack)
 
+    def _build_menu(self) -> None:
+        menubar = self.menuBar()
+
+        # File menu
+        file_menu = menubar.addMenu("&File")
+        self.new_mockup_action = QAction("&New Mockup", self)
+        self.new_mockup_action.setShortcut(QKeySequence("Ctrl+N"))
+        self.new_mockup_action.triggered.connect(self._on_new_mockup)
+        file_menu.addAction(self.new_mockup_action)
+
+        self.open_output_action = QAction("&Open Output Folder", self)
+        self.open_output_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.open_output_action.triggered.connect(self._on_open_output_folder)
+        file_menu.addAction(self.open_output_action)
+
+        file_menu.addSeparator()
+        exit_action = QAction("E&xit", self)
+        exit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # View menu
+        view_menu = menubar.addMenu("&View")
+        home_action = QAction("&Home", self)
+        home_action.triggered.connect(lambda: self.show_page("home"))
+        view_menu.addAction(home_action)
+
+        history_action = QAction("&History", self)
+        history_action.setEnabled(False)
+        view_menu.addAction(history_action)
+
+        batch_action = QAction("&Batch", self)
+        batch_action.setEnabled(False)
+        view_menu.addAction(batch_action)
+
+        # Tools menu
+        tools_menu = menubar.addMenu("&Tools")
+        settings_action = QAction("&Settings", self)
+        settings_action.setEnabled(False)
+        tools_menu.addAction(settings_action)
+
+        batch_mode_action = QAction("&Batch Mode", self)
+        batch_mode_action.setEnabled(False)
+        tools_menu.addAction(batch_mode_action)
+
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        about_action = QAction("&About BillboardAI", self)
+        about_action.triggered.connect(self._on_about)
+        help_menu.addAction(about_action)
+
+    def _build_toolbar(self) -> None:
+        toolbar = QToolBar("Main Toolbar", self)
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        self.toolbar_generate = QAction("Generate", self)
+        self.toolbar_generate.triggered.connect(self._on_generate)
+        toolbar.addAction(self.toolbar_generate)
+
+        self.toolbar_open_folder = QAction("Open Folder", self)
+        self.toolbar_open_folder.triggered.connect(self._on_open_output_folder)
+        toolbar.addAction(self.toolbar_open_folder)
+
+        toolbar.addSeparator()
+        settings_action = QAction("Settings", self)
+        settings_action.setEnabled(False)
+        toolbar.addAction(settings_action)
+
+    def _build_status_bar(self) -> None:
+        self.status_bar = self.statusBar()
+        self.status_message = QLabel("Ready", self)
+        self.status_bar.addWidget(self.status_message, 1)
+
+        self.version_label = QLabel(f"Version {APP_VERSION}", self)
+        self.status_bar.addPermanentWidget(self.version_label)
+
+        self.output_folder_label = QLabel("", self)
+        self.status_bar.addPermanentWidget(self.output_folder_label)
+
+    def _build_shortcuts(self) -> None:
+        # Ctrl+Enter -> Generate
+        generate_shortcut = QAction(self)
+        generate_shortcut.setShortcut(QKeySequence("Ctrl+Return"))
+        generate_shortcut.triggered.connect(self._on_generate)
+        self.addAction(generate_shortcut)
+
     # ------------------------------------------------------------------
-    # Navigation (for future use)
+    # Public API
     # ------------------------------------------------------------------
+    def set_status(self, message: str) -> None:
+        """Update the status bar message."""
+        self.status_message.setText(message)
+
+    def set_output_folder_status(self, folder: str) -> None:
+        """Update the output folder shown in the status bar."""
+        self.output_folder_label.setText(f"Output Folder: {folder}")
+
     def show_page(self, page: str) -> None:
         """Switch to the named page ('home', 'settings', 'batch', 'history')."""
         pages = {
@@ -77,6 +180,37 @@ class MainWindow(QMainWindow):
         widget = pages.get(page)
         if widget is not None:
             self._stack.setCurrentWidget(widget)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+    def _on_generate(self) -> None:
+        if self._controller is not None:
+            self._controller.generate_mockup()
+
+    def _on_new_mockup(self) -> None:
+        if self._controller is not None:
+            self._controller.new_mockup()
+
+    def _on_open_output_folder(self) -> None:
+        if self._controller is not None:
+            self._controller.open_output_folder()
+
+    def _on_about(self) -> None:
+        import platform
+        import sys
+
+        from PySide6.QtCore import qVersion
+
+        QMessageBox.about(
+            self,
+            "About BillboardAI",
+            f"<h3>BillboardAI v{APP_VERSION}</h3>"
+            "<p>AI-Powered Billboard Mockup Generator</p>"
+            f"<p>Python {platform.python_version()}<br>"
+            f"Qt {qVersion()}</p>"
+            "<p>© 2026 BillboardAI. All rights reserved.</p>",
+        )
 
     # ------------------------------------------------------------------
     # Backward-compatible attribute access (delegated to HomePage)
@@ -107,4 +241,4 @@ class MainWindow(QMainWindow):
 
     @property
     def status_label(self) -> QLabel:
-        return self.home_page.status_label
+        return self.status_message

@@ -25,6 +25,36 @@ def test_generate_billboard_includes_template_fields():
     assert spec["cta_text"] == "Book Now"
 
 
+def test_logo_path_does_not_fall_back_to_screenshot():
+    """When no logo is found, logo_path should be None, not screenshot_path."""
+    scrape_data = {
+        "url": "https://example.com",
+        "company": "Example Co",
+        "logo_path": None,
+        "screenshot_path": "/fake/screenshot.png",
+        "hero_url": None,
+    }
+
+    spec = generate_billboard(scrape_data, template_name="contractor")
+
+    assert spec["logo_path"] is None
+    assert spec["hero_path"] == "/fake/screenshot.png"
+
+
+def test_logo_path_uses_real_logo_when_available():
+    """When a logo exists, it should be used as logo_path, not screenshot."""
+    scrape_data = {
+        "company": "TNR Roofing",
+        "logo_path": "/fake/logo.png",
+        "screenshot_path": "/fake/screenshot.png",
+        "hero_url": "/fake/hero.png",
+    }
+
+    spec = generate_billboard(scrape_data, template_name="contractor")
+
+    assert spec["logo_path"] == "/fake/logo.png"
+
+
 def test_auto_template_selection_uses_realtor():
     scrape_data = {
         "company": "Example Realty",
