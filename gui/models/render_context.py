@@ -1,0 +1,393 @@
+"""Complete rendering contract for BillboardAI.
+
+``render_context`` is the single object sufficient to recreate a billboard
+without scraping, Playwright, or AI. Designer + renderer consume this
+contract (via :func:`to_render_spec`) rather than ad-hoc scrape dicts.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from typing import Any
+
+
+RENDER_CONTEXT_VERSION = 1
+
+_DEFAULT_CANVAS = {"width": 1600, "height": 900}
+
+
+def _theme_from_template(template: str) -> dict[str, Any]:
+    """Resolve theme fields from a template module (safe defaults on failure)."""
+    name = template or "contractor"
+    try:
+        from engine.designer import load_template
+
+        theme = load_template(name)
+    except Exception:  # noqa: BLE001 - never break persistence/load
+        theme = {
+            "background_color": "#FFFFFF",
+            "primary_color": "#222222",
+            "accent_color": "#1F77B4",
+            "text_color": "#111111",
+            "button_color": "#FF7F0E",
+            "font_family": "arial.ttf",
+            "layout_style": "classic",
+            "cta_text": "Learn More",
+        }
+    return theme
+
+
+@dataclass
+class RenderContext:
+    """Versioned, complete inputs required to paint a billboard."""
+
+    version: int = RENDER_CONTEXT_VERSION
+
+    # --- Copy / identity ---
+    company_name: str = ""
+    headline: str = ""
+    cta: str = ""
+    subtitle: str = ""
+    template: str = "contractor"
+
+    # --- Assets (prefer project-local paths after ingest) ---
+    logo_image: str = ""
+    hero_image: str = ""
+    background_image: str = ""
+
+    # --- Theme (resolved at generation; authoritative for paint) ---
+    primary_color: str = "#222222"
+    secondary_color: str = "#FFFFFF"
+    accent_color: str = "#1F77B4"
+    text_color: str = "#111111"
+    button_color: str = "#FF7F0E"
+    background_color: str = "#FFFFFF"
+
+    # --- Typography / layout ---
+    fonts: dict = field(default_factory=lambda: {"family": "arial.ttf"})
+    layout: dict = field(
+        default_factory=lambda: {
+            "style": "classic",
+            "canvas": dict(_DEFAULT_CANVAS),
+        }
+    )
+
+    # --- Provenance ---
+    quality_score: float = 0.0
+    source_url: str = ""
+    brand_colors: list = field(default_factory=list)
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_scrape(
+        cls,
+        scrape_data: dict[str, Any],
+        *,
+        template: str = "contractor",
+        source_url: str = "",
+    ) -> "RenderContext":
+        """Build a complete contract from scraper output + template theme."""
+        data = scrape_data or {}
+        meta_raw = data.get("metadata")
+        metadata: dict[str, Any] = meta_raw if isinstance(meta_raw, dict) else {}
+        template_name = template or "contractor"
+        theme = _theme_from_template(template_name)
+
+        company = (
+            data.get("company")
+            or metadata.get("title")
+            or ""
+        )
+        headline = (
+            data.get("ad_copy")
+            or data.get("headline")
+            or metadata.get("description")
+            or ""
+        )
+        subtitle = metadata.get("description") or data.get("subtitle") or ""
+        if subtitle and subtitle == headline:
+            subtitle = ""
+
+        hero = (
+            data.get("hero_path")
+            or data.get("screenshot_path")
+            or data.get("screenshot_file")
+            or ""
+        )
+        # hero_url may be a remote URL — only keep if it looks like a local path later;
+        # still store string for controller to evaluate.
+        if not hero:
+            hero_url = data.get("hero_url") or ""
+            if isinstance(hero_url, str) and hero_url and not hero_url.lower().startswith(
+                ("http://", "https://")
+            ):
+                hero = hero_url
+
+        screenshot = data.get("screenshot_path") or data.get("screenshot_file") or ""
+        logo = data.get("logo_path") or ""
+        brand_colors = list(data.get("brand_colors") or [])
+
+        # secondary_color: background, or second brand color if present.
+        secondary = theme.get("background_color") or "#FFFFFF"
+        if len(brand_colors) >= 2 and brand_colors[1]:
+            secondary = str(brand_colors[1])
+
+        primary = theme.get("primary_color") or "#222222"
+        if brand_colors and brand_colors[0]:
+            # Prefer extracted brand as primary accent companion; keep theme primary
+            # unless empty. Store brand in brand_colors; theme remains paint source.
+            pass
+
+        cta = theme.get("cta_text") or "Learn More"
+        font_family = theme.get("font_family") or "arial.ttf"
+        layout_style = theme.get("layout_style") or "classic"
+
+        return cls(
+            version=RENDER_CONTEXT_VERSION,
+            company_name=str(company or ""),
+            headline=str(headline or ""),
+            cta=str(cta or ""),
+            subtitle=str(subtitle or ""),
+            template=template_name,
+            logo_image=str(logo or ""),
+            hero_image=str(hero or screenshot or ""),
+            background_image=str(screenshot or hero or ""),
+            primary_color=str(primary),
+            secondary_color=str(secondary),
+            accent_color=str(theme.get("accent_color") or "#1F77B4"),
+            text_color=str(theme.get("text_color") or "#111111"),
+            button_color=str(theme.get("button_color") or "#FF7F0E"),
+            background_color=str(theme.get("background_color") or "#FFFFFF"),
+            fonts={"family": str(font_family)},
+            layout={
+                "style": str(layout_style),
+                "canvas": dict(_DEFAULT_CANVAS),
+            },
+            quality_score=float(data.get("quality_score", 0) or 0),
+            source_url=str(source_url or data.get("url") or ""),
+            brand_colors=[str(c) for c in brand_colors],
+        )
+
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "RenderContext":
+        """Deserialize, migrating legacy (Phase A) partial contexts."""
+        if not data:
+            return cls()
+        raw = dict(data)
+        version = int(raw.get("version") or 0)
+
+        # --- Legacy key migration (v0 / Phase A) ---
+        if "company_name" not in raw and "company" in raw:
+            raw["company_name"] = raw.get("company") or ""
+        if "logo_image" not in raw:
+            raw["logo_image"] = raw.get("logo_path") or ""
+        if "hero_image" not in raw:
+            raw["hero_image"] = (
+                raw.get("hero_path")
+                or raw.get("screenshot_path")
+                or ""
+            )
+        if "background_image" not in raw:
+            raw["background_image"] = raw.get("screenshot_path") or raw.get(
+                "hero_image"
+            ) or ""
+
+        template = raw.get("template") or "contractor"
+        theme = _theme_from_template(str(template))
+
+        # Fill missing theme from template defaults.
+        def _color(key: str, theme_key: str, fallback: str) -> str:
+            val = raw.get(key)
+            if val:
+                return str(val)
+            return str(theme.get(theme_key) or fallback)
+
+        fonts_raw = raw.get("fonts")
+        fonts: dict[str, Any] = fonts_raw if isinstance(fonts_raw, dict) else {}
+        if not fonts.get("family"):
+            fonts = {
+                **fonts,
+                "family": theme.get("font_family") or "arial.ttf",
+            }
+
+        layout_raw = raw.get("layout")
+        layout: dict[str, Any] = layout_raw if isinstance(layout_raw, dict) else {}
+        style = layout.get("style") or theme.get("layout_style") or "classic"
+        canvas_raw = layout.get("canvas")
+        canvas: dict[str, Any] = canvas_raw if isinstance(canvas_raw, dict) else {}
+        canvas = {
+            "width": int(canvas.get("width") or _DEFAULT_CANVAS["width"]),
+            "height": int(canvas.get("height") or _DEFAULT_CANVAS["height"]),
+        }
+
+        cta = raw.get("cta") or theme.get("cta_text") or "Learn More"
+
+        # subtitle from legacy metadata
+        subtitle = raw.get("subtitle") or ""
+        meta_raw = raw.get("metadata")
+        if not subtitle and isinstance(meta_raw, dict):
+            subtitle = meta_raw.get("description") or ""
+
+        brand_colors = raw.get("brand_colors") or []
+        if not isinstance(brand_colors, list):
+            brand_colors = []
+
+        secondary = raw.get("secondary_color") or theme.get("background_color") or "#FFFFFF"
+
+
+        return cls(
+            version=RENDER_CONTEXT_VERSION if version < 1 else version,
+            company_name=str(raw.get("company_name") or ""),
+            headline=str(raw.get("headline") or ""),
+            cta=str(cta or ""),
+            subtitle=str(subtitle or ""),
+            template=str(template),
+            logo_image=str(raw.get("logo_image") or ""),
+            hero_image=str(raw.get("hero_image") or ""),
+            background_image=str(raw.get("background_image") or ""),
+            primary_color=_color("primary_color", "primary_color", "#222222"),
+            secondary_color=str(secondary),
+            accent_color=_color("accent_color", "accent_color", "#1F77B4"),
+            text_color=_color("text_color", "text_color", "#111111"),
+            button_color=_color("button_color", "button_color", "#FF7F0E"),
+            background_color=_color("background_color", "background_color", "#FFFFFF"),
+            fonts={"family": str(fonts.get("family") or "arial.ttf")},
+            layout={"style": str(style), "canvas": canvas},
+            quality_score=float(raw.get("quality_score") or 0),
+            source_url=str(raw.get("source_url") or ""),
+            brand_colors=[str(c) for c in brand_colors],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for project.json."""
+        data = asdict(self)
+        data["version"] = RENDER_CONTEXT_VERSION
+        return data
+
+    def merge_overrides(self, **overrides: Any) -> "RenderContext":
+        """Return a copy with concept-level field overrides applied.
+
+        Supported override keys (GUI-facing and contract names):
+        headline, cta, company_name, company, template, logo_image, logo_path,
+        hero_image, subtitle.
+        """
+        ctx = RenderContext.from_dict(self.to_dict())
+        mapping = {
+            "headline": "headline",
+            "cta": "cta",
+            "company_name": "company_name",
+            "company": "company_name",
+            "template": "template",
+            "logo_image": "logo_image",
+            "logo_path": "logo_image",
+            "hero_image": "hero_image",
+            "subtitle": "subtitle",
+        }
+        template_changed = False
+        for key, value in overrides.items():
+            attr = mapping.get(key)
+            if attr is None or value is None:
+                continue
+            if attr == "template" and str(value) != ctx.template:
+                template_changed = True
+            setattr(ctx, attr, value if not isinstance(value, str) else value)
+
+        if template_changed:
+            ctx.apply_template_theme(ctx.template, preserve_user_cta=bool(overrides.get("cta")))
+        return ctx
+
+    def apply_template_theme(self, template: str, *, preserve_user_cta: bool = False) -> None:
+        """Re-resolve colors/fonts/layout from a template module in-place."""
+        template_name = template or "contractor"
+        theme = _theme_from_template(template_name)
+        self.template = template_name
+        self.primary_color = str(theme.get("primary_color") or self.primary_color)
+        self.secondary_color = str(theme.get("background_color") or self.secondary_color)
+        self.accent_color = str(theme.get("accent_color") or self.accent_color)
+        self.text_color = str(theme.get("text_color") or self.text_color)
+        self.button_color = str(theme.get("button_color") or self.button_color)
+        self.background_color = str(theme.get("background_color") or self.background_color)
+        self.fonts = {"family": str(theme.get("font_family") or "arial.ttf")}
+        layout = self.layout if isinstance(self.layout, dict) else {}
+        canvas_raw = layout.get("canvas")
+        canvas: dict[str, Any] = canvas_raw if isinstance(canvas_raw, dict) else dict(_DEFAULT_CANVAS)
+        self.layout = {
+            "style": str(theme.get("layout_style") or "classic"),
+            "canvas": {
+                "width": int(canvas.get("width") or 1600),
+                "height": int(canvas.get("height") or 900),
+            },
+        }
+        if not preserve_user_cta:
+            self.cta = str(theme.get("cta_text") or self.cta or "Learn More")
+
+
+    def to_render_spec(self) -> dict[str, Any]:
+        """Map this contract to the dict :func:`render_billboard` understands.
+
+        This is the only adapter between the stable contract and the renderer.
+        No scrape keys are required.
+        """
+        layout = self.layout if isinstance(self.layout, dict) else {}
+        canvas_raw = layout.get("canvas")
+        canvas: dict[str, Any] = canvas_raw if isinstance(canvas_raw, dict) else {}
+        fonts = self.fonts if isinstance(self.fonts, dict) else {}
+        hero = self.hero_image or self.background_image or ""
+        return {
+            "template": self.template or "contractor",
+            "selected_template": self.template or "contractor",
+            "canvas": {
+                "width": int(canvas.get("width") or 1600),
+                "height": int(canvas.get("height") or 900),
+            },
+            "background_color": self.background_color or "#FFFFFF",
+            "primary_color": self.primary_color or "#222222",
+            "accent_color": self.accent_color or "#1F77B4",
+            "text_color": self.text_color or "#111111",
+            "button_color": self.button_color or "#FF7F0E",
+            "font_family": fonts.get("family") or "arial.ttf",
+            "layout_style": layout.get("style") or "classic",
+            "cta_text": self.cta or "Learn More",
+            "company": self.company_name or "Brand",
+            "headline": self.headline or "Make your message unforgettable",
+            "subtitle": self.subtitle or "",
+            "logo_path": self.logo_image or "",
+            "hero_path": hero,
+            "brand_colors": list(self.brand_colors or []),
+            "source_url": self.source_url or "",
+        }
+
+
+
+    def with_asset_paths(
+        self,
+        *,
+        logo_image: str | None = None,
+        hero_image: str | None = None,
+        background_image: str | None = None,
+    ) -> "RenderContext":
+        """Return a copy with rewritten asset paths (after project ingest)."""
+        ctx = RenderContext.from_dict(self.to_dict())
+        if logo_image is not None:
+            ctx.logo_image = logo_image
+        if hero_image is not None:
+            ctx.hero_image = hero_image
+        if background_image is not None:
+            ctx.background_image = background_image
+        return ctx
+
+
+def ensure_render_context(data: dict[str, Any] | RenderContext | None) -> RenderContext:
+    """Normalize dict or instance to :class:`RenderContext`."""
+    if isinstance(data, RenderContext):
+        return data
+    return RenderContext.from_dict(data if isinstance(data, dict) else {})
+
+
+def merge_context_dict(base: dict[str, Any] | None, **overrides: Any) -> dict[str, Any]:
+    """Merge overrides into a context dict; return a plain dict (v1)."""
+    ctx = ensure_render_context(base).merge_overrides(**overrides)
+    return ctx.to_dict()

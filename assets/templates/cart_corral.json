@@ -1,0 +1,14 @@
+{
+  "id": "cart_corral",
+  "name": "Grocery Cart Corral",
+  "scene_path": "assets/cart_corral.jpg",
+  "reference_size": [1600, 900],
+  "billboard_quad": [
+    [400, 250],
+    [950, 250],
+    [1000, 480],
+    [350, 520]
+  ],
+  "artwork_aspect": 1.6,
+  "default_artwork_size": [640, 400]
+}

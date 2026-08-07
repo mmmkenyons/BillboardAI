@@ -50,6 +50,7 @@ class MainWindow(QMainWindow):
 
         if self._controller is not None:
             self._controller.attach(self)
+            self.update_toolbar_state()  # Initial state for Sprint 4B toolbar
 
     # ------------------------------------------------------------------
     # UI construction
@@ -131,6 +132,22 @@ class MainWindow(QMainWindow):
         self.toolbar_generate.triggered.connect(self._on_generate)
         toolbar.addAction(self.toolbar_generate)
 
+        # Sprint 4B Phase E1: Toolbar-only actions (gallery is passive view)
+        self.toolbar_new_concept = QAction("Generate New Concept", self)
+        self.toolbar_new_concept.triggered.connect(self._on_generate_new_concept)
+        self.toolbar_new_concept.setEnabled(False)  # Disabled until project/selection
+        toolbar.addAction(self.toolbar_new_concept)
+
+        self.toolbar_duplicate = QAction("Duplicate", self)
+        self.toolbar_duplicate.triggered.connect(self._on_duplicate_concept)
+        self.toolbar_duplicate.setEnabled(False)
+        toolbar.addAction(self.toolbar_duplicate)
+
+        self.toolbar_delete = QAction("Delete", self)
+        self.toolbar_delete.triggered.connect(self._on_delete_concept)
+        self.toolbar_delete.setEnabled(False)
+        toolbar.addAction(self.toolbar_delete)
+
         self.toolbar_open_folder = QAction("Open Folder", self)
         self.toolbar_open_folder.triggered.connect(self._on_open_output_folder)
         toolbar.addAction(self.toolbar_open_folder)
@@ -181,12 +198,58 @@ class MainWindow(QMainWindow):
         if widget is not None:
             self._stack.setCurrentWidget(widget)
 
+    def update_toolbar_state(self) -> None:
+        """Update toolbar button enabled state based on project/selection (Sprint 4B)."""
+        controller = self._controller
+        if controller is None:
+            has_project = False
+            has_selection = False
+        else:
+            project = controller.project
+            has_project = project is not None
+            has_selection = has_project and project.get_selected_concept() is not None
+
+        if hasattr(self, 'toolbar_new_concept'):
+            self.toolbar_new_concept.setEnabled(has_project)
+        if hasattr(self, 'toolbar_duplicate'):
+            self.toolbar_duplicate.setEnabled(has_selection)
+        if hasattr(self, 'toolbar_delete'):
+            self.toolbar_delete.setEnabled(has_selection)
+
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
     def _on_generate(self) -> None:
         if self._controller is not None:
             self._controller.generate_mockup()
+
+    def _on_generate_new_concept(self) -> None:
+        """Sprint 4B Phase E1: Toolbar action for Generate New Concept."""
+        if self._controller is not None:
+            self._controller.generate_new_concept()
+
+    def _on_duplicate_concept(self) -> None:
+        """Toolbar action for Duplicate (controller handles)."""
+        controller = self._controller
+        if controller is not None and controller.project is not None:
+            project = controller.project
+            if project.get_selected_concept():
+                selected_id = project.selected_concept_id
+                if selected_id:
+                    controller.duplicate_concept(selected_id)
+
+    def _on_delete_concept(self) -> None:
+        """Toolbar action for Delete (controller handles confirmation)."""
+        controller = self._controller
+        if controller is None:
+            return
+        project = controller.project
+        if project is None:
+            return
+        if project.get_selected_concept():
+            selected_id = project.selected_concept_id
+            if selected_id:
+                controller.delete_concept(selected_id)
 
     def _on_new_mockup(self) -> None:
         if self._controller is not None:

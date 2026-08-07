@@ -17,7 +17,7 @@
 - [ ] GitHub Remote / Deployment
 
 ## In Progress
-- [ ] Milestone 4 planning
+- [x] Screenshot Validation & Capture Reliability (Sprint complete - validation before RenderContext, robustness, error surfacing, debug diagnostics)
 
 ## Done
 - [x] Create initial project structure

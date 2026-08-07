@@ -122,6 +122,21 @@ QPushButton:disabled {
     background-color: #6a4ce0;
 }
 
+#secondaryButton {
+    background-color: #3a3a5c;
+    color: #e0e0e0;
+    border: 1px solid #7c5cfc;
+    padding: 6px 16px;
+    min-height: 28px;
+}
+#secondaryButton:hover {
+    background-color: #4a4a6c;
+    border-color: #9a7dfd;
+}
+#secondaryButton:pressed {
+    background-color: #2a2a40;
+}
+
 #browseButton {
     background-color: #3a3a5c;
     color: #e0e0e0;

@@ -33,3 +33,4 @@ class MockupResult:
     warnings: list = field(default_factory=list)
     created_at: datetime | None = None
     extra: dict = field(default_factory=dict)
+    capture_error: str = ""  # For ScreenshotValidationError details

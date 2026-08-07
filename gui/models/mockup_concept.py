@@ -11,10 +11,10 @@ from datetime import datetime
 class MockupConcept:
     """A single generated concept within a project.
 
-    Each time the user generates a mockup, a new concept is created and
-    added to the project. The concept is immutable once created (except
-    for the ``selected`` flag); if the user modifies content, a new
-    concept is generated rather than editing in place.
+    Full generation ("Generate New Concept") creates a new concept with
+    source_concept_id and sequential name (Concept 001, etc.). In-place
+    edits update the selected concept and set ``user_modified`` to True.
+    Backward compatible with existing project.json (defaults for new fields).
     """
 
     id: str
@@ -34,6 +34,11 @@ class MockupConcept:
     # Whether this concept is currently selected in the gallery.
     selected: bool = False
 
+    # Lineage for "Generate New Concept" / Duplicate (Sprint 4B Phase E1).
+    source_concept_id: str | None = None
+    # Human-readable sequential name (e.g. "Concept 001").
+    name: str = ""
+
     # Additional metadata from the engine.
     extra: dict = field(default_factory=dict)
 
@@ -46,9 +51,14 @@ class MockupConcept:
         cta: str,
         quality_score: float,
         company_name: str = "",
+        name: str = "",
+        source_concept_id: str | None = None,
         **extra: object,
     ) -> "MockupConcept":
-        """Create a new concept with a fresh UUID."""
+        """Create a new concept with a fresh UUID.
+        
+        Sequential name ("Concept 001") is typically set by Project.create_concept().
+        """
         return cls(
             id=str(uuid.uuid4()),
             image_path=image_path,
@@ -57,11 +67,16 @@ class MockupConcept:
             cta=cta,
             quality_score=quality_score,
             company_name=company_name,
+            name=name,
+            source_concept_id=source_concept_id,
             extra=dict(extra),
         )
 
     def to_dict(self) -> dict:
-        """Serialize to a plain dict for JSON persistence."""
+        """Serialize to a plain dict for JSON persistence.
+        
+        Includes new fields for Sprint 4B Phase E1; old project.json loads gracefully.
+        """
         return {
             "id": self.id,
             "image_path": self.image_path,
@@ -73,12 +88,17 @@ class MockupConcept:
             "created_at": self.created_at.isoformat(),
             "user_modified": self.user_modified,
             "selected": self.selected,
+            "source_concept_id": self.source_concept_id,
+            "name": self.name,
             "extra": self.extra,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "MockupConcept":
-        """Deserialize from a plain dict (e.g. loaded from project.json)."""
+        """Deserialize from a plain dict (e.g. loaded from project.json).
+        
+        Backward compatible: new fields default to None/"" for old files.
+        """
         return cls(
             id=data["id"],
             image_path=data["image_path"],
@@ -92,5 +112,43 @@ class MockupConcept:
             ),
             user_modified=data.get("user_modified", False),
             selected=data.get("selected", False),
+            source_concept_id=data.get("source_concept_id"),
+            name=data.get("name", ""),
             extra=data.get("extra", {}),
         )
+
+    def apply_updates(self, **fields: object) -> list[str]:
+        """Apply in-place field updates. Returns names of fields that changed.
+
+        Always sets ``user_modified`` when any content field changes.
+        Unknown keys are ignored. Supports new Sprint 4B fields.
+        """
+        allowed = {
+            "image_path",
+            "template",
+            "headline",
+            "cta",
+            "quality_score",
+            "company_name",
+            "selected",
+            "extra",
+            "name",
+            "source_concept_id",
+        }
+        changed: list[str] = []
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if getattr(self, key) != value:
+                setattr(self, key, value)
+                changed.append(key)
+        content_keys = {"image_path", "template", "headline", "cta", "company_name", "name"}
+        if any(key in content_keys for key in changed):
+            self.user_modified = True
+        return changed
+
+    def display_name(self) -> str:
+        """Human-readable name for gallery/toolbar (falls back to sequential name)."""
+        return self.name or f"Concept {self.id[:8]}"
+
+

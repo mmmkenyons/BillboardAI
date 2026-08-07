@@ -1,6 +1,14 @@
 """Boundary between the GUI and the existing engine.
 
 The GUI never calls engine modules directly; it goes through this bridge.
+
+**Ownership rule (Sprint 4B):** the controller is the only component allowed
+to create or own a :class:`~gui.models.project.Project`. This bridge never
+creates project directories or ``Project`` objects — it only produces assets
+at paths supplied by the caller.
+
+**Render contract (Phase A.5):** local paint uses a complete
+``render_context`` only — no scrape-shaped dicts on the re-render path.
 """
 
 from __future__ import annotations
@@ -8,17 +16,77 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Callable
+from typing import Any, Callable
 
-from engine.scraper.site import WebsiteScraper
+from engine.renderer.renderer import render_billboard
+from engine.scraper.site import WebsiteScraper, ScreenshotValidationError
 
 from gui.models.mockup_request import MockupRequest
 from gui.models.mockup_result import MockupResult
-from gui.models.project import create_project
+from gui.models.render_context import RenderContext, ensure_render_context
+
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, str, str | None], None]
+
+
+def _report(
+    progress_callback: ProgressCallback | None,
+    percent: int,
+    message: str,
+    stage: str | None = None,
+) -> None:
+    if progress_callback:
+        progress_callback(percent, message, stage)
+
+
+def _ensure_parent_dir(path: str) -> None:
+    """Create the parent directory of ``path`` if needed."""
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
+def build_render_context(
+    data: dict[str, Any],
+    *,
+    template: str = "contractor",
+    source_url: str = "",
+) -> dict[str, Any]:
+    """Build a **complete** v1 render_context dict from scraper data + template.
+
+    Paths may still point at engine cache locations; the controller copies
+    assets into the project and rewrites ``logo_image`` / ``hero_image``.
+    """
+    ctx = RenderContext.from_scrape(
+        data,
+        template=template or "contractor",
+        source_url=source_url,
+    )
+    return ctx.to_dict()
+
+
+def render_from_context(
+    context: dict[str, Any] | RenderContext,
+    output_path: str,
+    progress_callback: ProgressCallback | None = None,
+) -> str:
+    """Paint a billboard using **only** the render_context contract.
+
+    No Playwright. No WebsiteScraper. No AI.
+    """
+    if not output_path:
+        raise ValueError("output_path is required for render_from_context")
+
+    ctx = ensure_render_context(context)
+    _report(progress_callback, 40, "Building design spec...", "design")
+    spec = ctx.to_render_spec()
+
+    _ensure_parent_dir(output_path)
+
+    _report(progress_callback, 70, "Rendering mockup...", "render")
+    return render_billboard(spec, output_path)
 
 
 def generate(
@@ -27,50 +95,169 @@ def generate(
 ) -> MockupResult:
     """Generate a mockup for the given request.
 
-    Translates a :class:`MockupRequest` into the engine's parameters, runs
-    the existing pipeline, and converts the output into a
-    :class:`MockupResult`.
+    The caller **must** supply :attr:`MockupRequest.output_path`. This
+    function never creates a Project — it scrapes, builds a full
+    render_context, and writes the PNG to the supplied path.
     """
     start = time.time()
     result = MockupResult(website=request.url)
 
-    def _report(percent: int, message: str, stage: str | None = None) -> None:
-        if progress_callback:
-            progress_callback(percent, message, stage)
-
     try:
-        logger.info("Starting generation for %s", request.url)
-        _report(0, "Starting...", "start")
+        if not request.output_path:
+            raise ValueError(
+                "MockupRequest.output_path is required; "
+                "the controller must supply the render destination."
+            )
+
+        logger.info("Starting generation for %s → %s", request.url, request.output_path)
+        _report(progress_callback, 0, "Starting...", "start")
 
         scraper = WebsiteScraper(request.url)
-        data = scraper.run(progress_callback=progress_callback)
+        try:
+            data = scraper.run(progress_callback=progress_callback)
+        except ScreenshotValidationError as e:
+            result.success = False
+            result.message = f"Unable to capture a usable screenshot from this website. {str(e)}"
+            result.capture_error = str(e)
+            result.warnings.append("Screenshot validation failed - invalid/blank capture (uniform color or low variance). Try a different site or enable debug for diagnostics.")
+            logger.warning("ScreenshotValidationError: %s", e)
+            result.elapsed_time = time.time() - start
+            return result
 
-        # Organize output into a per-project folder.
-        project = create_project(request.output_folder, scraper.filename_base)
-        output_path = os.path.join(
-            project.image_path,
-            f"{scraper.filename_base}_{request.template}.png",
-        )
-        rendered_path = scraper.render_billboard(
-            request.template, output_path, progress_callback=progress_callback
+        template_name = request.template or "contractor"
+        render_context = build_render_context(
+            data,
+            template=template_name,
+            source_url=request.url,
         )
 
-        # Populate as many fields as the engine provides.
+        # Prefer painting from the contract (single path with re_render).
+        _ensure_parent_dir(request.output_path)
+        _report(progress_callback, 70, "Rendering Mockup", "render")
+        rendered_path = render_from_context(
+            render_context,
+            request.output_path,
+            progress_callback=progress_callback,
+        )
+
+        # If engine quality gate historically swapped templates, keep request
+        # template as source of truth for the contract (GUI chose it).
+        if isinstance(scraper.last_data, dict):
+            # Merge any quality fields from analysis into context.
+            render_context = dict(render_context)
+            if scraper.last_data.get("quality_score") is not None:
+                render_context["quality_score"] = float(
+                    scraper.last_data.get("quality_score") or 0
+                )
+
+        ctx_obj = ensure_render_context(render_context)
+
         result.success = True
         result.message = "Mockup generated successfully."
-        result.company_name = data.get("company", "")
-        result.headline = data.get("ad_copy") or data.get("headline", "")
-        result.quality_score = float(data.get("quality_score", 0) or 0)
-        result.logo_path = data.get("logo_path", "") or ""
+        result.company_name = ctx_obj.company_name
+        result.headline = ctx_obj.headline
+        result.cta = ctx_obj.cta
+        result.quality_score = float(ctx_obj.quality_score or 0)
+        result.logo_path = ctx_obj.logo_image
         result.preview_path = rendered_path
         result.output_path = rendered_path
-        # cta is left blank: the engine does not expose the CTA text in its
-        # returned data. upload_url is also left blank: this flow does not upload.
+        result.extra = {
+            "template": ctx_obj.template,
+            "render_context": ctx_obj.to_dict(),
+            "hero_path": ctx_obj.hero_image,
+            "screenshot_path": ctx_obj.background_image,
+            "brand_colors": list(ctx_obj.brand_colors or []),
+            "filename_base": getattr(scraper, "filename_base", ""),
+        }
+        _report(progress_callback, 100, "Complete", "done")
         logger.info("Generation finished: %s", rendered_path)
     except Exception as exc:  # noqa: BLE001 - never crash the GUI
         logger.exception("Generation failed")
         result.success = False
         result.message = f"Generation failed: {exc}"
+        result.warnings.append(str(exc))
+
+    result.elapsed_time = time.time() - start
+    return result
+
+
+def re_render(
+    *,
+    render_context: dict[str, Any],
+    output_path: str,
+    template: str | None = None,
+    headline: str | None = None,
+    cta: str | None = None,
+    company: str | None = None,
+    logo_path: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> MockupResult:
+    """Re-render from a complete render_context (+ optional concept overrides).
+
+    **No Playwright. No WebsiteScraper. No AI.**
+
+    Preferred call shape::
+
+        re_render(render_context=full_ctx, output_path=path)
+
+    Legacy keyword overrides (template/headline/cta/company/logo_path) are
+    still accepted and merged into the contract before paint.
+    """
+    start = time.time()
+    base = ensure_render_context(render_context)
+    result = MockupResult(website=base.source_url or "")
+
+    try:
+        if not output_path:
+            raise ValueError("output_path is required for re_render")
+
+        overrides: dict[str, Any] = {}
+        if template is not None:
+            overrides["template"] = template
+        if headline is not None:
+            overrides["headline"] = headline
+        if cta is not None:
+            overrides["cta"] = cta
+        if company is not None:
+            overrides["company_name"] = company
+        if logo_path is not None:
+            overrides["logo_image"] = logo_path
+
+        ctx = base.merge_overrides(**overrides) if overrides else base
+
+        logger.info(
+            "Local re-render → %s (template=%s)",
+            output_path,
+            ctx.template,
+        )
+        _report(progress_callback, 10, "Preparing layout...", "rerender")
+
+        rendered_path = render_from_context(
+            ctx,
+            output_path,
+            progress_callback=progress_callback,
+        )
+
+        result.success = True
+        result.message = "Mockup re-rendered successfully."
+        result.company_name = ctx.company_name
+        result.headline = ctx.headline
+        result.cta = ctx.cta
+        result.logo_path = ctx.logo_image
+        result.preview_path = rendered_path
+        result.output_path = rendered_path
+        result.quality_score = float(ctx.quality_score or 0)
+        result.extra = {
+            "template": ctx.template,
+            "local_rerender": True,
+            "render_context": ctx.to_dict(),
+        }
+        _report(progress_callback, 100, "Complete", "done")
+        logger.info("Re-render finished: %s", rendered_path)
+    except Exception as exc:  # noqa: BLE001 - never crash the GUI
+        logger.exception("Re-render failed")
+        result.success = False
+        result.message = f"Re-render failed: {exc}"
         result.warnings.append(str(exc))
 
     result.elapsed_time = time.time() - start

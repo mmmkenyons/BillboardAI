@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Signal
 from gui.engine_bridge import generate
 from gui.models.mockup_request import MockupRequest
 from gui.models.mockup_result import MockupResult
+from engine.scraper.site import ScreenshotValidationError
 
 logger = logging.getLogger(__name__)
 

@@ -1,26 +1,35 @@
-"""BillboardAI rendering module."""
+"""BillboardAI rendering module.
 
+Implements scene-based billboard rendering per Sprint 4C requirements.
+Preserves RenderContext contract, reuses existing helpers where possible.
+Uses cart_corral template for natural composite with perspective warp.
+"""
+
+import json
 import os
-from typing import Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
+from engine.config import DEBUG, DEBUG_FOLDER, OUTPUT_DIR
 
-def _load_font(font_name: str, size: int):
+
+def _load_font(font_name: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     try:
         return ImageFont.truetype(font_name, size)
     except OSError:
         return ImageFont.load_default()
 
 
-def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, max_width: int) -> List[str]:
     words = text.split()
     if not words:
         return [""]
-
     lines = []
     current = words[0]
-
     for word in words[1:]:
         candidate = f"{current} {word}"
         if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
@@ -28,12 +37,11 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, 
         else:
             lines.append(current)
             current = word
-
     lines.append(current)
     return lines
 
 
-def _fit_text(draw: ImageDraw.ImageDraw, text: str, font_name: str, max_width: int, max_size: int, min_size: int = 18) -> tuple[ImageFont.ImageFont, List[str]]:
+def _fit_text(draw: ImageDraw.ImageDraw, text: str, font_name: str, max_width: int, max_size: int, min_size: int = 18) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, List[str]]:
     for size in range(max_size, min_size - 1, -2):
         font = _load_font(font_name, size)
         lines = _wrap_text(draw, text, font, max_width)
@@ -65,7 +73,7 @@ def _draw_shadow(base: Image.Image, offset: int = 20, radius: int = 20) -> None:
 
 def _draw_reflection(base: Image.Image, area: tuple[int, int, int, int]) -> None:
     x1, y1, x2, y2 = area
-    reflection = base.crop(area).transpose(Image.FLIP_TOP_BOTTOM)
+    reflection = base.crop(area).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
     reflection = reflection.crop((0, 0, x2 - x1, int((y2 - y1) * 0.35)))
     mask = Image.new("L", reflection.size, 0)
     gradient = Image.linear_gradient("L").resize(reflection.size)
@@ -74,17 +82,29 @@ def _draw_reflection(base: Image.Image, area: tuple[int, int, int, int]) -> None
 
 
 def _apply_perspective(image: Image.Image) -> Image.Image:
+    """Legacy helper - kept for compatibility with existing tests."""
     width, height = image.size
-    shift = int(width * 0.03)
     coeffs = [1, 0, 0, 0.02, 1, -int(height * 0.05), 0, 0]
-    warped = image.transform((width, height), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
+    warped = image.transform((width, height), Image.Transform.PERSPECTIVE, coeffs, Image.Resampling.BICUBIC)
     warped = warped.filter(ImageFilter.GaussianBlur(radius=0.2))
     return warped
 
 
-def render_billboard(spec: Dict[str, any], output_path: str) -> str:
-    width = spec.get("canvas", {}).get("width", 1600)
-    height = spec.get("canvas", {}).get("height", 900)
+def _load_template(template_name: str = "cart_corral") -> Dict[str, Any]:
+    """Load template definition (scene, quad, dimensions)."""
+    template_path = Path("assets/templates") / f"{template_name}.json"
+    if not template_path.exists():
+        # Fallback to cart_corral
+        template_path = Path("assets/templates/cart_corral.json")
+    with open(template_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Image:
+    """Generate advertisement artwork using existing design logic (reused from old renderer).
+    Uses hero_path (website screenshot) as input asset inside the ad, not as background.
+    """
+    width, height = size
     background_color = spec.get("background_color", "#FFFFFF")
     text_color = spec.get("text_color", "#111111")
     accent_color = spec.get("accent_color", "#1F77B4")
@@ -92,24 +112,25 @@ def render_billboard(spec: Dict[str, any], output_path: str) -> str:
     layout_style = spec.get("layout_style", "classic")
     cta_text = spec.get("cta_text", "Learn More")
 
-    base = Image.new("RGB", (width, height), background_color)
-    draw = ImageDraw.Draw(base)
+    artwork = Image.new("RGB", (width, height), background_color)
+    draw = ImageDraw.Draw(artwork)
 
     hero_path = spec.get("hero_path")
-    hero_exists = hero_path and os.path.exists(hero_path)
+    hero_exists = isinstance(hero_path, str) and os.path.exists(hero_path)
+    hero_height = int(height * 0.4) if hero_exists else 0
 
-    hero_height = int(height * 0.48) if hero_exists else 0
     if hero_exists:
         try:
+            assert isinstance(hero_path, str)
             hero = Image.open(hero_path).convert("RGB")
-            hero = hero.resize((width, hero_height), Image.LANCZOS)
+            hero = hero.resize((width, hero_height), Image.Resampling.LANCZOS)
             if layout_style == "photo":
                 hero = _apply_hero_effects(hero)
-            hero = _apply_perspective(hero)
-            base.paste(hero, (0, 0))
+            hero = _apply_perspective(hero)  # Reuse legacy for hero strip
+            artwork.paste(hero, (0, 0))
             if layout_style == "photo":
-                overlay = Image.new("RGBA", (width, hero_height), (0, 0, 0, 110))
-                base.paste(overlay, (0, 0), overlay)
+                overlay = Image.new("RGBA", (width, hero_height), (0, 0, 0, 80))
+                artwork.paste(overlay, (0, 0), overlay)
         except OSError:
             hero_exists = False
             hero_height = 0
@@ -117,69 +138,204 @@ def render_billboard(spec: Dict[str, any], output_path: str) -> str:
     panel_y = hero_height
     draw.rectangle([0, panel_y, width, height], fill=background_color)
 
-    card_fill = background_color
-    if layout_style == "white":
-        card_fill = "#FFFFFF"
-    elif layout_style == "premium":
-        card_fill = "#F8F1E6"
-
-    card_margin = 60
-    card_top = panel_y + 30 if hero_exists else 40
-    card_bottom = height - 40
+    card_margin = 40
+    card_top = panel_y + 20
+    card_bottom = height - 30
     card_rect = [card_margin, card_top, width - card_margin, card_bottom]
 
-    if layout_style in {"premium", "white", "photo"}:
-        shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        shadow_draw = ImageDraw.Draw(shadow)
-        shadow_draw.rectangle([card_rect[0] + 14, card_rect[1] + 14, card_rect[2] + 14, card_rect[3] + 14], fill=(0, 0, 0, 80))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=18))
-        base = Image.alpha_composite(base.convert("RGBA"), shadow).convert("RGB")
+    card_fill = "#F8F8F8" if layout_style in ("premium", "white") else background_color
+    draw.rectangle(card_rect, fill=card_fill, outline="#DDDDDD", width=2)
 
-    draw.rectangle(card_rect, fill=card_fill)
+    company_font = _load_font(spec.get("font_family", "arial.ttf"), 36)
+    headline_font, headline_lines = _fit_text(
+        draw, spec.get("headline", "Make your message unforgettable"), spec.get("font_family", "arial.ttf"),
+        width - 2 * (card_margin + 20), 48, min_size=24
+    )
+    subtitle_font, subtitle_lines = _fit_text(
+        draw, spec.get("subtitle", ""), spec.get("font_family", "arial.ttf"),
+        width - 2 * (card_margin + 20), 24, min_size=16
+    )
+    badge_font = _load_font(spec.get("font_family", "arial.ttf"), 20)
 
-    if hero_exists and layout_style == "photo":
-        _draw_reflection(base, (0, 0, width, hero_height))
+    text_x = card_margin + 30
+    text_y = card_top + 30
 
-    company_font = _load_font(spec.get("font_family", "arial.ttf"), 52)
-    headline_font, headline_lines = _fit_text(draw, spec.get("headline", "Make your message unforgettable"), spec.get("font_family", "arial.ttf"), width - 2 * (card_margin + 20), 72)
-    subtitle_font, subtitle_lines = _fit_text(draw, spec.get("subtitle", ""), spec.get("font_family", "arial.ttf"), width - 2 * (card_margin + 20), 34)
-    badge_font = _load_font(spec.get("font_family", "arial.ttf"), 28)
-
-    text_x = card_margin + 40
-    text_y = card_top + 40
-
-    if hero_exists and layout_style == "photo":
-        text_y = 60
-        draw.text((text_x, text_y), spec.get("company", "Brand"), font=company_font, fill="#FFFFFF")
-    else:
-        text_y = card_top + 40
-        draw.text((text_x, text_y), spec.get("company", "Brand"), font=company_font, fill=accent_color)
-
+    draw.text((text_x, text_y), spec.get("company", "Brand"), font=company_font, fill=accent_color)
     company_height = draw.textbbox((0, 0), spec.get("company", "Brand"), font=company_font)[3]
-    text_y += company_height + 14
+    text_y += company_height + 10
 
     for line in headline_lines:
         draw.text((text_x, text_y), line, font=headline_font, fill=text_color)
-        text_y += draw.textbbox((0, 0), line, font=headline_font)[3] - draw.textbbox((0, 0), line, font=headline_font)[1] + 10
+        text_y += draw.textbbox((0, 0), line, font=headline_font)[3] - draw.textbbox((0, 0), line, font=headline_font)[1] + 8
 
     if subtitle_lines and any(line.strip() for line in subtitle_lines):
         for line in subtitle_lines:
             draw.text((text_x, text_y), line, font=subtitle_font, fill=text_color)
-            text_y += draw.textbbox((0, 0), line, font=subtitle_font)[3] - draw.textbbox((0, 0), line, font=subtitle_font)[1] + 8
+            text_y += draw.textbbox((0, 0), line, font=subtitle_font)[3] - draw.textbbox((0, 0), line, font=subtitle_font)[1] + 6
 
-    button_box = [text_x, text_y + 20, text_x + 340, text_y + 82]
+    button_box = [text_x, text_y + 15, text_x + 220, text_y + 55]
     draw.rectangle(button_box, fill=button_color, outline=None)
-    draw.text((text_x + 24, text_y + 26), cta_text, font=badge_font, fill="#FFFFFF")
+    draw.text((text_x + 20, text_y + 22), cta_text, font=badge_font, fill="#FFFFFF")
 
     logo_path = spec.get("logo_path")
-    if logo_path and os.path.exists(logo_path):
+    if isinstance(logo_path, str) and os.path.exists(logo_path):
         try:
             logo = Image.open(logo_path).convert("RGBA")
-            logo.thumbnail((220, 110), Image.LANCZOS)
-            logo_position = (width - logo.width - 60, card_top + 40)
-            base.paste(logo, logo_position, logo)
+            logo.thumbnail((140, 70), Image.Resampling.LANCZOS)
+            logo_position = (width - logo.width - 30, card_top + 20)
+            artwork.paste(logo, logo_position, logo)
         except OSError:
             pass
 
-    base.save(output_path)
+    return artwork
+
+
+def _perspective_transform_pil(
+    src_img: Image.Image,
+    dst_quad: List[List[int]],
+    output_size: Tuple[int, int],
+    debug: bool = False,
+) -> Image.Image:
+    """Real four-point perspective transform using OpenCV homography.
+
+    Maps the source artwork rectangle onto the destination billboard quad
+    via cv2.getPerspectiveTransform + cv2.warpPerspective.
+    """
+    src_w, src_h = src_img.size
+    out_w, out_h = output_size
+
+    # Source: artwork rectangle corners (top-left, top-right, bottom-right, bottom-left)
+    src_pts = np.array(
+        [
+            [0, 0],
+            [src_w - 1, 0],
+            [src_w - 1, src_h - 1],
+            [0, src_h - 1],
+        ],
+        dtype=np.float32,
+    )
+    # Destination: billboard quad (same corner order: TL, TR, BR, BL)
+    dst_pts = np.array(dst_quad, dtype=np.float32)
+
+    matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
+
+    if debug:
+        print(f"DEBUG: perspective source size: {src_w}x{src_h}")
+        print(f"DEBUG: perspective dst quad: {dst_quad}")
+        print(f"DEBUG: perspective matrix:\n{matrix}")
+
+    # Convert PIL RGB -> OpenCV BGR
+    src_bgr = cv2.cvtColor(np.array(src_img), cv2.COLOR_RGB2BGR)
+
+    # Warp onto output-sized canvas (fill outside quad with light gray)
+    warped_bgr = cv2.warpPerspective(
+        src_bgr,
+        matrix,
+        (out_w, out_h),
+        flags=cv2.INTER_LANCZOS4,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(240, 240, 240),
+    )
+
+    # Convert back OpenCV BGR -> PIL RGB
+    warped_rgb = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(warped_rgb)
+
+
+def _save_debug(image: Image.Image, name: str, debug_dir: Path) -> None:
+    """Save debug artifact."""
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    path = debug_dir / name
+    image.save(path)
+    print(f"DEBUG: Saved {path}")
+
+
+def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
+    """Main renderer - loads scene/template, generates artwork from spec (website screenshot as input), warps, composites.
+    Always renders to a fixed canvas size (default 800x450, overridable via spec["canvas"]).
+    """
+    if not output_path:
+        output_path = str(OUTPUT_DIR / "billboard.png")
+
+    debug_enabled = DEBUG or os.getenv("BILLBOARD_DEBUG", "0") in ("1", "true", "yes")
+    debug_dir = Path(DEBUG_FOLDER or str(OUTPUT_DIR / "debug"))
+
+    # 0. Fixed canvas contract (default 800x450, overridable via spec["canvas"])
+    canvas_raw = spec.get("canvas")
+    canvas: Dict[str, Any] = canvas_raw if isinstance(canvas_raw, dict) else {}
+    canvas_size = (
+        int(canvas.get("width") or 800),
+        int(canvas.get("height") or 450),
+    )
+
+    # 1. Load template (scene + placement)
+    template_name = spec.get("template") or spec.get("selected_template") or "cart_corral"
+    template = _load_template(template_name)
+    scene_path = template.get("scene_path", "assets/cart_corral.jpg")
+    if not os.path.exists(scene_path):
+        scene_path = "assets/cart_corral.jpg"  # fallback
+
+    scene = Image.open(scene_path).convert("RGB")
+    scene_original_size = scene.size
+    if debug_enabled:
+        print(f"DEBUG: original scene size: {scene_original_size}")
+        print(f"DEBUG: canvas size: {canvas_size}")
+    # Scale/crop scene to fixed canvas (predictable output resolution)
+    scene = ImageOps.fit(scene, canvas_size, Image.Resampling.LANCZOS)
+    if debug_enabled:
+        _save_debug(scene, "01_scene.png", debug_dir)
+
+    # 2. Generate artwork (separate from scene; uses hero_path as ad content)
+    default_size = template.get("default_artwork_size", (640, 400))
+    artwork_size = (int(default_size[0]), int(default_size[1]))
+    artwork = _generate_artwork(spec, artwork_size)
+    if debug_enabled:
+        _save_debug(artwork, "02_artwork.png", debug_dir)
+
+    # 3. Warp artwork into billboard polygon (quad scaled from reference_size through the same fit transform)
+    quad = template.get("billboard_quad", [[100, 100], [500, 100], [520, 300], [80, 320]])
+    ref_size = template.get("reference_size")
+    if debug_enabled:
+        print(f"DEBUG: template reference size: {ref_size}")
+        print(f"DEBUG: original quad: {quad}")
+    if isinstance(ref_size, (list, tuple)) and len(ref_size) == 2:
+        ref_w, ref_h = int(ref_size[0]), int(ref_size[1])
+        if ref_w > 0 and ref_h > 0:
+            # Same transform as ImageOps.fit: scale to cover, then center crop
+            scale = max(canvas_size[0] / ref_w, canvas_size[1] / ref_h)
+            crop_x = (ref_w * scale - canvas_size[0]) / 2
+            crop_y = (ref_h * scale - canvas_size[1]) / 2
+            quad = [
+                [int(x * scale - crop_x), int(y * scale - crop_y)]
+                for x, y in quad
+            ]
+    if debug_enabled:
+        print(f"DEBUG: scaled quad: {quad}")
+
+    # 3b. Billboard mask (for verification and compositing)
+    mask = Image.new("L", scene.size, 0)
+    draw_mask = ImageDraw.Draw(mask)
+    draw_mask.polygon([tuple(p) for p in quad], fill=255)
+    if debug_enabled:
+        _save_debug(mask, "03_billboard_mask.png", debug_dir)
+
+    warped = _perspective_transform_pil(artwork, quad, scene.size, debug=debug_enabled)
+    if debug_enabled:
+        _save_debug(warped, "04_warped_artwork.png", debug_dir)
+
+    # 4. Clean composite: paste warped artwork onto scene with mask only. No effects.
+    composite = scene.copy()
+    composite.paste(warped, (0, 0), mask)
+    if debug_enabled:
+        _save_debug(composite, "05_composite.png", debug_dir)
+
+    # 5. Final: apply lighting/polish (shadow simulation)
+    final = composite.convert("RGBA")
+    shadow = Image.new("RGBA", scene.size, (0, 0, 0, 40))
+    final = Image.alpha_composite(final, shadow).convert("RGB")
+    if debug_enabled:
+        _save_debug(final, "06_final.png", debug_dir)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    final.save(output_path)
     return output_path

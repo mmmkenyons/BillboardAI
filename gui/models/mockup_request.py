@@ -9,11 +9,16 @@ from dataclasses import dataclass, field
 class MockupRequest:
     """A request to generate a billboard mockup.
 
-    Fields are intentionally simple placeholders; the engine bridge will
-    consume this model once the GUI pipeline is wired up.
+    The controller owns project directories. ``output_path`` is the exact
+    PNG path the engine bridge must write — the bridge never invents a
+    project folder.
     """
 
     url: str = ""
     template: str = ""
     output_folder: str = ""
+    # Exact destination for the rendered PNG (required for generate()).
+    output_path: str = ""
     options: dict = field(default_factory=dict)
+    # Extra data for flags like is_new_concept (Sprint 4B Phase E1, no behavior change).
+    extra: dict = field(default_factory=dict)

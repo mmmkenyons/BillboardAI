@@ -1,6 +1,7 @@
 """Website scraping and data extraction for BillboardAI."""
 
 import json
+import logging
 import os
 import re
 import time
@@ -8,7 +9,10 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import (
+    sync_playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
 import tldextract
 
 from .. import config
@@ -22,6 +26,9 @@ from .headline import extract_headline
 from .hero import pick_hero_image
 from .logo import pick_best_logo
 from .metadata import extract_metadata
+from .capture import capture_screenshot, ScreenshotValidationError
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_filename(url, prefix=None):
@@ -68,7 +75,7 @@ class WebsiteScraper:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(user_agent=config.USER_AGENT)
-            page.goto(self.url, wait_until="networkidle", timeout=config.TIMEOUT)
+            self._navigate(page, self.url)
             self.html = page.content()
             self.soup = BeautifulSoup(self.html, "lxml")
             self.hero_url = pick_hero_image(page)
@@ -76,9 +83,37 @@ class WebsiteScraper:
             self.css_paths = self.save_css(page)
             self.asset_paths = self.save_assets()
             self.metadata = extract_metadata(self.soup, self.url)
-            self.screenshot_path = self.save_screenshot(page)
+            # Use new capture service with validation/retry (Phase 3)
+            try:
+                result = capture_screenshot(page, self.filename_base)
+                self.screenshot_path = result.path
+                if config.DEBUG:
+                    print(f"[DEBUG] Screenshot captured with strategy: {result.strategy_used} (score: {result.quality.score}, variance: {result.quality.variance})")
+            except ScreenshotValidationError as e:
+                print(f"[ERROR] Screenshot capture failed for {self.url}: {e}")
+                if config.DEBUG and e.quality:
+                    print(f"  Diagnostics: {e.quality.diagnostics}")
+                raise
             self.brand_colors = extract_brand_colors(self.screenshot_path)
             browser.close()
+
+    def _navigate(self, page, url):
+        """Navigate to a URL with a resilient fallback strategy.
+
+        Attempt 1: wait for networkidle (preferred, full page load).
+        If that times out, Attempt 2: wait for domcontentloaded, then
+        allow extra time for layout stabilization. Only if both fail
+        is the original exception re-raised.
+        """
+        try:
+            logger.info("Attempt 1: networkidle")
+            page.goto(url, wait_until="networkidle", timeout=config.TIMEOUT)
+        except PlaywrightTimeoutError:
+            logger.info("networkidle timed out after %ss", config.TIMEOUT // 1000)
+            logger.info("Retrying with domcontentloaded...")
+            page.goto(url, wait_until="domcontentloaded", timeout=config.TIMEOUT)
+            time.sleep(2.5)  # Allow layout stabilization after DOM is ready
+            logger.info("Loaded page using domcontentloaded.")
 
     def save_html(self):
         path = os.path.join(config.HTML_FOLDER, f"{self.filename_base}.html")
@@ -165,7 +200,13 @@ class WebsiteScraper:
         self.load()
         _report(25, "Downloading Assets", "assets")
         html_path = self.save_html()
-        self.logo_url, self.logo_score = pick_best_logo(self.html, self.url)
+        self.logo_score, self.logo_url = pick_best_logo(self.html, self.url)
+        assert self.logo_url is None or isinstance(self.logo_url, str), (
+            f"logo_url must be a URL string or None, got {type(self.logo_url).__name__}: {self.logo_url!r}"
+        )
+        assert self.logo_score is None or isinstance(self.logo_score, (int, float)), (
+            f"logo_score must be numeric or None, got {type(self.logo_score).__name__}: {self.logo_score!r}"
+        )
         self.logo_path = self.download_resource(self.logo_url, config.ASSETS_FOLDER, prefix="logo") if self.logo_url else None
         self.headline = extract_headline(self.html)
 
@@ -203,6 +244,8 @@ class WebsiteScraper:
     def render_billboard(self, template_name="contractor", output_path=None, progress_callback=None):
         if not self.last_data:
             self.run(progress_callback=progress_callback)
+        if not self.last_data:
+            raise ValueError("No data after run()")
 
         os.makedirs(config.IMAGE_FOLDER, exist_ok=True)
         output_path = output_path or os.path.join(

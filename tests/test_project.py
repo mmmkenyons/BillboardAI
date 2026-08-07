@@ -1,7 +1,5 @@
 """Tests for Sprint 4A: Project-based workflow models."""
 
-from __future__ import annotations
-
 import json
 import os
 import shutil
@@ -228,3 +226,43 @@ class TestProject:
         assert loaded.selected_concept_id == c2.id
         assert loaded.concepts[0].selected is False
         assert loaded.concepts[1].selected is True
+
+    def test_logo_override_persistence_and_clear(self, tmp_output: str) -> None:
+        """Regression test for reload → reset logo (Sprint 4B Phase D).
+
+        Ensures set_logo_override persists, clear_logo_override resets without
+        screenshot fallback, and revision prevents stale re-renders.
+        """
+        project = Project.create(output_root=tmp_output, name="logo_test")
+        dummy_logo = os.path.join(tmp_output, "scraped_logo.png")
+        os.makedirs(os.path.dirname(dummy_logo), exist_ok=True)
+        with open(dummy_logo, "w") as f:
+            f.write("dummy")  # not real image, but for path test
+
+        # Set override
+        project.set_logo_override(dummy_logo)
+        assert project.logo_override
+        assert project.render_context.get("logo_image") == project.logo_override
+        initial_revision = project.get_render_revision()
+        assert initial_revision > 0
+
+        project.save()
+
+        # Load and verify persistence
+        loaded = Project.load(project.metadata_path)
+        assert loaded.logo_override == project.logo_override
+        assert loaded.render_context.get("logo_image") == project.logo_override
+
+        # Clear override (regression: no screenshot fallback)
+        loaded.clear_logo_override()
+        assert loaded.logo_override == ""
+        assert loaded.render_context.get("logo_image") == ""
+
+        # Effective context prefers empty (no screenshot)
+        effective = loaded.effective_render_context()
+        assert effective.get("logo_image") == ""
+
+        loaded.save()
+        reloaded = Project.load(loaded.metadata_path)
+        assert reloaded.logo_override == ""
+        assert reloaded.render_context.get("logo_image") == ""
