@@ -1,0 +1,33 @@
+{
+  "id": "cart_nose",
+  "name": "Cart Nose",
+  "scene_path": "assets\\cart_nose.jpg",
+  "reference_size": [
+    640,
+    480
+  ],
+  "billboard_quad": [
+    [
+      147,
+      50
+    ],
+    [
+      487,
+      52
+    ],
+    [
+      465,
+      281
+    ],
+    [
+      165,
+      283
+    ]
+  ],
+  "quad_order": "TL-TR-BR-BL",
+  "artwork_aspect": 1.38,
+  "default_artwork_size": [
+    552,
+    400
+  ]
+}
