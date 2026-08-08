@@ -81,53 +81,48 @@ class RenderContext:
     # Construction
     # ------------------------------------------------------------------
     @classmethod
-    def from_scrape(
+    def from_brand_profile(
         cls,
-        scrape_data: dict[str, Any],
+        profile: Any,  # BrandProfile (lazy import to avoid circular deps)
         *,
         template: str = "contractor",
-        source_url: str = "",
     ) -> "RenderContext":
-        """Build a complete contract from scraper output + template theme."""
-        data = scrape_data or {}
-        meta_raw = data.get("metadata")
-        metadata: dict[str, Any] = meta_raw if isinstance(meta_raw, dict) else {}
+        """Build a RenderContext from a BrandProfile.
+
+        Maps business/brand intelligence into the paint/render contract.
+        This is the preferred path when a BrandProfile is available.
+        """
+        # Lazy import to avoid circular dependency at module level
+        from engine.brand_profile import BrandProfile as _BP
+
+        if not isinstance(profile, _BP):
+            raise TypeError(f"Expected BrandProfile, got {type(profile).__name__}")
+
         template_name = template or "contractor"
         theme = _theme_from_template(template_name)
 
-        company = (
-            data.get("company")
-            or metadata.get("title")
-            or ""
-        )
-        headline = (
-            data.get("ad_copy")
-            or data.get("headline")
-            or metadata.get("description")
-            or ""
-        )
-        subtitle = metadata.get("description") or data.get("subtitle") or ""
-        if subtitle and subtitle == headline:
-            subtitle = ""
+        # --- Logo path ---
+        logo_path = ""
+        if profile.logo is not None:
+            logo_path = profile.logo.path
+        if not logo_path:
+            # Fallback to legacy path stored in source_metadata
+            logo_path = str(
+                profile.source_metadata.get("legacy_logo_path") or ""
+            )
 
-        hero = (
-            data.get("hero_path")
-            or data.get("screenshot_path")
-            or data.get("screenshot_file")
-            or ""
-        )
-        # hero_url may be a remote URL — only keep if it looks like a local path later;
-        # still store string for controller to evaluate.
-        if not hero:
-            hero_url = data.get("hero_url") or ""
-            if isinstance(hero_url, str) and hero_url and not hero_url.lower().startswith(
-                ("http://", "https://")
-            ):
-                hero = hero_url
+        # --- Hero path ---
+        hero_path = ""
+        if profile.hero_assets:
+            hero_path = profile.hero_assets[0].path
+        if not hero_path:
+            hero_path = profile.screenshot_path
 
-        screenshot = data.get("screenshot_path") or data.get("screenshot_file") or ""
-        logo = data.get("logo_path") or ""
-        brand_colors = list(data.get("brand_colors") or [])
+        # --- Screenshot / background ---
+        screenshot = profile.screenshot_path
+
+        # --- Colors ---
+        brand_colors = list(profile.colors)
 
         # secondary_color: background, or second brand color if present.
         secondary = theme.get("background_color") or "#FFFFFF"
@@ -135,25 +130,26 @@ class RenderContext:
             secondary = str(brand_colors[1])
 
         primary = theme.get("primary_color") or "#222222"
-        if brand_colors and brand_colors[0]:
-            # Prefer extracted brand as primary accent companion; keep theme primary
-            # unless empty. Store brand in brand_colors; theme remains paint source.
-            pass
 
         cta = theme.get("cta_text") or "Learn More"
         font_family = theme.get("font_family") or "arial.ttf"
         layout_style = theme.get("layout_style") or "classic"
 
+        # --- Subtitle from metadata ---
+        subtitle = profile.source_metadata.get("description") or ""
+        if subtitle and subtitle == profile.headline:
+            subtitle = ""
+
         return cls(
             version=RENDER_CONTEXT_VERSION,
-            company_name=str(company or ""),
-            headline=str(headline or ""),
+            company_name=str(profile.company_name or ""),
+            headline=str(profile.ad_copy or profile.headline or ""),
             cta=str(cta or ""),
             subtitle=str(subtitle or ""),
             template=template_name,
-            logo_image=str(logo or ""),
-            hero_image=str(hero or screenshot or ""),
-            background_image=str(screenshot or hero or ""),
+            logo_image=str(logo_path or ""),
+            hero_image=str(hero_path or screenshot or ""),
+            background_image=str(screenshot or hero_path or ""),
             primary_color=str(primary),
             secondary_color=str(secondary),
             accent_color=str(theme.get("accent_color") or "#1F77B4"),
@@ -165,10 +161,28 @@ class RenderContext:
                 "style": str(layout_style),
                 "canvas": dict(_DEFAULT_CANVAS),
             },
-            quality_score=float(data.get("quality_score", 0) or 0),
-            source_url=str(source_url or data.get("url") or ""),
+            quality_score=float(profile.quality_score or 0),
+            source_url=str(profile.website or ""),
             brand_colors=[str(c) for c in brand_colors],
         )
+
+    @classmethod
+    def from_scrape(
+        cls,
+        scrape_data: dict[str, Any],
+        *,
+        template: str = "contractor",
+        source_url: str = "",
+    ) -> "RenderContext":
+        """Build a complete contract from scraper output + template theme.
+
+        Internally creates a BrandProfile and delegates to from_brand_profile()
+        to avoid maintaining two separate mappings.
+        """
+        from engine.brand_profile import BrandProfileBuilder
+
+        profile = BrandProfileBuilder.from_scrape_data(scrape_data)
+        return cls.from_brand_profile(profile, template=template)
 
 
     @classmethod
