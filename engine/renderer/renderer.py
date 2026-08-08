@@ -207,6 +207,8 @@ def _perspective_transform_pil(
 
     Maps the source artwork rectangle onto the destination billboard quad
     via cv2.getPerspectiveTransform + cv2.warpPerspective.
+
+    Returns RGBA image with transparent pixels outside the quad.
     """
     src_w, src_h = src_img.size
     out_w, out_h = output_size
@@ -234,19 +236,31 @@ def _perspective_transform_pil(
     # Convert PIL RGB -> OpenCV BGR
     src_bgr = cv2.cvtColor(np.array(src_img), cv2.COLOR_RGB2BGR)
 
-    # Warp onto output-sized canvas (fill outside quad with light gray)
+    # Warp RGB channels onto output-sized canvas (black fill outside quad)
     warped_bgr = cv2.warpPerspective(
         src_bgr,
         matrix,
         (out_w, out_h),
         flags=cv2.INTER_LANCZOS4,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(240, 240, 240),
+        borderValue=(0, 0, 0),
+    )
+    warped_rgb = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2RGB)
+
+    # Warp alpha mask (white inside quad, transparent outside)
+    alpha_src = np.full((src_h, src_w), 255, dtype=np.uint8)
+    alpha_warped = cv2.warpPerspective(
+        alpha_src,
+        matrix,
+        (out_w, out_h),
+        flags=cv2.INTER_LANCZOS4,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
     )
 
-    # Convert back OpenCV BGR -> PIL RGB
-    warped_rgb = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(warped_rgb)
+    # Combine into RGBA
+    warped_rgba = np.dstack([warped_rgb, alpha_warped])
+    return Image.fromarray(warped_rgba, "RGBA")
 
 
 def _save_debug(image: Image.Image, name: str, debug_dir: Path) -> None:
@@ -258,22 +272,14 @@ def _save_debug(image: Image.Image, name: str, debug_dir: Path) -> None:
 
 
 def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
-    """Main renderer - loads scene/template, generates artwork from spec (website screenshot as input), warps, composites.
-    Always renders to a fixed canvas size (default 1600x900, overridable via spec["canvas"]).
+    """Main renderer - loads scene/template at native resolution, generates artwork,
+    warps into billboard quad, composites. Output matches source scene dimensions exactly.
     """
     if not output_path:
         output_path = str(OUTPUT_DIR / "billboard.png")
 
     debug_enabled = DEBUG or os.getenv("BILLBOARD_DEBUG", "0") in ("1", "true", "yes")
     debug_dir = Path(DEBUG_FOLDER or str(OUTPUT_DIR / "debug"))
-
-    # 0. Fixed canvas contract (default 1600x900, overridable via spec["canvas"])
-    canvas_raw = spec.get("canvas")
-    canvas: Dict[str, Any] = canvas_raw if isinstance(canvas_raw, dict) else {}
-    canvas_size = (
-        int(canvas.get("width") or 1600),
-        int(canvas.get("height") or 900),
-    )
 
     # 1. Load template (scene + placement)
     template_name = spec.get("template") or spec.get("selected_template") or "cart_corral"
@@ -285,64 +291,45 @@ def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
     if not os.path.exists(scene_path):
         scene_path = "assets/cart_corral.jpg"  # fallback
 
+    # Load scene at native resolution — no resize, no crop, no fit
     scene = Image.open(scene_path).convert("RGB")
-    scene_original_size = scene.size
+    scene_size = scene.size
     if debug_enabled:
-        print(f"DEBUG: original scene size: {scene_original_size}")
-        print(f"DEBUG: canvas size: {canvas_size}")
-    # Scale/crop scene to fixed canvas (predictable output resolution)
-    scene = ImageOps.fit(scene, canvas_size, Image.Resampling.LANCZOS)
-    if debug_enabled:
+        print(f"DEBUG: scene size (native): {scene_size}")
         _save_debug(scene, "01_scene.png", debug_dir)
 
-    # 2. Generate artwork (separate from scene; uses hero_path as ad content)
+    # 2. Generate artwork at configured working resolution
     default_size = template.get("default_artwork_size", (640, 400))
     artwork_size = (int(default_size[0]), int(default_size[1]))
     artwork = _generate_artwork(spec, artwork_size)
     if debug_enabled:
         _save_debug(artwork, "02_artwork.png", debug_dir)
 
-    # 3. Warp artwork into billboard polygon (quad scaled from reference_size through the same fit transform)
+    # 3. Use billboard quad directly from template (already in native coordinates)
     quad = template.get("billboard_quad", [[100, 100], [500, 100], [520, 300], [80, 320]])
-    ref_size = template.get("reference_size")
     if debug_enabled:
-        print(f"DEBUG: template reference size: {ref_size}")
-        print(f"DEBUG: original quad: {quad}")
-    if isinstance(ref_size, (list, tuple)) and len(ref_size) == 2:
-        ref_w, ref_h = int(ref_size[0]), int(ref_size[1])
-        if ref_w > 0 and ref_h > 0:
-            # Same transform as ImageOps.fit: scale to cover, then center crop
-            scale = max(canvas_size[0] / ref_w, canvas_size[1] / ref_h)
-            crop_x = (ref_w * scale - canvas_size[0]) / 2
-            crop_y = (ref_h * scale - canvas_size[1]) / 2
-            quad = [
-                [int(x * scale - crop_x), int(y * scale - crop_y)]
-                for x, y in quad
-            ]
-    if debug_enabled:
-        print(f"DEBUG: scaled quad: {quad}")
+        print(f"DEBUG: billboard quad (native): {quad}")
 
-    # 3b. Billboard mask (for verification and compositing)
-    mask = Image.new("L", scene.size, 0)
+    # 3b. Billboard mask (for compositing)
+    mask = Image.new("L", scene_size, 0)
     draw_mask = ImageDraw.Draw(mask)
     draw_mask.polygon([tuple(p) for p in quad], fill=255)
     if debug_enabled:
         _save_debug(mask, "03_billboard_mask.png", debug_dir)
 
-    warped = _perspective_transform_pil(artwork, quad, scene.size, debug=debug_enabled)
+    # 4. Warp artwork into billboard quad (returns RGBA with transparency outside quad)
+    warped = _perspective_transform_pil(artwork, quad, scene_size, debug=debug_enabled)
     if debug_enabled:
         _save_debug(warped, "04_warped_artwork.png", debug_dir)
 
-    # 4. Clean composite: paste warped artwork onto scene with mask only. No effects.
+    # 5. Clean composite: paste warped artwork onto scene using its own alpha channel
     composite = scene.copy()
-    composite.paste(warped, (0, 0), mask)
+    composite.paste(warped, (0, 0), warped)
     if debug_enabled:
         _save_debug(composite, "05_composite.png", debug_dir)
 
-    # 5. Final: apply lighting/polish (shadow simulation)
-    final = composite.convert("RGBA")
-    shadow = Image.new("RGBA", scene.size, (0, 0, 0, 40))
-    final = Image.alpha_composite(final, shadow).convert("RGB")
+    # 6. Final: save output (no global effects — preserve source pixels outside billboard)
+    final = composite
     if debug_enabled:
         _save_debug(final, "06_final.png", debug_dir)
 
