@@ -22,7 +22,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QThread, QTimer
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from gui.models.app_settings import DEFAULT_OUTPUT_FOLDER, AppSettings
@@ -66,19 +66,39 @@ def _domain_slug(url: str) -> str:
     return slug or "billboard"
 
 
-class BillboardController:
+class _RerenderRelay(QObject):
+    """Queued-signal relay for re-render worker results.
+
+    Worker signals connected to plain lambdas execute in the worker
+    thread. This relay lives in the GUI thread; emitting its signals
+    from the worker thread queues delivery to the controller slots,
+    keeping all UI updates on the GUI thread.
+    """
+
+    finished = Signal(object, int)  # MockupResult, token
+    failed = Signal(str, int)  # error, token
+
+
+class BillboardController(QObject):
     """Coordinates GUI actions with the engine bridge.
 
     Owns the :class:`Project` and mediates all communication between
     the concept gallery, preview panel, and details panel.
+
+    **Threading contract:** this controller is a ``QObject`` living in the
+    GUI thread. Worker signals connected to its slots therefore use
+    ``QueuedConnection`` automatically, so every slot runs on the GUI
+    thread and never touches widgets from a worker thread.
     """
 
     def __init__(self) -> None:
+        super().__init__()
         self._window: MainWindow | None = None
         self._thread: QThread | None = None
         self._worker: GenerationWorker | None = None
         self._rerender_thread: QThread | None = None
         self._rerender_worker: ReRenderWorker | None = None
+        self._rerender_relay: _RerenderRelay | None = None
         self._rerender_timer: QTimer | None = None
         self._rerender_generation: int = 0
         self._pending_rerender_concept_id: str | None = None
@@ -696,12 +716,16 @@ class BillboardController:
         # Drop prior re-render refs without waiting (stale results ignored via token).
         old_thread = self._rerender_thread
         old_worker = self._rerender_worker
+        old_relay = self._rerender_relay
         self._rerender_thread = None
         self._rerender_worker = None
+        self._rerender_relay = None
         if old_thread is not None and old_thread.isRunning():
             old_thread.quit()
         if old_worker is not None:
             old_worker.deleteLater()
+        if old_relay is not None:
+            old_relay.deleteLater()
         if old_thread is not None:
             old_thread.deleteLater()
 
@@ -714,20 +738,23 @@ class BillboardController:
 
         worker.moveToThread(thread)
 
+        # Relay lives in the GUI thread; emitting from the worker thread
+        # queues delivery to the controller slots (no cross-thread UI calls).
+        relay = _RerenderRelay()
+        relay.finished.connect(self._on_rerender_finished)
+        relay.failed.connect(self._on_rerender_failed)
+
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_progress)
-        worker.finished.connect(
-            lambda result, t=token: self._on_rerender_finished(result, t)
-        )
-        worker.failed.connect(
-            lambda err, t=token: self._on_rerender_failed(err, t)
-        )
+        worker.finished.connect(lambda result, r=relay, t=token: r.finished.emit(result, t))
+        worker.failed.connect(lambda err, r=relay, t=token: r.failed.emit(err, t))
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(self._cleanup_rerender_thread)
 
         self._rerender_thread = thread
         self._rerender_worker = worker
+        self._rerender_relay = relay
         logger.info("Starting re-render thread for concept %s", concept.id[:8])
         thread.start()
 
@@ -786,8 +813,11 @@ class BillboardController:
             self._rerender_thread.deleteLater()
         if self._rerender_worker is not None:
             self._rerender_worker.deleteLater()
+        if self._rerender_relay is not None:
+            self._rerender_relay.deleteLater()
         self._rerender_thread = None
         self._rerender_worker = None
+        self._rerender_relay = None
         if self._project is not None:
             try:
                 self._project.save()

@@ -6,6 +6,7 @@ Uses cart_corral template for natural composite with perspective warp.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -15,6 +16,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from engine.config import DEBUG, DEBUG_FOLDER, OUTPUT_DIR
+
+logger = logging.getLogger(__name__)
 
 
 def _load_font(font_name: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -90,14 +93,18 @@ def _apply_perspective(image: Image.Image) -> Image.Image:
     return warped
 
 
-def _load_template(template_name: str = "cart_corral") -> Dict[str, Any]:
-    """Load template definition (scene, quad, dimensions)."""
+def _load_template(template_name: str = "cart_corral") -> tuple[Dict[str, Any], str]:
+    """Load template definition (scene, quad, dimensions).
+
+    Returns:
+        (template_dict, resolved_template_path)
+    """
     template_path = Path("assets/templates") / f"{template_name}.json"
     if not template_path.exists():
         # Fallback to cart_corral
         template_path = Path("assets/templates/cart_corral.json")
     with open(template_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f), str(template_path)
 
 
 def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Image:
@@ -252,7 +259,7 @@ def _save_debug(image: Image.Image, name: str, debug_dir: Path) -> None:
 
 def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
     """Main renderer - loads scene/template, generates artwork from spec (website screenshot as input), warps, composites.
-    Always renders to a fixed canvas size (default 800x450, overridable via spec["canvas"]).
+    Always renders to a fixed canvas size (default 1600x900, overridable via spec["canvas"]).
     """
     if not output_path:
         output_path = str(OUTPUT_DIR / "billboard.png")
@@ -260,17 +267,20 @@ def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
     debug_enabled = DEBUG or os.getenv("BILLBOARD_DEBUG", "0") in ("1", "true", "yes")
     debug_dir = Path(DEBUG_FOLDER or str(OUTPUT_DIR / "debug"))
 
-    # 0. Fixed canvas contract (default 800x450, overridable via spec["canvas"])
+    # 0. Fixed canvas contract (default 1600x900, overridable via spec["canvas"])
     canvas_raw = spec.get("canvas")
     canvas: Dict[str, Any] = canvas_raw if isinstance(canvas_raw, dict) else {}
     canvas_size = (
-        int(canvas.get("width") or 800),
-        int(canvas.get("height") or 450),
+        int(canvas.get("width") or 1600),
+        int(canvas.get("height") or 900),
     )
 
     # 1. Load template (scene + placement)
     template_name = spec.get("template") or spec.get("selected_template") or "cart_corral"
-    template = _load_template(template_name)
+    template, template_path = _load_template(template_name)
+    logger.info("Renderer template path: %s", template_path)
+    logger.info("Renderer reference_size: %s", template.get("reference_size"))
+    logger.info("Renderer billboard_quad: %s", template.get("billboard_quad"))
     scene_path = template.get("scene_path", "assets/cart_corral.jpg")
     if not os.path.exists(scene_path):
         scene_path = "assets/cart_corral.jpg"  # fallback

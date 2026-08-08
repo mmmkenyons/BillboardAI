@@ -7,7 +7,7 @@ from renderer.renderer import render_billboard
 def test_render_billboard_creates_image(tmp_path):
     output_path = tmp_path / "billboard.png"
     spec = {
-        "canvas": {"width": 800, "height": 450},
+        "canvas": {"width": 1600, "height": 900},
         "background_color": "#FFFFFF",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -24,13 +24,13 @@ def test_render_billboard_creates_image(tmp_path):
 
     assert os.path.exists(result_path)
     image = Image.open(result_path)
-    assert image.size == (800, 450)
+    assert image.size == (1600, 900)
 
 
 def test_render_billboard_uses_cta_text(tmp_path):
     output_path = tmp_path / "billboard_cta.png"
     spec = {
-        "canvas": {"width": 800, "height": 450},
+        "canvas": {"width": 1600, "height": 900},
         "background_color": "#FFFFFF",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -47,4 +47,4 @@ def test_render_billboard_uses_cta_text(tmp_path):
 
     assert os.path.exists(result_path)
     image = Image.open(result_path)
-    assert image.size == (800, 450)
+    assert image.size == (1600, 900)

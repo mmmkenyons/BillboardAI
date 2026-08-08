@@ -5,6 +5,7 @@ Uses pluggable validators, 3-tier retry strategies, debug rejected saves.
 Returns ScreenshotResult or raises ScreenshotValidationError.
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, List, Optional
@@ -14,6 +15,8 @@ import time
 
 from .. import config
 from .validators import ScreenshotQuality, validate_screenshot
+
+logger = logging.getLogger(__name__)
 
 
 class ScreenshotValidationError(Exception):
@@ -49,8 +52,14 @@ class ScreenshotCaptureService:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         path = str(Path(output_dir) / f"{self.filename_base}_screenshot.png")
 
-        # Use page.url if available in tests, or fallback
-        effective_url = getattr(page, '_current_url', None) or self.url or "https://example.com"
+        # Resolve the URL to capture from the live page object
+        effective_url = page.url or self.url
+        if not effective_url:
+            raise ValueError("ScreenshotCaptureService.capture(): no URL available — page.url is empty and service.url was not set")
+
+        logger.info("Capture input url=%s", effective_url)
+        logger.info("Capture current page.url=%s", page.url)
+        logger.info("Capture strategy=networkidle (attempt 1)")
 
         strategies = [
             ("networkidle", lambda p: (p.goto(effective_url, wait_until="networkidle", timeout=config.TIMEOUT), p.screenshot(path=path, full_page=True))[1]),
@@ -60,6 +69,7 @@ class ScreenshotCaptureService:
 
         for i, (name, strategy) in enumerate(strategies):
             try:
+                logger.info("Capture strategy=%s (attempt %d)", name, i + 1)
                 strategy(page)
                 quality = validate_screenshot(path)
                 if quality.valid:
@@ -84,7 +94,10 @@ class ScreenshotCaptureService:
 
     def _capture_with_load_and_fonts(self, page: Page) -> None:
         """Strategy 2: load + fonts.ready + sleep."""
-        effective_url = getattr(page, '_current_url', None) or self.url or "https://example.com"
+        effective_url = page.url or self.url
+        if not effective_url:
+            raise ValueError("ScreenshotCaptureService._capture_with_load_and_fonts(): no URL available")
+        logger.info("Capture strategy=load_fonts url=%s", effective_url)
         page.goto(effective_url, wait_until="load", timeout=config.TIMEOUT)
         page.evaluate("() => document.fonts.ready")
         time.sleep(2)
@@ -92,7 +105,10 @@ class ScreenshotCaptureService:
 
     def _capture_with_scroll(self, page: Page) -> None:
         """Strategy 3: scroll to trigger lazy JS renders."""
-        effective_url = getattr(page, '_current_url', None) or self.url or "https://example.com"
+        effective_url = page.url or self.url
+        if not effective_url:
+            raise ValueError("ScreenshotCaptureService._capture_with_scroll(): no URL available")
+        logger.info("Capture strategy=scroll url=%s", effective_url)
         page.goto(effective_url, wait_until="load", timeout=config.TIMEOUT)
         page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
         time.sleep(1.5)
@@ -112,5 +128,6 @@ class ScreenshotCaptureService:
 def capture_screenshot(page: Page, filename_base: str = "screenshot") -> ScreenshotResult:
     """Convenience for service."""
     service = ScreenshotCaptureService(filename_base)
-    service.url = getattr(page, '_current_url', None)  # Set if available
+    service.url = page.url  # Set from live page object
+    logger.info("Screenshot requested_url=%s", service.url)
     return service.capture(page)

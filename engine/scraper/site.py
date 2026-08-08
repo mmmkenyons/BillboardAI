@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import (
     sync_playwright,
     TimeoutError as PlaywrightTimeoutError,
+    Error as PlaywrightError,
 )
 import tldextract
 
@@ -74,30 +75,50 @@ class WebsiteScraper:
     def load(self):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
+            logger.info("Browser launched id=%s", id(browser))
             page = browser.new_page(user_agent=config.USER_AGENT)
-            self._navigate(page, self.url)
-            self.html = page.content()
-            self.soup = BeautifulSoup(self.html, "lxml")
-            self.hero_url = pick_hero_image(page)
-            self.asset_urls = discover_assets(self.html, self.url)
-            self.css_paths = self.save_css(page)
-            self.asset_paths = self.save_assets()
-            self.metadata = extract_metadata(self.soup, self.url)
-            # Use new capture service with validation/retry (Phase 3)
+            logger.info("Page created id=%s", id(page))
             try:
-                result = capture_screenshot(page, self.filename_base)
-                self.screenshot_path = result.path
-                if config.DEBUG:
-                    print(f"[DEBUG] Screenshot captured with strategy: {result.strategy_used} (score: {result.quality.score}, variance: {result.quality.variance})")
-            except ScreenshotValidationError as e:
-                print(f"[ERROR] Screenshot capture failed for {self.url}: {e}")
-                if config.DEBUG and e.quality:
-                    print(f"  Diagnostics: {e.quality.diagnostics}")
-                raise
-            self.brand_colors = extract_brand_colors(self.screenshot_path)
-            browser.close()
+                self._navigate(browser, page, self.url)
+                logger.info(
+                    "After navigate: browser_connected=%s page_closed=%s",
+                    browser.is_connected(),
+                    page.is_closed(),
+                )
+                self.html = page.content()
+                self.soup = BeautifulSoup(self.html, "lxml")
+                self.hero_url = pick_hero_image(page)
+                self.asset_urls = discover_assets(self.html, self.url)
+                self.css_paths = self.save_css(page)
+                self.asset_paths = self.save_assets()
+                self.metadata = extract_metadata(self.soup, self.url)
+                # Use new capture service with validation/retry (Phase 3)
+                try:
+                    logger.info(
+                        "Screenshot requested_url=%s WebsiteScraper self.url=%s Current page.url=%s",
+                        self.url,
+                        self.url,
+                        page.url,
+                    )
+                    result = capture_screenshot(page, self.filename_base)
+                    self.screenshot_path = result.path
+                    if config.DEBUG:
+                        print(f"[DEBUG] Screenshot captured with strategy: {result.strategy_used} (score: {result.quality.score}, variance: {result.quality.variance})")
+                except ScreenshotValidationError as e:
+                    print(f"[ERROR] Screenshot capture failed for {self.url}: {e}")
+                    if config.DEBUG and e.quality:
+                        print(f"  Diagnostics: {e.quality.diagnostics}")
+                    raise
+                self.brand_colors = extract_brand_colors(self.screenshot_path)
+            finally:
+                logger.info("Closing browser")
+                try:
+                    browser.close()
+                except Exception:
+                    logger.exception("browser.close() failed")
+                logger.info("Leaving load()")
 
-    def _navigate(self, page, url):
+    def _navigate(self, browser, page, url):
         """Navigate to a URL with a resilient fallback strategy.
 
         Attempt 1: wait for networkidle (preferred, full page load).
@@ -106,14 +127,37 @@ class WebsiteScraper:
         is the original exception re-raised.
         """
         try:
+            logger.info(
+                "Before goto: page_closed=%s browser_connected=%s url=%s",
+                page.is_closed(),
+                browser.is_connected(),
+                url,
+            )
             logger.info("Attempt 1: networkidle")
             page.goto(url, wait_until="networkidle", timeout=config.TIMEOUT)
         except PlaywrightTimeoutError:
             logger.info("networkidle timed out after %ss", config.TIMEOUT // 1000)
             logger.info("Retrying with domcontentloaded...")
+            logger.info(
+                "Before goto: page_closed=%s browser_connected=%s url=%s",
+                page.is_closed(),
+                browser.is_connected(),
+                url,
+            )
             page.goto(url, wait_until="domcontentloaded", timeout=config.TIMEOUT)
             time.sleep(2.5)  # Allow layout stabilization after DOM is ready
             logger.info("Loaded page using domcontentloaded.")
+        except PlaywrightError as e:
+            if "TargetClosed" in str(e) or "Target page, context or browser has been closed" in str(e):
+                logger.exception(
+                    "TargetClosedError during navigation. "
+                    "page_closed=%s browser_connected=%s",
+                    page.is_closed(),
+                    browser.is_connected(),
+                )
+            else:
+                logger.exception("Playwright error during navigation")
+            raise
 
     def save_html(self):
         path = os.path.join(config.HTML_FOLDER, f"{self.filename_base}.html")

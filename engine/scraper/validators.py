@@ -4,6 +4,7 @@ Implements the validator framework per sprint plan. Each validator returns
 part of ScreenshotQuality. Orchestrator combines them.
 """
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
@@ -15,6 +16,33 @@ import cv2
 import numpy as np
 
 from .. import config
+
+logger = logging.getLogger(__name__)
+
+# Maximum dimensions for the analysis copy used in metric computation.
+# Full-page screenshots can exceed 10 000 px in height, which causes
+# MemoryError inside cv2.Laplacian / lap.var().  The analysis copy is
+# downscaled to fit within these bounds while preserving aspect ratio.
+_MAX_ANALYSIS_WIDTH = 1200
+_MAX_ANALYSIS_HEIGHT = 2000
+
+
+def _create_analysis_image(image: np.ndarray) -> np.ndarray:
+    """Return a down-sampled copy of *image* suitable for metric computation.
+
+    If either dimension exceeds the safe maximum (1200×2000) the image is
+    resized with ``cv2.INTER_AREA`` (preserving aspect ratio) so that both
+    dimensions fit within the bounds.  Otherwise a copy of the original is
+    returned so callers never mutate the source.
+    """
+    h, w = image.shape[:2]
+    if w <= _MAX_ANALYSIS_WIDTH and h <= _MAX_ANALYSIS_HEIGHT:
+        return image.copy()
+
+    scale = min(_MAX_ANALYSIS_WIDTH / w, _MAX_ANALYSIS_HEIGHT / h)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
 @dataclass
@@ -43,6 +71,13 @@ class ScreenshotMetrics:
     white_ratio: float = 0.0
     black_ratio: float = 0.0
     edge_density: float = 0.0
+    # Debug metrics for memory-bounded analysis
+    original_size: str = ""
+    analysis_size: str = ""
+    original_pixel_count: int = 0
+    analysis_pixel_count: int = 0
+    analysis_width: int = 0
+    analysis_height: int = 0
 
 
 class ScreenshotValidator:
@@ -168,31 +203,43 @@ class ScreenshotDecisionEngine:
 
 
 def compute_metrics(image: np.ndarray) -> ScreenshotMetrics:
-    """Collect all metrics in one place (no per-validator decisions)."""
+    """Collect all metrics in one place (no per-validator decisions).
+
+    Expensive operations (Laplacian, Canny, entropy) are run on a
+    down-sampled analysis copy to prevent MemoryError on tall pages.
+    Original dimensions are preserved in the returned metrics.
+    """
     h, w = image.shape[:2]
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
+    original_pixels = w * h
+
+    # Create a memory-safe analysis copy; expensive metrics run on this
+    analysis = _create_analysis_image(image)
+    ah, aw = analysis.shape[:2]
+    analysis_pixels = aw * ah
+
+    gray = cv2.cvtColor(analysis, cv2.COLOR_BGR2GRAY)
+
     mean_brightness = float(np.mean(gray))
     stddev = float(np.std(gray))
-    
-    # Laplacian
-    lap = cv2.Laplacian(gray, cv2.CV_64F)
+
+    # Laplacian (CV_32F to avoid float64 memory blowup on large analysis images)
+    lap = cv2.Laplacian(gray, cv2.CV_32F)
     laplacian_variance = float(lap.var())
-    
+
     # Entropy (kept for diagnostics only)
     hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
     hist = hist / hist.sum()
     hist = hist[hist > 0]
     entropy = -np.sum(hist * np.log2(hist)) if len(hist) > 0 else 0.0
-    
+
     # White/black ratios
     white_ratio = float(np.mean(gray > 240))
     black_ratio = float(np.mean(gray < 15))
-    
+
     # Edge density (new structural metric)
     edges = cv2.Canny(gray, 50, 150)
     edge_density = float(np.mean(edges > 0))
-    
+
     return ScreenshotMetrics(
         width=w,
         height=h,
@@ -203,24 +250,55 @@ def compute_metrics(image: np.ndarray) -> ScreenshotMetrics:
         white_ratio=white_ratio,
         black_ratio=black_ratio,
         edge_density=edge_density,
+        original_size=f"{w}x{h}",
+        analysis_size=f"{aw}x{ah}",
+        original_pixel_count=original_pixels,
+        analysis_pixel_count=analysis_pixels,
+        analysis_width=aw,
+        analysis_height=ah,
     )
 
 
 def validate_screenshot(image_path: str | Path) -> ScreenshotQuality:
     """Orchestrator: collects ALL metrics first, then uses DecisionEngine.
     No early exit. Fully matches approved design and constraints.
+
+    Hardened against OpenCV / NumPy / memory errors so a validation failure
+    never crashes the scraper or desktop app.  On unexpected errors a
+    degraded ``ScreenshotQuality(valid=False, reason="validator_crash")`` is
+    returned so the pipeline can continue gracefully.
     """
     path = Path(image_path)
     if not path.exists():
         return ScreenshotQuality(valid=False, reason="file_not_found", score=0)
 
-    image = cv2.imread(str(path))
+    try:
+        image = cv2.imread(str(path))
+    except Exception as exc:
+        logger.error("cv2.imread raised for %s: %s", path, exc)
+        return ScreenshotQuality(
+            valid=False, reason="validator_crash", score=0,
+            diagnostics={"error": f"imread: {exc}", "path": str(path)},
+        )
+
     if image is None:
         return ScreenshotQuality(valid=False, reason="invalid_image", score=0)
 
-    # New flow: compute all metrics first
-    metrics = compute_metrics(image)
-    
+    try:
+        # New flow: compute all metrics first
+        metrics = compute_metrics(image)
+    except Exception as exc:
+        logger.error("compute_metrics raised for %s (%dx%d): %s",
+                     path, image.shape[1], image.shape[0], exc)
+        return ScreenshotQuality(
+            valid=False, reason="validator_crash", score=0,
+            diagnostics={
+                "error": f"compute_metrics: {exc}",
+                "path": str(path),
+                "dimensions": (image.shape[1], image.shape[0]),
+            },
+        )
+
     # Single decision
     engine = ScreenshotDecisionEngine()
     quality = engine.decide(metrics)

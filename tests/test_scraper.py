@@ -60,12 +60,18 @@ def test_run_scraper_creates_output(tmp_path, monkeypatch):
                 return True
             return []
 
+        def is_closed(self) -> bool:
+            return False
+
     class FakeBrowser:
         def new_page(self, user_agent=None):
             return FakePage()
 
         def close(self):
             pass
+
+        def is_connected(self) -> bool:
+            return True
 
     class FakePlaywright:
         def __init__(self):
@@ -156,12 +162,18 @@ def test_automatic_regeneration_on_weak_quality(tmp_path, monkeypatch):
                 return True
             return []
 
+        def is_closed(self) -> bool:
+            return False
+
     class FakeBrowser:
         def new_page(self, user_agent=None):
             return FakePage()
 
         def close(self):
             pass
+
+        def is_connected(self) -> bool:
+            return True
 
     class FakePlaywright:
         def __init__(self):
@@ -230,12 +242,18 @@ def test_blank_image_raises_validation_error(tmp_path, monkeypatch):
         def evaluate(self, script):
             return []
 
+        def is_closed(self) -> bool:
+            return False
+
     class FakeBrowser:
         def new_page(self, user_agent=None):
             return FakePage()
 
         def close(self):
             pass
+
+        def is_connected(self) -> bool:
+            return True
 
     class FakePlaywright:
         def __init__(self):
