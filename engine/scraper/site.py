@@ -20,6 +20,7 @@ from .. import config
 from ..analyzer import analyze_scrape_data
 from ..designer import generate_billboard
 from ..renderer.renderer import render_billboard
+from .asset_normalizer import normalize_asset
 from .assets import discover_assets
 from .color import extract_brand_colors
 from .css import extract_inline_styles, extract_stylesheet_urls
@@ -28,6 +29,7 @@ from .hero import pick_hero_image
 from .logo import pick_best_logo
 from .metadata import extract_metadata
 from .capture import capture_screenshot, ScreenshotValidationError
+from ..brand_profile import BrandAsset
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +173,23 @@ class WebsiteScraper:
         return path
 
     def download_resource(self, url, folder, prefix=None):
+        """Download a URL to *folder* and return the local filesystem path.
+
+        Backward-compatible: returns a plain ``str`` path (or ``None``).
+        For callers that also need the HTTP Content-Type, use
+        ``_download_with_meta()``.
+        """
+        result = self._download_with_meta(url, folder, prefix=prefix)
+        if result is None:
+            return None
+        path, _content_type = result
+        return path
+
+    def _download_with_meta(self, url, folder, prefix=None):
+        """Download *url* → (path, content_type) tuple.
+
+        Returns ``None`` on any failure.
+        """
         if not url:
             return None
 
@@ -179,7 +198,7 @@ class WebsiteScraper:
         path = os.path.join(folder, filename)
 
         if os.path.exists(path) and os.path.getsize(path) > 0:
-            return path
+            return path, None
 
         try:
             response = requests.get(url, timeout=config.TIMEOUT / 1000, stream=True)
@@ -187,12 +206,13 @@ class WebsiteScraper:
                 content_length = int(response.headers.get("Content-Length", 0))
                 if content_length > 10_000_000:
                     return None
+                content_type = response.headers.get("Content-Type", None)
                 with open(path, "wb") as handle:
                     for chunk in response.iter_content(8192):
                         if chunk:
                             handle.write(chunk)
                 if os.path.exists(path) and os.path.getsize(path) > 0:
-                    return path
+                    return path, content_type
                 os.remove(path)
         except requests.RequestException:
             return None
@@ -251,8 +271,49 @@ class WebsiteScraper:
         assert self.logo_score is None or isinstance(self.logo_score, (int, float)), (
             f"logo_score must be numeric or None, got {type(self.logo_score).__name__}: {self.logo_score!r}"
         )
-        self.logo_path = self.download_resource(self.logo_url, config.ASSETS_FOLDER, prefix="logo") if self.logo_url else None
+        # --- Logo download + normalization ---------------------------------
+        logo_asset = None
+        if self.logo_url:
+            result = self._download_with_meta(self.logo_url, config.ASSETS_FOLDER, prefix="logo")
+            if result is not None:
+                raw_path, content_type = result
+                self.logo_path = raw_path
+                try:
+                    logo_asset = normalize_asset(
+                        raw_path,
+                        self.logo_url,
+                        content_type=content_type,
+                        asset_type="logo",
+                    )
+                    if logo_asset is not None:
+                        self.logo_path = logo_asset.path
+                        logger.info(
+                            "Logo normalized: %s format=%s %dx%d alpha=%s",
+                            os.path.basename(logo_asset.path),
+                            logo_asset.format,
+                            logo_asset.width,
+                            logo_asset.height,
+                            logo_asset.has_alpha,
+                        )
+                except Exception:
+                    logger.warning("Logo normalization failed for %s", self.logo_url, exc_info=True)
+            else:
+                self.logo_path = None
+        else:
+            self.logo_path = None
+
         self.headline = extract_headline(self.html)
+
+        # --- Asset normalization -------------------------------------------
+        brand_assets = []
+        for asset_path in self.asset_paths:
+            # Find the matching URL (best-effort; we stored them in order)
+            try:
+                norm = normalize_asset(asset_path, "", asset_type="generic")
+                if norm is not None:
+                    brand_assets.append(norm)
+            except Exception:
+                logger.debug("Asset normalization skipped for %s", asset_path)
 
         data = {
             "url": self.url,
@@ -264,9 +325,11 @@ class WebsiteScraper:
             "logo_url": self.logo_url,
             "logo_path": self.logo_path,
             "logo_score": self.logo_score,
+            "logo": logo_asset.to_dict() if logo_asset else None,
             "hero_url": self.hero_url,
             "brand_colors": self.brand_colors,
             "asset_paths": self.asset_paths,
+            "assets": [a.to_dict() for a in brand_assets],
             "css_paths": self.css_paths,
             "screenshot_path": self.screenshot_path,
             "asset_urls": self.asset_urls,
