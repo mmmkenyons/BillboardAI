@@ -2,7 +2,8 @@
 
 Implements scene-based billboard rendering per Sprint 4C requirements.
 Preserves RenderContext contract, reuses existing helpers where possible.
-Uses cart_corral template for natural composite with perspective warp.
+Template-driven: all geometry, dimensions, and scene paths come from
+template configuration files in assets/templates/.
 """
 
 import json
@@ -93,16 +94,21 @@ def _apply_perspective(image: Image.Image) -> Image.Image:
     return warped
 
 
-def _load_template(template_name: str = "cart_corral") -> tuple[Dict[str, Any], str]:
+def _load_template(template_name: str) -> tuple[Dict[str, Any], str]:
     """Load template definition (scene, quad, dimensions).
+
+    Args:
+        template_name: Template identifier (matches filename without .json).
 
     Returns:
         (template_dict, resolved_template_path)
+
+    Raises:
+        FileNotFoundError: If the template JSON file does not exist.
     """
     template_path = Path("assets/templates") / f"{template_name}.json"
     if not template_path.exists():
-        # Fallback to cart_corral
-        template_path = Path("assets/templates/cart_corral.json")
+        raise FileNotFoundError(f"Template not found: {template_path}")
     with open(template_path, "r", encoding="utf-8") as f:
         return json.load(f), str(template_path)
 
@@ -271,6 +277,130 @@ def _save_debug(image: Image.Image, name: str, debug_dir: Path) -> None:
     print(f"DEBUG: Saved {path}")
 
 
+def _validate_template(template: Dict[str, Any], template_path: str) -> None:
+    """Validate a physical billboard template configuration.
+
+    All geometry, dimensions, and paths must be present and consistent.
+    Fails with a clear error for any invalid or missing configuration.
+
+    Raises:
+        ValueError: If any validation check fails.
+    """
+    # --- Required top-level keys ---
+    required_keys = [
+        "id",
+        "scene_path",
+        "reference_size",
+        "billboard_quad",
+        "default_artwork_size",
+    ]
+    for key in required_keys:
+        if key not in template:
+            raise ValueError(
+                f"Template '{template_path}' missing required key: '{key}'"
+            )
+
+    # --- scene_path ---
+    scene_path = template["scene_path"]
+    if not isinstance(scene_path, str) or not scene_path:
+        raise ValueError(
+            f"Template '{template_path}': 'scene_path' must be a non-empty string"
+        )
+    if not os.path.exists(scene_path):
+        raise FileNotFoundError(
+            f"Template '{template_path}': scene image not found: {scene_path}"
+        )
+
+    # --- reference_size ---
+    ref_size = template["reference_size"]
+    if (
+        not isinstance(ref_size, (list, tuple))
+        or len(ref_size) != 2
+        or not all(isinstance(v, (int, float)) and v > 0 for v in ref_size)
+    ):
+        raise ValueError(
+            f"Template '{template_path}': 'reference_size' must be [width, height] "
+            f"with two positive integers, got: {ref_size}"
+        )
+    ref_w, ref_h = int(ref_size[0]), int(ref_size[1])
+
+    # Verify source image dimensions match reference_size
+    actual_w, actual_h = Image.open(scene_path).size
+    if (actual_w, actual_h) != (ref_w, ref_h):
+        raise ValueError(
+            f"Template '{template_path}': source image dimensions "
+            f"({actual_w}x{actual_h}) do not match reference_size "
+            f"({ref_w}x{ref_h})"
+        )
+
+    # --- billboard_quad ---
+    quad = template["billboard_quad"]
+    if not isinstance(quad, list) or len(quad) != 4:
+        raise ValueError(
+            f"Template '{template_path}': 'billboard_quad' must be a list of "
+            f"exactly 4 [x, y] points (TL, TR, BR, BL), got {len(quad) if isinstance(quad, list) else type(quad).__name__} entries"
+        )
+
+    for i, pt in enumerate(quad):
+        corner_names = ["TL", "TR", "BR", "BL"]
+        if (
+            not isinstance(pt, (list, tuple))
+            or len(pt) != 2
+            or not all(isinstance(v, (int, float)) for v in pt)
+        ):
+            raise ValueError(
+                f"Template '{template_path}': 'billboard_quad' point {i} "
+                f"({corner_names[i]}) must be [x, y] with numeric values, got: {pt}"
+            )
+        x, y = float(pt[0]), float(pt[1])
+        if x < 0 or x > ref_w or y < 0 or y > ref_h:
+            raise ValueError(
+                f"Template '{template_path}': 'billboard_quad' point {i} "
+                f"({corner_names[i]}) [{x:.1f}, {y:.1f}] is outside "
+                f"source image bounds ({ref_w}x{ref_h})"
+            )
+
+    # Check quad is non-degenerate (area > 0)
+    pts = np.array(quad, dtype=np.float32)
+    area = cv2.contourArea(pts)
+    if area <= 0:
+        raise ValueError(
+            f"Template '{template_path}': 'billboard_quad' is degenerate "
+            f"(area={area:.1f}). Check point ordering (TL, TR, BR, BL)."
+        )
+
+    # --- default_artwork_size ---
+    artwork_size = template["default_artwork_size"]
+    if (
+        not isinstance(artwork_size, (list, tuple))
+        or len(artwork_size) != 2
+        or not all(isinstance(v, (int, float)) and v > 0 for v in artwork_size)
+    ):
+        raise ValueError(
+            f"Template '{template_path}': 'default_artwork_size' must be "
+            f"[width, height] with two positive integers, got: {artwork_size}"
+        )
+
+    # --- artwork_aspect (optional but validated if present) ---
+    artwork_aspect = template.get("artwork_aspect")
+    if artwork_aspect is not None:
+        if not isinstance(artwork_aspect, (int, float)) or artwork_aspect <= 0:
+            raise ValueError(
+                f"Template '{template_path}': 'artwork_aspect' must be a "
+                f"positive number, got: {artwork_aspect}"
+            )
+        # Warn if artwork_aspect is inconsistent with default_artwork_size
+        config_aspect = artwork_size[0] / artwork_size[1]
+        if abs(config_aspect - artwork_aspect) > 0.1:
+            logger.warning(
+                "Template '%s': 'artwork_aspect' (%.3f) differs from "
+                "'default_artwork_size' aspect (%.3f)",
+                template_path,
+                artwork_aspect,
+                config_aspect,
+            )
+
+
 def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
     """Main renderer - loads scene/template at native resolution, generates artwork,
     warps into billboard quad, composites. Output matches source scene dimensions exactly.
@@ -282,14 +412,23 @@ def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
     debug_dir = Path(DEBUG_FOLDER or str(OUTPUT_DIR / "debug"))
 
     # 1. Load template (scene + placement)
-    template_name = spec.get("template") or spec.get("selected_template") or "cart_corral"
-    template, template_path = _load_template(template_name)
+    # 'scene_template' selects the physical billboard scene (e.g. cart_corral).
+    # 'template' / 'selected_template' is the design theme (e.g. contractor, realtor)
+    # and is NOT used for physical template selection.
+    scene_template = spec.get("scene_template")
+    if not scene_template:
+        raise ValueError("No scene_template specified — set 'scene_template' in render spec")
+    template, template_path = _load_template(scene_template)
     logger.info("Renderer template path: %s", template_path)
     logger.info("Renderer reference_size: %s", template.get("reference_size"))
     logger.info("Renderer billboard_quad: %s", template.get("billboard_quad"))
-    scene_path = template.get("scene_path", "assets/cart_corral.jpg")
+
+    # Validate template configuration before rendering
+    _validate_template(template, template_path)
+
+    scene_path = template["scene_path"]
     if not os.path.exists(scene_path):
-        scene_path = "assets/cart_corral.jpg"  # fallback
+        raise FileNotFoundError(f"Scene image not found: {scene_path}")
 
     # Load scene at native resolution — no resize, no crop, no fit
     scene = Image.open(scene_path).convert("RGB")
@@ -299,14 +438,14 @@ def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
         _save_debug(scene, "01_scene.png", debug_dir)
 
     # 2. Generate artwork at configured working resolution
-    default_size = template.get("default_artwork_size", (640, 400))
+    default_size = template["default_artwork_size"]
     artwork_size = (int(default_size[0]), int(default_size[1]))
     artwork = _generate_artwork(spec, artwork_size)
     if debug_enabled:
         _save_debug(artwork, "02_artwork.png", debug_dir)
 
     # 3. Use billboard quad directly from template (already in native coordinates)
-    quad = template.get("billboard_quad", [[100, 100], [500, 100], [520, 300], [80, 320]])
+    quad = template["billboard_quad"]
     if debug_enabled:
         print(f"DEBUG: billboard quad (native): {quad}")
 

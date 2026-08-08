@@ -113,6 +113,7 @@ def render_spec_from_context(context: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "template": template_name,
         "selected_template": template_name,
+        "scene_template": "cart_corral",
         "canvas": {
             "width": int(canvas.get("width") or 1600),
             "height": int(canvas.get("height") or 900),

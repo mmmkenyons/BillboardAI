@@ -28,6 +28,7 @@ def _load_source_scene():
 def test_render_billboard_creates_image(tmp_path):
     output_path = tmp_path / "billboard.png"
     spec = {
+        "scene_template": "cart_corral",
         "background_color": "#FFFFFF",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -50,6 +51,7 @@ def test_render_billboard_creates_image(tmp_path):
 def test_render_billboard_uses_cta_text(tmp_path):
     output_path = tmp_path / "billboard_cta.png"
     spec = {
+        "scene_template": "cart_corral",
         "background_color": "#FFFFFF",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -73,6 +75,7 @@ def test_output_dimensions_match_source_template(tmp_path):
     """Final output dimensions must equal source template dimensions (523x561)."""
     output_path = tmp_path / "billboard_dims.png"
     spec = {
+        "scene_template": "cart_corral",
         "background_color": "#FFFFFF",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -99,6 +102,7 @@ def test_pixels_outside_billboard_unchanged(tmp_path):
 
     output_path = tmp_path / "billboard_unchanged.png"
     spec = {
+        "scene_template": "cart_corral",
         "background_color": "#FF0000",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -136,6 +140,7 @@ def test_artwork_does_not_escape_billboard_quad(tmp_path):
     """Artwork must not leak outside the configured billboard quad."""
     output_path = tmp_path / "billboard_no_escape.png"
     spec = {
+        "scene_template": "cart_corral",
         "background_color": "#00FF00",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -188,6 +193,7 @@ def test_artwork_aspect_ratio_matches_configured(tmp_path):
     """Artwork must be generated at the configured aspect ratio (2.505:1)."""
     output_path = tmp_path / "billboard_aspect.png"
     spec = {
+        "scene_template": "cart_corral",
         "background_color": "#FFFFFF",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -230,6 +236,7 @@ def test_no_gray_border_fill(tmp_path):
     """Verify no gray (240,240,240) border fill exists in the output."""
     output_path = tmp_path / "billboard_no_gray.png"
     spec = {
+        "scene_template": "cart_corral",
         "background_color": "#FFFFFF",
         "text_color": "#000000",
         "accent_color": "#1F77B4",
@@ -259,3 +266,359 @@ def test_no_gray_border_fill(tmp_path):
     assert gray_count < 500, (
         f"Found {gray_count} gray (240,240,240) pixels — old border fill may still be present"
     )
+
+
+# =============================================================================
+# Template-independence tests — prove renderer.py is fully template-driven
+# =============================================================================
+
+import json
+import pytest
+from pathlib import Path
+import engine.renderer.renderer as renderer_mod
+
+
+def _make_synthetic_scene(width: int, height: int, tmp_path: Path) -> str:
+    """Create a solid-color scene image for synthetic template testing."""
+    scene_path = tmp_path / f"scene_{width}x{height}.png"
+    img = Image.new("RGB", (width, height), (100, 150, 200))
+    img.save(scene_path)
+    return str(scene_path)
+
+
+def _make_template_json(tmp_path: Path, **overrides) -> str:
+    """Create a temporary template JSON file. Overrides merge onto sensible defaults."""
+    defaults = {
+        "id": "synthetic_test",
+        "name": "Synthetic Test Template",
+        "scene_path": "",
+        "reference_size": [400, 300],
+        "billboard_quad": [[50, 50], [350, 50], [350, 250], [50, 250]],
+        "artwork_aspect": 1.5,
+        "default_artwork_size": [600, 400],
+    }
+    defaults.update(overrides)
+    template_path = tmp_path / "synthetic_test.json"
+    with open(template_path, "w") as f:
+        json.dump(defaults, f)
+    return str(template_path)
+
+
+def _patch_load_template(monkeypatch, template_path):
+    """Monkeypatch _load_template to return a synthetic template for 'synthetic_test'."""
+    original_load = renderer_mod._load_template
+
+    def _load_synthetic(name):
+        if name == "synthetic_test":
+            with open(template_path) as f:
+                return json.load(f), template_path
+        return original_load(name)
+
+    monkeypatch.setattr(renderer_mod, "_load_template", _load_synthetic)
+
+
+# --- Test 1: Rectangular synthetic template ---
+def test_synthetic_rectangular_template(tmp_path, monkeypatch):
+    """Render with a synthetic rectangular billboard template."""
+    scene_path = _make_synthetic_scene(400, 300, tmp_path)
+    template_path = _make_template_json(
+        tmp_path,
+        scene_path=scene_path,
+        reference_size=[400, 300],
+        billboard_quad=[[50, 50], [350, 50], [350, 250], [50, 250]],
+        default_artwork_size=[600, 400],
+    )
+    _patch_load_template(monkeypatch, template_path)
+
+    output_path = tmp_path / "output.png"
+    spec = {
+        "scene_template": "synthetic_test",
+        "background_color": "#FF0000",
+        "text_color": "#000000",
+        "accent_color": "#1F77B4",
+        "button_color": "#FF7F0E",
+        "font_family": "arial.ttf",
+        "company": "Test",
+        "headline": "Synthetic Rect",
+        "subtitle": "",
+        "layout_style": "classic",
+        "cta_text": "Go",
+    }
+    result_path = render_billboard(spec, str(output_path))
+    result = Image.open(result_path)
+    assert result.size == (400, 300), f"Expected 400x300, got {result.size}"
+
+    # Pixels outside the quad (top-left corner) should remain the scene color
+    result_arr = np.array(result)
+    corner_pixel = result_arr[10, 10]
+    assert tuple(corner_pixel) == (100, 150, 200), (
+        f"Corner pixel changed: {tuple(corner_pixel)}"
+    )
+
+
+# --- Test 2: Perspective-skewed synthetic template ---
+def test_synthetic_perspective_template(tmp_path, monkeypatch):
+    """Render with a perspective-skewed (trapezoidal) billboard quad."""
+    scene_path = _make_synthetic_scene(500, 400, tmp_path)
+    template_path = _make_template_json(
+        tmp_path,
+        scene_path=scene_path,
+        reference_size=[500, 400],
+        billboard_quad=[[100, 80], [420, 60], [440, 320], [80, 340]],
+        default_artwork_size=[600, 400],
+    )
+    _patch_load_template(monkeypatch, template_path)
+
+    output_path = tmp_path / "output_persp.png"
+    spec = {
+        "scene_template": "synthetic_test",
+        "background_color": "#00FF00",
+        "text_color": "#000000",
+        "accent_color": "#1F77B4",
+        "button_color": "#FF7F0E",
+        "font_family": "arial.ttf",
+        "company": "Test",
+        "headline": "Perspective Test",
+        "subtitle": "",
+        "layout_style": "classic",
+        "cta_text": "Go",
+    }
+    result_path = render_billboard(spec, str(output_path))
+    result = Image.open(result_path)
+    assert result.size == (500, 400), f"Expected 500x400, got {result.size}"
+
+    # Pixels outside the quad should remain unchanged
+    result_arr = np.array(result)
+    corner = result_arr[5, 5]
+    assert tuple(corner) == (100, 150, 200), f"Corner pixel changed: {tuple(corner)}"
+
+
+# --- Test 3: Missing scene_template rejected ---
+def test_missing_scene_template_rejected(tmp_path):
+    """Renderer must raise ValueError when no scene_template is specified."""
+    output_path = tmp_path / "output.png"
+    spec = {
+        "background_color": "#FFFFFF",
+        "company": "Test",
+        "headline": "No Scene Template",
+    }
+    with pytest.raises(ValueError, match="No scene_template specified"):
+        render_billboard(spec, str(output_path))
+
+
+# --- Test 4: Missing scene_path rejected ---
+def test_missing_scene_path_rejected(tmp_path, monkeypatch):
+    """Template without a valid scene_path must fail validation."""
+    template_path = _make_template_json(
+        tmp_path,
+        scene_path="nonexistent_scene.jpg",
+        reference_size=[400, 300],
+    )
+    _patch_load_template(monkeypatch, template_path)
+
+    output_path = tmp_path / "output.png"
+    spec = {
+        "scene_template": "synthetic_test",
+        "background_color": "#FFFFFF",
+        "company": "Test",
+        "headline": "Missing Scene",
+    }
+    with pytest.raises((FileNotFoundError, ValueError), match="scene"):
+        render_billboard(spec, str(output_path))
+
+
+# --- Test 5: Missing scene file rejected ---
+def test_missing_scene_file_rejected(tmp_path, monkeypatch):
+    """Template referencing a scene file that doesn't exist on disk must fail."""
+    scene_path = str(tmp_path / "does_not_exist.jpg")
+    template_path = _make_template_json(
+        tmp_path,
+        scene_path=scene_path,
+        reference_size=[400, 300],
+    )
+    _patch_load_template(monkeypatch, template_path)
+
+    output_path = tmp_path / "output.png"
+    spec = {
+        "scene_template": "synthetic_test",
+        "background_color": "#FFFFFF",
+        "company": "Test",
+        "headline": "Missing File",
+    }
+    with pytest.raises((FileNotFoundError, ValueError), match="scene"):
+        render_billboard(spec, str(output_path))
+
+
+# --- Test 6: reference_size mismatch rejected ---
+def test_reference_size_mismatch_rejected(tmp_path, monkeypatch):
+    """Template with reference_size not matching actual image must fail."""
+    scene_path = _make_synthetic_scene(400, 300, tmp_path)
+    template_path = _make_template_json(
+        tmp_path,
+        scene_path=scene_path,
+        reference_size=[800, 600],  # Wrong!
+        billboard_quad=[[50, 50], [350, 50], [350, 250], [50, 250]],
+    )
+    _patch_load_template(monkeypatch, template_path)
+
+    output_path = tmp_path / "output.png"
+    spec = {
+        "scene_template": "synthetic_test",
+        "background_color": "#FFFFFF",
+        "company": "Test",
+        "headline": "Mismatch",
+    }
+    with pytest.raises(ValueError, match="do not match reference_size"):
+        render_billboard(spec, str(output_path))
+
+
+# --- Test 7: Malformed billboard_quad rejected ---
+def test_malformed_billboard_quad_rejected(tmp_path, monkeypatch):
+    """Template with only 3 quad points must fail validation."""
+    scene_path = _make_synthetic_scene(400, 300, tmp_path)
+    template_path = _make_template_json(
+        tmp_path,
+        scene_path=scene_path,
+        reference_size=[400, 300],
+        billboard_quad=[[50, 50], [350, 50], [350, 250]],  # Only 3 points
+    )
+    _patch_load_template(monkeypatch, template_path)
+
+    output_path = tmp_path / "output.png"
+    spec = {
+        "scene_template": "synthetic_test",
+        "background_color": "#FFFFFF",
+        "company": "Test",
+        "headline": "Bad Quad",
+    }
+    with pytest.raises(ValueError, match="exactly 4"):
+        render_billboard(spec, str(output_path))
+
+
+# --- Test 8: Degenerate billboard_quad rejected ---
+def test_degenerate_billboard_quad_rejected(tmp_path, monkeypatch):
+    """Template with all 4 quad points identical must fail (zero area)."""
+    scene_path = _make_synthetic_scene(400, 300, tmp_path)
+    template_path = _make_template_json(
+        tmp_path,
+        scene_path=scene_path,
+        reference_size=[400, 300],
+        billboard_quad=[[100, 100], [100, 100], [100, 100], [100, 100]],
+    )
+    _patch_load_template(monkeypatch, template_path)
+
+    output_path = tmp_path / "output.png"
+    spec = {
+        "scene_template": "synthetic_test",
+        "background_color": "#FFFFFF",
+        "company": "Test",
+        "headline": "Degenerate",
+    }
+    with pytest.raises(ValueError, match="degenerate"):
+        render_billboard(spec, str(output_path))
+
+
+# --- Test 9: Out-of-bounds billboard_quad rejected ---
+def test_out_of_bounds_billboard_quad_rejected(tmp_path, monkeypatch):
+    """Template with quad point outside image bounds must fail."""
+    scene_path = _make_synthetic_scene(400, 300, tmp_path)
+    template_path = _make_template_json(
+        tmp_path,
+        scene_path=scene_path,
+        reference_size=[400, 300],
+        billboard_quad=[[50, 50], [500, 50], [500, 250], [50, 250]],  # x=500 > 400
+    )
+    _patch_load_template(monkeypatch, template_path)
+
+    output_path = tmp_path / "output.png"
+    spec = {
+        "scene_template": "synthetic_test",
+        "background_color": "#FFFFFF",
+        "company": "Test",
+        "headline": "OOB",
+    }
+    with pytest.raises(ValueError, match="outside"):
+        render_billboard(spec, str(output_path))
+
+
+# --- Test 10: Two different templates produce different outputs ---
+def test_two_templates_different_outputs(tmp_path, monkeypatch):
+    """Prove renderer.py handles two different templates without code changes."""
+    # Template A: 400x300 scene, quad at top-left
+    scene_a = _make_synthetic_scene(400, 300, tmp_path)
+    template_a = _make_template_json(
+        tmp_path,
+        id="template_a",
+        scene_path=scene_a,
+        reference_size=[400, 300],
+        billboard_quad=[[20, 20], [200, 20], [200, 120], [20, 120]],
+        default_artwork_size=[360, 200],
+    )
+
+    # Template B: 300x400 scene, quad at bottom-right
+    scene_b_path = tmp_path / "scene_300x400.png"
+    img_b = Image.new("RGB", (300, 400), (50, 200, 100))
+    img_b.save(scene_b_path)
+    scene_b = str(scene_b_path)
+
+    template_b_path = tmp_path / "template_b.json"
+    template_b_data = {
+        "id": "template_b",
+        "name": "Template B",
+        "scene_path": scene_b,
+        "reference_size": [300, 400],
+        "billboard_quad": [[100, 250], [280, 250], [280, 380], [100, 380]],
+        "artwork_aspect": 1.38,
+        "default_artwork_size": [552, 400],
+    }
+    with open(template_b_path, "w") as f:
+        json.dump(template_b_data, f)
+
+    original_load = renderer_mod._load_template
+
+    def _load_multi(name):
+        if name == "template_a":
+            with open(template_a) as f:
+                return json.load(f), template_a
+        if name == "template_b":
+            with open(template_b_path) as f:
+                return json.load(f), str(template_b_path)
+        return original_load(name)
+
+    monkeypatch.setattr(renderer_mod, "_load_template", _load_multi)
+
+    base_spec = {
+        "background_color": "#FFFFFF",
+        "text_color": "#000000",
+        "accent_color": "#1F77B4",
+        "button_color": "#FF7F0E",
+        "font_family": "arial.ttf",
+        "company": "Test",
+        "headline": "Multi Template",
+        "subtitle": "",
+        "layout_style": "classic",
+        "cta_text": "Go",
+    }
+
+    # Render template A
+    spec_a = {**base_spec, "scene_template": "template_a"}
+    out_a = render_billboard(spec_a, str(tmp_path / "out_a.png"))
+    img_a = Image.open(out_a)
+    assert img_a.size == (400, 300), f"Template A: expected 400x300, got {img_a.size}"
+
+    # Render template B
+    spec_b = {**base_spec, "scene_template": "template_b"}
+    out_b = render_billboard(spec_b, str(tmp_path / "out_b.png"))
+    img_b = Image.open(out_b)
+    assert img_b.size == (300, 400), f"Template B: expected 300x400, got {img_b.size}"
+
+    # Verify they are different sizes (proves template-driven)
+    assert img_a.size != img_b.size, "Two templates should produce different output sizes"
+
+    # Verify template A corner pixel is scene A color
+    arr_a = np.array(img_a)
+    assert tuple(arr_a[5, 5]) == (100, 150, 200), "Template A corner should be scene A color"
+
+    # Verify template B corner pixel is scene B color
+    arr_b = np.array(img_b)
+    assert tuple(arr_b[5, 5]) == (50, 200, 100), "Template B corner should be scene B color"

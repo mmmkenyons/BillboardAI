@@ -339,6 +339,7 @@ class RenderContext:
         return {
             "template": self.template or "contractor",
             "selected_template": self.template or "contractor",
+            "scene_template": "cart_corral",
             "canvas": {
                 "width": int(canvas.get("width") or 1600),
                 "height": int(canvas.get("height") or 900),
