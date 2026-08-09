@@ -5,11 +5,11 @@
     }
   ],
   "settings": {
-    "python.defaultInterpreterPath": "C:/Users/mattf/AppData/Local/Python/pythoncore-3.14-64/python.exe",
+    "python.defaultInterpreterPath": "${workspaceFolder}/bb_env/Scripts/python.exe",
     "python.analysis.extraPaths": [
-      "./",
-      "C:/Users/mattf/BillboardAI"
+      "${workspaceFolder}"
     ],
-    "python.analysis.autoSearchPaths": true
+    "python.analysis.autoSearchPaths": true,
+    "python.terminal.activateEnvironment": true
   }
 }
