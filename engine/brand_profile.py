@@ -359,6 +359,20 @@ class BrandProfileBuilder:
 
         scraped_at = str(data.get("scraped_at") or "")
 
+        # --- Business intelligence (Sprint 2C) ---
+        bi = data.get("business_intel") or {}
+        phone = str(bi.get("phone") or "")
+        location = str(bi.get("location") or "")
+        service_area = str(bi.get("service_area") or "")
+        services = [str(s) for s in bi.get("services") or []]
+        categories = [str(s) for s in bi.get("categories") or []]
+        differentiators = [str(s) for s in bi.get("differentiators") or []]
+        trust_signals = [str(s) for s in bi.get("trust_signals") or []]
+        awards = [str(s) for s in bi.get("awards") or []]
+        certifications = [str(s) for s in bi.get("certifications") or []]
+        guarantees = [str(s) for s in bi.get("guarantees") or []]
+        years_in_business = str(bi.get("years_in_business") or "")
+
         return BrandProfile(
             version=BRAND_PROFILE_VERSION,
             company_name=company,
@@ -376,6 +390,17 @@ class BrandProfileBuilder:
             quality_score=quality_score,
             vision_score=vision_score,
             scraped_at=scraped_at,
+            phone=phone,
+            location=location,
+            service_area=service_area,
+            services=services,
+            categories=categories,
+            differentiators=differentiators,
+            trust_signals=trust_signals,
+            awards=awards,
+            certifications=certifications,
+            guarantees=guarantees,
+            years_in_business=years_in_business,
         )
 
     @staticmethod
