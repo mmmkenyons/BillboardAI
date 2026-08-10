@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -111,6 +111,30 @@ def _load_template(template_name: str) -> tuple[Dict[str, Any], str]:
         raise FileNotFoundError(f"Template not found: {template_path}")
     with open(template_path, "r", encoding="utf-8") as f:
         return json.load(f), str(template_path)
+
+
+def load_physical_template(template_name: str) -> Dict[str, Any]:
+    """Public, validated loader for a physical scene template.
+
+    Returns the template dict (scene path, reference_size, billboard_quad,
+    default_artwork_size, ...). Raises FileNotFoundError when the template JSON
+    does not exist and ValueError when its configuration is invalid. This is the
+    single fact source for the intended rectangular artwork dimensions.
+    """
+    template, template_path = _load_template(template_name)
+    _validate_template(template, template_path)
+    return template
+
+
+def artwork_size_for_template(template_name: str) -> Tuple[int, int]:
+    """Return the physical template's intended rectangular artwork (width, height).
+
+    The creative must be generated at exactly these dimensions so the completed
+    artwork is never stretched to fit the calibrated quad.
+    """
+    template = load_physical_template(template_name)
+    size = template["default_artwork_size"]
+    return int(size[0]), int(size[1])
 
 
 def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Image:
@@ -401,31 +425,19 @@ def _validate_template(template: Dict[str, Any], template_path: str) -> None:
             )
 
 
-def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
-    """Main renderer - loads scene/template at native resolution, generates artwork,
-    warps into billboard quad, composites. Output matches source scene dimensions exactly.
+def _composite_artwork(
+    template: Dict[str, Any],
+    artwork: Image.Image,
+    output_path: str,
+    debug_enabled: bool = False,
+    debug_dir: Optional[Path] = None,
+) -> str:
+    """Warp completed artwork into the template's calibrated quad and composite.
+
+    Preserves every source-scene pixel outside the billboard replacement area.
+    This is the only place that performs perspective warp + compositing, shared
+    by the legacy render_billboard path and the Sprint 2H artwork entry point.
     """
-    if not output_path:
-        output_path = str(OUTPUT_DIR / "billboard.png")
-
-    debug_enabled = DEBUG or os.getenv("BILLBOARD_DEBUG", "0") in ("1", "true", "yes")
-    debug_dir = Path(DEBUG_FOLDER or str(OUTPUT_DIR / "debug"))
-
-    # 1. Load template (scene + placement)
-    # 'scene_template' selects the physical billboard scene (e.g. cart_corral).
-    # 'template' / 'selected_template' is the design theme (e.g. contractor, realtor)
-    # and is NOT used for physical template selection.
-    scene_template = spec.get("scene_template")
-    if not scene_template:
-        raise ValueError("No scene_template specified — set 'scene_template' in render spec")
-    template, template_path = _load_template(scene_template)
-    logger.info("Renderer template path: %s", template_path)
-    logger.info("Renderer reference_size: %s", template.get("reference_size"))
-    logger.info("Renderer billboard_quad: %s", template.get("billboard_quad"))
-
-    # Validate template configuration before rendering
-    _validate_template(template, template_path)
-
     scene_path = template["scene_path"]
     if not os.path.exists(scene_path):
         raise FileNotFoundError(f"Scene image not found: {scene_path}")
@@ -437,14 +449,7 @@ def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
         print(f"DEBUG: scene size (native): {scene_size}")
         _save_debug(scene, "01_scene.png", debug_dir)
 
-    # 2. Generate artwork at configured working resolution
-    default_size = template["default_artwork_size"]
-    artwork_size = (int(default_size[0]), int(default_size[1]))
-    artwork = _generate_artwork(spec, artwork_size)
-    if debug_enabled:
-        _save_debug(artwork, "02_artwork.png", debug_dir)
-
-    # 3. Use billboard quad directly from template (already in native coordinates)
+    # Use billboard quad directly from template (already in native coordinates)
     quad = template["billboard_quad"]
     if debug_enabled:
         print(f"DEBUG: billboard quad (native): {quad}")
@@ -475,3 +480,81 @@ def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     final.save(output_path)
     return output_path
+
+
+def render_artwork_into_scene(
+    artwork: Image.Image,
+    scene_template: str,
+    output_path: str,
+) -> str:
+    """Sprint 2H entry: place a *completed* rectangular artwork into a physical scene.
+
+    This is the physical-renderer integration seam. It consumes a pre-rendered
+    PIL artwork image only — it never creates headlines, chooses proof/CTA,
+    inspects BrandProfile/MessageStrategy/AdConcept, or decides composition. The
+    artwork is generated at the template's intended aspect ratio by the caller
+    and warped into the calibrated quad without any re-stretching.
+
+    Args:
+        artwork: Completed rectangular artwork (RGB/RGBA) at the template's
+            default_artwork_size.
+        scene_template: Physical scene template id (e.g. cart_corral).
+        output_path: Where to save the final mockup.
+
+    Returns:
+        output_path
+    """
+    if not scene_template:
+        raise ValueError("No scene_template specified — set 'scene_template' in the render spec")
+    template, template_path = _load_template(scene_template)
+    logger.info("Renderer template path: %s", template_path)
+    logger.info("Renderer reference_size: %s", template.get("reference_size"))
+    logger.info("Renderer billboard_quad: %s", template.get("billboard_quad"))
+
+    _validate_template(template, template_path)
+
+    debug_enabled = DEBUG or os.getenv("BILLBOARD_DEBUG", "0") in ("1", "true", "yes")
+    debug_dir = Path(DEBUG_FOLDER or str(OUTPUT_DIR / "debug"))
+
+    return _composite_artwork(
+        template, artwork, output_path,
+        debug_enabled=debug_enabled, debug_dir=debug_dir,
+    )
+
+
+def render_billboard(spec: Dict[str, Any], output_path: str) -> str:
+    """Main renderer - loads scene/template at native resolution, generates artwork,
+    warps into billboard quad, composites. Output matches source scene dimensions exactly.
+    """
+    if not output_path:
+        output_path = str(OUTPUT_DIR / "billboard.png")
+
+    debug_enabled = DEBUG or os.getenv("BILLBOARD_DEBUG", "0") in ("1", "true", "yes")
+    debug_dir = Path(DEBUG_FOLDER or str(OUTPUT_DIR / "debug"))
+
+    # 1. Load template (scene + placement)
+    # 'scene_template' selects the physical billboard scene (e.g. cart_corral).
+    # 'template' / 'selected_template' is the design theme (e.g. contractor, realtor)
+    # and is NOT used for physical template selection.
+    scene_template = spec.get("scene_template")
+    if not scene_template:
+        raise ValueError("No scene_template specified — set 'scene_template' in render spec")
+    template, template_path = _load_template(scene_template)
+    logger.info("Renderer template path: %s", template_path)
+    logger.info("Renderer reference_size: %s", template.get("reference_size"))
+    logger.info("Renderer billboard_quad: %s", template.get("billboard_quad"))
+
+    # Validate template configuration before rendering
+    _validate_template(template, template_path)
+
+    # 2. Generate artwork at configured working resolution
+    default_size = template["default_artwork_size"]
+    artwork_size = (int(default_size[0]), int(default_size[1]))
+    artwork = _generate_artwork(spec, artwork_size)
+    if debug_enabled:
+        _save_debug(artwork, "02_artwork.png", debug_dir)
+
+    return _composite_artwork(
+        template, artwork, output_path,
+        debug_enabled=debug_enabled, debug_dir=debug_dir,
+    )
