@@ -25,7 +25,7 @@ from engine.layout.model import CreativeLayoutSpec, LayoutLogo, LayoutText, cont
 class CreativeArtworkRenderer:
     """Renders a resolved CreativeLayoutSpec to a PIL image."""
 
-    def __init__(self, registry: "typography.FontRegistry" = None) -> None:
+    def __init__(self, registry: "Optional[typography.FontRegistry]" = None) -> None:
         self._registry = registry or typography.FontRegistry()
 
     def render(self, spec: CreativeLayoutSpec) -> Image.Image:
@@ -56,7 +56,10 @@ class CreativeArtworkRenderer:
     # ------------------------------------------------------------------
 
     def _draw_field(self, draw: ImageDraw.ImageDraw, spec: CreativeLayoutSpec) -> None:
-        x0, y0, x1, y1 = spec.field_rect
+        field_rect = spec.field_rect
+        if field_rect is None:
+            return
+        x0, y0, x1, y1 = field_rect
         draw.rectangle([x0, y0, x1, y1], fill=spec.palette.field)
 
     def _draw_text_block(self, draw: ImageDraw.ImageDraw, lt: LayoutText, color: str) -> None:

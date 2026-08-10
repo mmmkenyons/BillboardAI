@@ -41,7 +41,7 @@ def hex_to_rgb(value: str) -> Optional[Tuple[int, int, int]]:
     if len(s) != 6:
         return None
     try:
-        return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
     except ValueError:
         return None
 
@@ -56,7 +56,7 @@ def relative_luminance(color: str) -> float:
     rgb = hex_to_rgb(color)
     if rgb is None:
         return 0.0
-    r, g, b = (_linearize(v) for v in rgb)
+    r, g, b = _linearize(rgb[0]), _linearize(rgb[1]), _linearize(rgb[2])
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 

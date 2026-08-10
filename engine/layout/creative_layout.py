@@ -48,7 +48,7 @@ _CLEAR_SPACE_FRACTION = 0.08
 class CreativeLayoutEngine:
     """Resolves a CreativeLayoutSpec from an AdConcept for a requested artwork size."""
 
-    def __init__(self, registry: "typography.FontRegistry" = None) -> None:
+    def __init__(self, registry: "Optional[typography.FontRegistry]" = None) -> None:
         self._registry = registry or typography.FontRegistry()
         self._checker = CreativeQualityChecker(self._registry)
 
@@ -195,16 +195,17 @@ class CreativeLayoutEngine:
 
         # CTA: conditional - rendered only when the AdConcept supplied one.
         cta = None
-        if has_cta:
+        cta_rect = slots.cta_rect
+        if has_cta and cta_rect is not None:
             c_size = typography.cta_size(height)
             c_min = typography.cta_min_size(height)
             cf = text_fit.fit_text(
-                cta_text, typography.CTA_BOLD, self._registry, slots.cta_rect,
+                cta_text, typography.CTA_BOLD, self._registry, cta_rect,
                 c_size, c_min, 1, draw,
             )
             if cf is not None:
                 cta = LayoutText(
-                    kind="cta", text=cta_text, rect=slots.cta_rect,
+                    kind="cta", text=cta_text, rect=cta_rect,
                     alignment="center", font=typography.CTA_BOLD,
                     font_size=cf.font_size, max_lines=1,
                     lines=cf.lines, line_height=cf.line_height,

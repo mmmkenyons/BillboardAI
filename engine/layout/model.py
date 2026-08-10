@@ -18,6 +18,28 @@ from typing import Any, Dict, Optional, Tuple
 Rect = Tuple[int, int, int, int]  # x0, y0, x1, y1
 
 
+def _to_rect(value: object) -> Rect:
+    """Coerce a persisted rect sequence into a fixed 4-tuple.
+
+    Returns (0, 0, 0, 0) when the value is not a sequence or is too short, so
+    callers always receive a valid fixed-length ``Rect``.
+    """
+    if isinstance(value, (tuple, list)):
+        vals = [int(v) for v in value]
+        if len(vals) >= 4:
+            return (vals[0], vals[1], vals[2], vals[3])
+    return (0, 0, 0, 0)
+
+
+def _to_size2(value: object) -> Optional[Tuple[int, int]]:
+    """Coerce a persisted size sequence into a fixed 2-tuple or None."""
+    if isinstance(value, (tuple, list)):
+        vals = [int(v) for v in value]
+        if len(vals) >= 2:
+            return (vals[0], vals[1])
+    return None
+
+
 def contain_size(avail_w: int, avail_h: int, aspect: float) -> Tuple[int, int]:
     """Return (w, h) that fits inside avail_w x avail_h preserving aspect."""
     if avail_w <= 0 or avail_h <= 0:
@@ -85,7 +107,7 @@ class LayoutText:
         return cls(
             kind=str(data.get("kind", "")),
             text=str(data.get("text", "")),
-            rect=tuple(int(v) for v in rect)[:4],
+            rect=_to_rect(rect),
             alignment=str(data.get("alignment", "center")),
             font=str(data.get("font", "proof")),
             font_size=int(data.get("font_size", 0) or 0),
@@ -122,10 +144,10 @@ class LayoutLogo:
         ps = data.get("paste_size")
         return cls(
             path=str(data.get("path", "")),
-            rect=tuple(int(v) for v in rect)[:4],
+            rect=_to_rect(rect),
             source_aspect=float(data.get("source_aspect", 0.0) or 0.0),
             alignment=str(data.get("alignment", "center")),
-            paste_size=(tuple(int(v) for v in ps)[:2] if ps else None),
+            paste_size=_to_size2(ps),
         )
 
 
@@ -211,8 +233,6 @@ class CreativeLayoutSpec:
             proofs=tuple(LayoutText.from_dict(p) for p in proofs),
             cta=LayoutText.from_dict(cta_raw) if isinstance(cta_raw, dict) else None,
             logo=LayoutLogo.from_dict(logo_raw) if isinstance(logo_raw, dict) else None,
-            field_rect=(
-                tuple(int(v) for v in field_raw)[:4] if isinstance(field_raw, list) else None
-            ),
+            field_rect=(_to_rect(field_raw) if isinstance(field_raw, list) else None),
             geometry_valid=bool(data.get("geometry_valid", False)),
         )

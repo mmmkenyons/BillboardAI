@@ -9,7 +9,7 @@ occupancy warning reports excessive dead space. Not an ML score.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from PIL import Image, ImageDraw
 
@@ -65,7 +65,7 @@ class CreativeQualityResult:
 
 
 class CreativeQualityChecker:
-    def __init__(self, registry: "typography.FontRegistry" = None) -> None:
+    def __init__(self, registry: "Optional[typography.FontRegistry]" = None) -> None:
         self._registry = registry or typography.FontRegistry()
 
     def _empty_draw(self, spec: CreativeLayoutSpec) -> ImageDraw.ImageDraw:
@@ -214,11 +214,11 @@ class CreativeQualityChecker:
         # Logo must meaningfully fill its allotted field where prominence is required.
         fam = spec.composition_family
         if spec.logo and fam in (BRAND_DOMINANT, LOCAL_AUTHORITY):
-            pw, ph = spec.logo.paste_size
+            paste = spec.logo.paste_size
             x0, y0, x1, y1 = spec.logo.rect
             fw = max(1, x1 - x0)
             fh = max(1, y1 - y0)
-            fill = max(pw / fw, ph / fh)
+            fill = max(paste[0] / fw, paste[1] / fh) if paste else 0.0
             checks["logo_visual_presence"] = fill >= LOGO_FILL_MIN
         else:
             checks["logo_visual_presence"] = True  # not enforced
@@ -255,9 +255,10 @@ class CreativeQualityChecker:
     def _check_logo_aspect(self, spec: CreativeLayoutSpec) -> bool:
         if spec.logo is None:
             return True  # no logo -> nothing to violate
-        if not spec.logo.paste_size or spec.logo.source_aspect <= 0:
+        paste = spec.logo.paste_size
+        if not paste or spec.logo.source_aspect <= 0:
             return True
-        pw, ph = spec.logo.paste_size
+        pw, ph = paste
         if ph <= 0 or pw <= 0:
             return False
         rendered_aspect = pw / ph
