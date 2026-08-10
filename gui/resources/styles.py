@@ -292,4 +292,95 @@ QSplitter::handle {
     background-color: #3a3a5c;
     height: 4px;
 }
+
+/* ======================================================================
+   Sprint 3B Project Workspace styles
+   ====================================================================== */
+
+/* Sidebar */
+#workspaceSidebar {
+    background-color: #232338;
+    border: 1px solid #3a3a5c;
+    border-radius: 8px;
+}
+
+/* Tabs */
+#workspaceTabs QTabWidget::pane {
+    border: 1px solid #3a3a5c;
+    border-radius: 8px;
+    background-color: #1e1e2e;
+    top: -1px;
+}
+#workspaceTabs QTabBar::tab {
+    background-color: #282840;
+    color: #c0c0d0;
+    border: 1px solid #3a3a5c;
+    padding: 8px 18px;
+    margin-right: 4px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+#workspaceTabs QTabBar::tab:selected {
+    background-color: #7c5cfc;
+    color: #ffffff;
+}
+
+/* Project / workspace cards */
+#projectCard, #conceptCard, #artifactCard {
+    background-color: #282840;
+    border: 1px solid #3a3a5c;
+    border-radius: 8px;
+}
+#conceptCard[selected="true"] {
+    border: 2px solid #7c5cfc;
+    background-color: #2e2a4a;
+}
+#conceptCard:hover {
+    border: 1px solid #7c5cfc;
+}
+
+/* Text */
+#projectTitle, #conceptHeadline {
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 600;
+}
+#projectMeta, #conceptMeta, #artifactMeta, #historyRow {
+    color: #a0a0b8;
+    font-size: 12px;
+}
+#projectMeta {
+    word-wrap: true;
+}
+#conceptBadge {
+    color: #7c5cfc;
+    background-color: rgba(124, 92, 252, 0.15);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+}
+#conceptProof {
+    color: #c0c0d0;
+    font-size: 12px;
+}
+#conceptSelected {
+    color: #2ecc71;
+    font-weight: 700;
+    font-size: 12px;
+    padding: 2px 0px;
+}
+#artifactType {
+    color: #7c5cfc;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+/* Thumbnail placeholder */
+#thumbnailPlaceholder {
+    color: #808090;
+    background-color: #1a1a2e;
+    border: 1px dashed #3a3a5c;
+    border-radius: 6px;
+}
 """

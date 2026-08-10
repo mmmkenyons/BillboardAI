@@ -137,6 +137,37 @@ def artwork_size_for_template(template_name: str) -> Tuple[int, int]:
     return int(size[0]), int(size[1])
 
 
+def list_scene_templates() -> List[Dict[str, Any]]:
+    """Discover calibrated physical scene templates from ``assets/templates``.
+
+    Returns metadata (id, display name, artwork size) for every valid ``*.json``
+    template rather than hardcoding scene ids. Invalid templates are skipped so a
+    single bad file never breaks the scene selector. Rows are deterministic
+    (sorted by filename).
+    """
+    template_dir = Path("assets/templates")
+    if not template_dir.is_dir():
+        return []
+    result: List[Dict[str, Any]] = []
+    for path in sorted(template_dir.glob("*.json")):
+        try:
+            template = load_physical_template(path.stem)
+        except Exception:  # noqa: BLE001 - skip corrupt/unreadable templates
+            continue
+        default_size = template.get("default_artwork_size") or [0, 0]
+        result.append(
+            {
+                "id": str(template.get("id") or path.stem),
+                "name": str(template.get("name") or path.stem),
+                "artwork_size": {
+                    "width": int(default_size[0]),
+                    "height": int(default_size[1]),
+                },
+            }
+        )
+    return result
+
+
 def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Image:
     """Generate advertisement artwork using existing design logic (reused from old renderer).
     Uses hero_path (website screenshot) as input asset inside the ad, not as background.

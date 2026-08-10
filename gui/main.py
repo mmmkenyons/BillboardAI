@@ -13,6 +13,7 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 from gui.controllers.app_controller import BillboardController
+from gui.controllers.project_controller import ProjectWorkspaceController
 from gui.main_window import MainWindow
 from gui.resources import APP_VERSION
 from gui.resources.styles import APP_STYLESHEET
@@ -53,7 +54,8 @@ def main() -> None:
     app.setFont(font)
 
     controller = BillboardController()
-    window = MainWindow(controller)
+    workspace_controller = ProjectWorkspaceController()
+    window = MainWindow(controller, workspace_controller)
     window.show()
 
     sys.exit(app.exec())

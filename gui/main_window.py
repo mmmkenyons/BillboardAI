@@ -6,6 +6,7 @@ professional menu bar, toolbar, status bar, and keyboard shortcuts.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
@@ -26,21 +27,31 @@ from gui.resources import APP_VERSION
 from gui.views.batch_page import BatchPage
 from gui.views.history_page import HistoryPage
 from gui.views.home_page import HomePage
+from gui.views.project_list_page import ProjectBrowserPage
+from gui.views.project_workspace_page import ProjectWorkspacePage
 from gui.views.settings_page import SettingsPage
 
 if TYPE_CHECKING:
     from gui.controllers.app_controller import BillboardController
+    from gui.controllers.project_controller import ProjectWorkspaceController
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
     """Main application window for BillboardAI."""
 
-    def __init__(self, controller: BillboardController | None = None) -> None:
+    def __init__(
+        self,
+        controller: BillboardController | None = None,
+        workspace_controller: ProjectWorkspaceController | None = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle(f"BillboardAI v{APP_VERSION}")
         self.setMinimumSize(960, 640)
 
         self._controller = controller
+        self._workspace_controller = workspace_controller
 
         self._build_ui()
         self._build_menu()
@@ -52,6 +63,9 @@ class MainWindow(QMainWindow):
             self._controller.attach(self)
             self.update_toolbar_state()  # Initial state for Sprint 4B toolbar
 
+        if self._workspace_controller is not None:
+            self._wire_workspace_controller()
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -62,11 +76,15 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(self._stack)
         self.batch_page = BatchPage(self._stack)
         self.history_page = HistoryPage(self._stack)
+        self.project_browser = ProjectBrowserPage(self._stack)
+        self.project_workspace = ProjectWorkspacePage(self._stack)
 
         self._stack.addWidget(self.home_page)
         self._stack.addWidget(self.settings_page)
         self._stack.addWidget(self.batch_page)
         self._stack.addWidget(self.history_page)
+        self._stack.addWidget(self.project_browser)
+        self._stack.addWidget(self.project_workspace)
 
         self._stack.setCurrentWidget(self.home_page)
 
@@ -98,6 +116,14 @@ class MainWindow(QMainWindow):
         home_action = QAction("&Home", self)
         home_action.triggered.connect(lambda: self.show_page("home"))
         view_menu.addAction(home_action)
+
+        projects_action = QAction("Pr&ojects", self)
+        projects_action.triggered.connect(lambda: self.show_page("projects"))
+        view_menu.addAction(projects_action)
+
+        workspace_action = QAction("&Workspace", self)
+        workspace_action.triggered.connect(lambda: self.show_page("workspace"))
+        view_menu.addAction(workspace_action)
 
         history_action = QAction("&History", self)
         history_action.setEnabled(False)
@@ -187,16 +213,86 @@ class MainWindow(QMainWindow):
         self.output_folder_label.setText(f"Output Folder: {folder}")
 
     def show_page(self, page: str) -> None:
-        """Switch to the named page ('home', 'settings', 'batch', 'history')."""
+        """Switch to the named page ('home', 'settings', 'batch', 'history',
+        'projects', 'workspace')."""
         pages = {
             "home": self.home_page,
             "settings": self.settings_page,
             "batch": self.batch_page,
             "history": self.history_page,
+            "projects": self.project_browser,
+            "workspace": self.project_workspace,
         }
         widget = pages.get(page)
         if widget is not None:
             self._stack.setCurrentWidget(widget)
+            if page == "projects":
+                self.refresh_project_browser()
+
+    # ------------------------------------------------------------------
+    # Project workspace wiring (Sprint 3B)
+    # ------------------------------------------------------------------
+    def _wire_workspace_controller(self) -> None:
+        """Connect the workspace/browser pages to their controller."""
+        if self._workspace_controller is None:
+            return
+        ctrl = self._workspace_controller
+        # Give the workspace page a reference to the controller for data queries.
+        self.project_workspace.set_controller(ctrl)
+
+        # Browser signals.
+        self.project_browser.open_project_requested.connect(ctrl.open_project)
+        self.project_browser.archive_requested.connect(ctrl.archive_project)
+        self.project_browser.new_generate_requested.connect(
+            lambda: self.show_page("home")
+        )
+
+        # Workspace signals -> controller.
+        ws = self.project_workspace
+        ws.back_requested.connect(ctrl.back_to_projects)
+        ws.open_concept_requested.connect(ctrl.select_concept)
+        ws.set_override_requested.connect(ctrl.set_override)
+        ws.reset_override_requested.connect(ctrl.reset_override)
+        ws.set_status_requested.connect(ctrl.set_status)
+        ws.generate_mockup_requested.connect(ctrl.generate_mockup)
+        ws.open_image_requested.connect(ctrl.open_file)
+        ws.open_folder_requested.connect(ctrl.open_folder)
+
+        # Controller signals -> window / pages.
+        ctrl.navigate.connect(self._on_workspace_navigate)
+        ctrl.project_opened.connect(self._on_workspace_project_opened)
+        ctrl.project_updated.connect(lambda: self.project_workspace.refresh())
+        ctrl.artifacts_changed.connect(
+            lambda: self.project_workspace.refresh()
+        )
+        ctrl.projects_changed.connect(self.refresh_project_browser)
+        ctrl.error_message.connect(self._on_workspace_error)
+        ctrl.status_message.connect(self.set_status)
+
+        # Refresh the browser with the persisted project list.
+        self.refresh_project_browser()
+
+    def _on_workspace_navigate(self, page: str) -> None:
+        self.show_page(page)
+
+    def _on_workspace_project_opened(self, project: object) -> None:
+        self.project_workspace.set_project(project)  # type: ignore[arg-type]
+
+    def _on_workspace_error(self, message: str) -> None:
+        self.set_status(message)
+        QMessageBox.warning(self, "Project Workspace", str(message))
+
+    def refresh_project_browser(self) -> None:
+        """Reload the project browser from the workspace controller's store."""
+        if self._workspace_controller is None:
+            self.project_browser.set_projects([])
+            return
+        try:
+            projects = self._workspace_controller.list_projects()
+            self.project_browser.set_projects(projects)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not refresh project browser: %s", exc)
+            self.project_browser.set_projects([])
 
     def update_toolbar_state(self) -> None:
         """Update toolbar button enabled state based on project/selection (Sprint 4B)."""
