@@ -13,7 +13,9 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 from gui.controllers.app_controller import BillboardController
+from gui.controllers.inventory_controller import InventoryController
 from gui.controllers.project_controller import ProjectWorkspaceController
+from gui.controllers.prospect_controller import ProspectController
 from gui.main_window import MainWindow
 from gui.resources import APP_VERSION
 from gui.resources.styles import APP_STYLESHEET
@@ -55,7 +57,14 @@ def main() -> None:
 
     controller = BillboardController()
     workspace_controller = ProjectWorkspaceController()
-    window = MainWindow(controller, workspace_controller)
+    inventory_controller = InventoryController()
+    prospect_controller = ProspectController()
+    window = MainWindow(
+        controller,
+        workspace_controller,
+        inventory_controller,
+        prospect_controller,
+    )
     window.show()
 
     sys.exit(app.exec())

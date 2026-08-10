@@ -383,4 +383,40 @@ QSplitter::handle {
     border: 1px dashed #3a3a5c;
     border-radius: 6px;
 }
+
+/* ======================================================================
+   Sprint 4B Inventory Workspace styles
+   ====================================================================== */
+
+/* Tree navigation */
+#inventoryTree {
+    background-color: #1e1e2e;
+    border: 1px solid #3a3a5c;
+    border-radius: 6px;
+    padding: 4px;
+    color: #e0e0e0;
+}
+#inventoryTree::item {
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+#inventoryTree::item:selected {
+    background-color: #7c5cfc;
+    color: #ffffff;
+}
+#inventoryTree::item:hover {
+    background-color: #3a3a5c;
+}
+
+/* Availability result text */
+#availabilityResult {
+    font-weight: 600;
+    font-size: 13px;
+}
+
+/* Empty state text */
+#emptyState {
+    color: #808090;
+    font-size: 14px;
+}
 """

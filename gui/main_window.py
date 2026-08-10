@@ -27,13 +27,17 @@ from gui.resources import APP_VERSION
 from gui.views.batch_page import BatchPage
 from gui.views.history_page import HistoryPage
 from gui.views.home_page import HomePage
+from gui.views.inventory_workspace_page import InventoryWorkspacePage
 from gui.views.project_list_page import ProjectBrowserPage
 from gui.views.project_workspace_page import ProjectWorkspacePage
+from gui.views.prospect_workspace_page import ProspectWorkspacePage
 from gui.views.settings_page import SettingsPage
 
 if TYPE_CHECKING:
     from gui.controllers.app_controller import BillboardController
+    from gui.controllers.inventory_controller import InventoryController
     from gui.controllers.project_controller import ProjectWorkspaceController
+    from gui.controllers.prospect_controller import ProspectController
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,8 @@ class MainWindow(QMainWindow):
         self,
         controller: BillboardController | None = None,
         workspace_controller: ProjectWorkspaceController | None = None,
+        inventory_controller: "InventoryController | None" = None,
+        prospect_controller: "ProspectController | None" = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle(f"BillboardAI v{APP_VERSION}")
@@ -52,6 +58,8 @@ class MainWindow(QMainWindow):
 
         self._controller = controller
         self._workspace_controller = workspace_controller
+        self._inventory_controller = inventory_controller
+        self._prospect_controller = prospect_controller
 
         self._build_ui()
         self._build_menu()
@@ -66,6 +74,12 @@ class MainWindow(QMainWindow):
         if self._workspace_controller is not None:
             self._wire_workspace_controller()
 
+        if self._inventory_controller is not None:
+            self._wire_inventory_controller()
+
+        if self._prospect_controller is not None:
+            self._wire_prospect_controller()
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -78,6 +92,8 @@ class MainWindow(QMainWindow):
         self.history_page = HistoryPage(self._stack)
         self.project_browser = ProjectBrowserPage(self._stack)
         self.project_workspace = ProjectWorkspacePage(self._stack)
+        self.inventory_workspace = InventoryWorkspacePage(self._stack)
+        self.prospects_workspace = ProspectWorkspacePage(self._stack)
 
         self._stack.addWidget(self.home_page)
         self._stack.addWidget(self.settings_page)
@@ -85,6 +101,8 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self.history_page)
         self._stack.addWidget(self.project_browser)
         self._stack.addWidget(self.project_workspace)
+        self._stack.addWidget(self.inventory_workspace)
+        self._stack.addWidget(self.prospects_workspace)
 
         self._stack.setCurrentWidget(self.home_page)
 
@@ -124,6 +142,14 @@ class MainWindow(QMainWindow):
         workspace_action = QAction("&Workspace", self)
         workspace_action.triggered.connect(lambda: self.show_page("workspace"))
         view_menu.addAction(workspace_action)
+
+        inventory_action = QAction("&Inventory", self)
+        inventory_action.triggered.connect(lambda: self.show_page("inventory"))
+        view_menu.addAction(inventory_action)
+
+        prospects_action = QAction("&Prospects", self)
+        prospects_action.triggered.connect(lambda: self.show_page("prospects"))
+        view_menu.addAction(prospects_action)
 
         history_action = QAction("&History", self)
         history_action.setEnabled(False)
@@ -214,7 +240,7 @@ class MainWindow(QMainWindow):
 
     def show_page(self, page: str) -> None:
         """Switch to the named page ('home', 'settings', 'batch', 'history',
-        'projects', 'workspace')."""
+        'projects', 'workspace', 'inventory', 'prospects')."""
         pages = {
             "home": self.home_page,
             "settings": self.settings_page,
@@ -222,12 +248,34 @@ class MainWindow(QMainWindow):
             "history": self.history_page,
             "projects": self.project_browser,
             "workspace": self.project_workspace,
+            "inventory": self.inventory_workspace,
+            "prospects": self.prospects_workspace,
         }
         widget = pages.get(page)
         if widget is not None:
             self._stack.setCurrentWidget(widget)
             if page == "projects":
                 self.refresh_project_browser()
+            if page == "prospects":
+                self.prospects_workspace.refresh()
+
+    # ------------------------------------------------------------------
+    # Prospect workspace wiring (Sprint 5A)
+    # ------------------------------------------------------------------
+    def _wire_prospect_controller(self) -> None:
+        """Give the prospects page its controller (loads + refreshes)."""
+        if self._prospect_controller is None:
+            return
+        self.prospects_workspace.set_controller(self._prospect_controller)
+
+    # ------------------------------------------------------------------
+    # Inventory workspace wiring (Sprint 4B)
+    # ------------------------------------------------------------------
+    def _wire_inventory_controller(self) -> None:
+        """Give the inventory page its controller (loads + refreshes)."""
+        if self._inventory_controller is None:
+            return
+        self.inventory_workspace.set_controller(self._inventory_controller)
 
     # ------------------------------------------------------------------
     # Project workspace wiring (Sprint 3B)
