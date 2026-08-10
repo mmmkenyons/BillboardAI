@@ -15,8 +15,11 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from gui.models.mockup_concept import MockupConcept
+from gui.models.project_artifact import ProjectArtifact
+from gui.models.project_history import ProjectHistory
 
 if TYPE_CHECKING:
     from PySide6.QtCore import QTimer
@@ -25,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 # Increment when the project.json schema changes in a breaking way.
 PROJECT_VERSION = "0.1"
+
+# Schema version for the durable project format (Sprint 3A). Bump when the
+# persisted schema changes incompatibly; old projects remain loadable.
+SCHEMA_VERSION = 1
 
 # Debounce window for autosave in milliseconds.
 _AUTOSAVE_DELAY_MS = 500
@@ -39,6 +46,27 @@ def _safe_project_name(name: str) -> str:
 def _safe_project_id() -> str:
     """Generate a new project UUID."""
     return str(uuid.uuid4())
+
+
+def _extract_domain(website: str) -> str:
+    """Extract a clean domain (no scheme / www.) from a URL string."""
+    if not website:
+        return ""
+    try:
+        parsed = urlparse(str(website))
+        host = parsed.hostname or parsed.netloc or ""
+        if host.lower().startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _coerce_history(entry: object) -> ProjectHistory:
+    """Coerce a persisted history entry (dict or ProjectHistory) to ProjectHistory."""
+    if isinstance(entry, ProjectHistory):
+        return entry
+    return ProjectHistory.from_dict(entry if isinstance(entry, dict) else None)
 
 
 def _normalize_loaded_context(raw: object) -> dict:
@@ -89,14 +117,128 @@ class Project:
     # Persisted inputs required for local re-render (no scrape).
     render_context: dict = field(default_factory=dict)
     user_overrides: dict = field(default_factory=dict)
-    history: list[dict] = field(default_factory=list)
+    history: list[ProjectHistory] = field(default_factory=list)
     exports: list[dict] = field(default_factory=list)
+
+    # --- Durable pipeline state (Sprint 3A) ---
+    schema_version: int = SCHEMA_VERSION
+    domain: str = ""
+    status: str = "active"
+    # Structured pipeline results (serialized via each engine model's
+    # to_dict/from_dict) so a reopened project never needs to re-scrape.
+    brand_profile: dict | None = None
+    strategies: list[dict] = field(default_factory=list)
+    ad_concepts: list[dict] = field(default_factory=list)
+    # Registered generated artifacts (ProjectArtifact objects).
+    artifacts: list[ProjectArtifact] = field(default_factory=list)
+    # Free-form project metadata.
+    metadata: dict = field(default_factory=dict)
 
 
     # --- Internal ---
     _autosave_timer: Any | None = None
     _dirty: bool = False
     _render_revision: int = 0  # Incremented on logo/context changes to prevent stale re-renders
+
+# ------------------------------------------------------------------
+    # Accessors (Sprint 3A)
+    # ------------------------------------------------------------------
+
+    @property
+    def company_name(self) -> str:
+        """Backward-compatible alias for the project's ``company`` field."""
+        return self.company
+
+    @company_name.setter
+    def company_name(self, value: str) -> None:
+        self.company = value
+
+    def project_id(self) -> str:
+        """Return the stable project id (alias for ``id``)."""
+        return self.id
+
+    def append_history(
+        self,
+        event_type: str,
+        message: str = "",
+        metadata: dict | None = None,
+    ) -> ProjectHistory:
+        """Append a meaningful history/audit entry and mark the project dirty."""
+        entry = ProjectHistory(
+            event_type=event_type,
+            message=message,
+            metadata=dict(metadata or {}),
+        )
+        self.history.append(entry)
+        self.modified = datetime.now()
+        self._mark_dirty()
+        return entry
+
+    def update_from_pipeline(
+        self,
+        *,
+        brand_profile: Any | None = None,
+        strategies: list | None = None,
+        concepts: list | None = None,
+    ) -> None:
+        """Store structured pipeline results WITHOUT mutating the source objects.
+
+        Each engine model is serialized through its own ``to_dict`` so the
+        project owns a deep, independent copy of the pipeline state. A reopened
+        project can reconstruct equivalent structured state without re-scraping.
+        """
+        if brand_profile is not None:
+            serialized = getattr(brand_profile, "to_dict", None)
+            self.brand_profile = (
+                dict(serialized()) if callable(serialized) else dict(brand_profile)
+            )
+        if strategies is not None:
+            self.strategies = [
+                dict(s.to_dict()) if getattr(s, "to_dict", None) else dict(s)
+                for s in strategies
+            ]
+        if concepts is not None:
+            self.ad_concepts = [
+                dict(c.to_dict()) if getattr(c, "to_dict", None) else dict(c)
+                for c in concepts
+            ]
+        self.modified = datetime.now()
+        self._mark_dirty()
+
+    def register_artifact(
+        self,
+        *,
+        artifact_type: str,
+        path: str,
+        concept_id: str = "",
+        scene_template: str = "",
+        composition_family: str = "",
+        width: int = 0,
+        height: int = 0,
+        metadata: dict | None = None,
+    ) -> ProjectArtifact:
+        """Register a generated artifact against this project."""
+        artifact = ProjectArtifact(
+            artifact_type=artifact_type,
+            path=path,
+            concept_id=concept_id,
+            scene_template=scene_template,
+            composition_family=composition_family,
+            width=width,
+            height=height,
+            metadata=dict(metadata or {}),
+        )
+        self.artifacts.append(artifact)
+        self.modified = datetime.now()
+        self._mark_dirty()
+        return artifact
+
+    def get_artifact(self, artifact_id: str) -> ProjectArtifact | None:
+        """Return a registered artifact by id, or None when not found."""
+        for artifact in self.artifacts:
+            if artifact.artifact_id == artifact_id:
+                return artifact
+        return None
 
     # ------------------------------------------------------------------
     # Factory
@@ -130,6 +272,7 @@ class Project:
             name=safe_name,
             company=company or safe_name.replace("_", " ").title(),
             website=website,
+            domain=_extract_domain(website),
             root_dir=root_dir,
             image_path=images_dir,
             assets_path=assets_dir,
@@ -175,8 +318,26 @@ class Project:
             render_context=_normalize_loaded_context(data.get("render_context")),
             user_overrides=data.get("user_overrides", {}),
 
-            history=data.get("history", []),
+            history=[_coerce_history(h) for h in data.get("history", [])],
             exports=data.get("exports", []),
+
+            # --- Durable pipeline state (Sprint 3A) ---
+            schema_version=int(data.get("schema_version", SCHEMA_VERSION) or SCHEMA_VERSION),
+            domain=data.get("domain", "") or _extract_domain(data.get("website", "")),
+            status=data.get("status", "active") or "active",
+            brand_profile=(
+                dict(data["brand_profile"]) if isinstance(data.get("brand_profile"), dict) else None
+            ),
+            strategies=[
+                dict(s) for s in data.get("strategies", []) if isinstance(s, dict)
+            ],
+            ad_concepts=[
+                dict(c) for c in data.get("ad_concepts", []) if isinstance(c, dict)
+            ],
+            artifacts=[
+                ProjectArtifact.from_dict(a) for a in data.get("artifacts", []) if isinstance(a, dict)
+            ],
+            metadata=dict(data.get("metadata") or {}),
         )
 
         return project
@@ -464,9 +625,14 @@ class Project:
         if not self.metadata_path:
             return
         try:
-            from PySide6.QtCore import QTimer
+            from PySide6.QtCore import QCoreApplication, QTimer
         except ImportError:
             # Headless context — autosave will be triggered explicitly.
+            return
+        # Without a running Qt event loop, starting a QTimer would produce
+        # "event dispatcher has already been destroyed" noise and never fire.
+        # Defer autosave to an explicit save() call instead.
+        if QCoreApplication.instance() is None:
             return
 
         if self._autosave_timer is None:
@@ -498,16 +664,26 @@ class Project:
         self._write_to_disk()
 
     def _write_to_disk(self) -> None:
-        """Write project.json to disk."""
+        """Write project.json to disk atomically.
+
+        Writes to a temporary file in the same directory, then atomically
+        replaces ``project.json``. A crash during save cannot easily corrupt
+        the project file.
+        """
         os.makedirs(os.path.dirname(self.metadata_path), exist_ok=True)
         data = self.to_dict()
-        with open(self.metadata_path, "w", encoding="utf-8") as handle:
+        tmp_path = self.metadata_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2)
+        os.replace(tmp_path, self.metadata_path)
 
     def to_dict(self) -> dict:
         """Serialize the project to a plain dict for JSON.
-        
-        New fields (trash_path not persisted as it's derived; concepts now include source/name).
+
+        Derived fields (trash_path, image_path, ...) are not persisted as they
+        are reconstructed from the directory on load. Sprint 3A adds the durable
+        pipeline state (brand_profile / strategies / ad_concepts / artifacts /
+        schema_version / domain / status / metadata).
         """
         return {
             "id": self.id,
@@ -521,9 +697,18 @@ class Project:
             "logo_override": self.logo_override,
             "render_context": self.render_context,
             "user_overrides": self.user_overrides,
-            "history": self.history,
+            "history": [h.to_dict() for h in self.history],
             "exports": self.exports,
             "concepts": [c.to_dict() for c in self.concepts],
+            # --- Durable pipeline state (Sprint 3A) ---
+            "schema_version": self.schema_version,
+            "domain": self.domain,
+            "status": self.status,
+            "brand_profile": self.brand_profile,
+            "strategies": list(self.strategies),
+            "ad_concepts": list(self.ad_concepts),
+            "artifacts": [a.to_dict() for a in self.artifacts],
+            "metadata": dict(self.metadata),
         }
 
 
