@@ -25,6 +25,11 @@ from gui.services.prospect_workspace import (
     ProspectWorkspaceService,
 )
 from gui.controllers.research_controller import ResearchController
+from gui.services.store_recommendation import (
+    RANK_BEST_MATCH,
+    StoreRecommendation,
+    StoreRecommendationService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,7 @@ class ProspectController(QObject):
     error_message = Signal(str)
     status_message = Signal(str)
     open_project_requested = Signal(str)  # ask the app to open a Project workspace
+    recommendations_changed = Signal()  # Sprint 5D: store recommendations updated
 
     def __init__(
         self,
@@ -52,6 +58,11 @@ class ProspectController(QObject):
         # Sprint 5B: batch research queue controller reusing the same prospect
         # store/service so prospect research_status stays in sync.
         self._research = ResearchController(prospect_service=service)
+        # Sprint 5D: store recommendation service
+        self._rec_svc = StoreRecommendationService()
+        self._recommendations: List[StoreRecommendation] = []
+        self._rec_limit: int = 3
+        self._rec_mode: str = RANK_BEST_MATCH
 
     # ------------------------------------------------------------------
     # Properties
@@ -77,11 +88,54 @@ class ProspectController(QObject):
     def select(self, prospect_id: Optional[str]) -> None:
         """Track the currently selected prospect id."""
         self._selected_id = prospect_id
+        self._refresh_recommendations()
 
     def open_project(self, project_id: Optional[str]) -> None:
         """Request the app to open an existing Project workspace."""
         if project_id:
             self.open_project_requested.emit(str(project_id))
+
+    # ------------------------------------------------------------------
+    # Sprint 5D: Store recommendations
+    # ------------------------------------------------------------------
+
+    @property
+    def recommendations(self) -> list:
+        return list(self._recommendations)
+
+    @property
+    def rec_limit(self) -> int:
+        return self._rec_limit
+
+    def set_rec_limit(self, limit: int) -> None:
+        self._rec_limit = max(1, limit)
+        self._refresh_recommendations()
+
+    def refresh_recommendations(self) -> None:
+        """Recompute opportunities and refresh the recommendation list."""
+        self._refresh_recommendations()
+
+    def _refresh_recommendations(self) -> None:
+        if not self._selected_id:
+            self._recommendations = []
+            self.recommendations_changed.emit()
+            return
+        try:
+            self._recommendations = self._rec_svc.recommend(
+                self._selected_id,
+                limit=self._rec_limit,
+                rank_mode=self._rec_mode,
+                refresh=True,
+            )
+        except Exception as exc:
+            logger.warning("Recommendation refresh failed: %s", exc)
+            self._recommendations = []
+        self.recommendations_changed.emit()
+
+    def open_recommendation_project(self, recommendation: StoreRecommendation) -> None:
+        """Open the project associated with a store recommendation."""
+        if recommendation and recommendation.project_id:
+            self.open_project(recommendation.project_id)
 
     # ------------------------------------------------------------------
     # Load / refresh

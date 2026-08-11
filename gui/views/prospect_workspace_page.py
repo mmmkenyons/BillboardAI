@@ -413,6 +413,7 @@ class ProspectWorkspacePage(QWidget):
         layout.addWidget(self.table, stretch=3)
 
         layout.addWidget(self._build_research_panel(main), stretch=2)
+        layout.addWidget(self._build_recommendation_panel(main))
 
         return main
 
@@ -510,6 +511,172 @@ class ProspectWorkspacePage(QWidget):
 
         return panel
     # ------------------------------------------------------------------
+    # Sprint 5D: Store recommendations panel
+    # ------------------------------------------------------------------
+
+    def _build_recommendation_panel(self, parent: QWidget) -> QFrame:
+        panel = QFrame(parent)
+        panel.setObjectName("workspaceSidebar")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("Recommended Stores", panel)
+        title.setObjectName("logoTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+
+        self.rec_limit_combo = QComboBox(panel)
+        self.rec_limit_combo.addItem("Top 3", 3)
+        self.rec_limit_combo.addItem("Top 5", 5)
+        self.rec_limit_combo.currentIndexChanged.connect(self._on_rec_limit_changed)
+        header.addWidget(self.rec_limit_combo)
+
+        self.rec_refresh_btn = QPushButton("Refresh", panel)
+        self.rec_refresh_btn.clicked.connect(self._on_refresh_recommendations)
+        header.addWidget(self.rec_refresh_btn)
+        layout.addLayout(header)
+
+        self.rec_content = QVBoxLayout()
+        self.rec_content.setSpacing(8)
+        layout.addLayout(self.rec_content)
+
+        self.rec_empty_label = QLabel(
+            "Select a researched prospect to see store recommendations.", panel
+        )
+        self.rec_empty_label.setObjectName("emptyState")
+        self.rec_empty_label.setWordWrap(True)
+        self.rec_content.addWidget(self.rec_empty_label)
+        layout.addStretch(1)
+        return panel
+
+    def _on_rec_limit_changed(self, *_args) -> None:
+        if self._controller is None:
+            return
+        limit = self.rec_limit_combo.currentData() or 3
+        self._controller.set_rec_limit(limit)
+    def _refresh_recommendations(self) -> None:
+        """Rebuild recommendation cards from controller."""
+        while self.rec_content.count():
+            item = self.rec_content.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+
+        if self._controller is None:
+            w = QLabel("Select a researched prospect to see store recommendations.")
+            w.setObjectName("emptyState")
+            w.setWordWrap(True)
+            self.rec_content.addWidget(w)
+            return
+
+        recs = self._controller.recommendations
+        if not recs:
+            w = QLabel("No eligible store recommendations for this prospect.")
+            w.setObjectName("emptyState")
+            w.setWordWrap(True)
+            self.rec_content.addWidget(w)
+            return
+
+        for idx, rec in enumerate(recs):
+            card = self._build_recommendation_card(idx, rec)
+            self.rec_content.addWidget(card)
+
+    def _build_recommendation_card(self, idx: int, rec) -> QFrame:
+        """Build a single store recommendation card."""
+        card = QFrame()
+        card.setObjectName("recCard")
+        card.setStyleSheet(
+            "QFrame#recCard { border: 1px solid #333; "
+            "border-radius: 6px; padding: 8px; }"
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+
+        # Row 1: Store name + score badge
+        row1 = QHBoxLayout()
+        name = f"#{idx + 1} {rec.retailer_name} #{rec.store_number}"
+        if rec.city:
+            name += f" \u2014 {rec.city}"
+        name_label = QLabel(name)
+        name_label.setObjectName("logoTitle")
+        row1.addWidget(name_label)
+        row1.addStretch(1)
+
+        score_badge = QLabel(f"Score {rec.score}")
+        score_badge.setStyleSheet(
+            "background: #1a472a; color: #4CAF50; border-radius: 4px; "
+            "padding: 2px 8px; font-weight: bold;"
+        )
+        row1.addWidget(score_badge)
+        layout.addLayout(row1)
+
+        # Row 2: Placement name + availability
+        row2 = QHBoxLayout()
+        pl_label = QLabel(rec.placement_name)
+        pl_label.setObjectName("projectMeta")
+        row2.addWidget(pl_label)
+        row2.addStretch(1)
+
+        avail_label = QLabel("AVAILABLE")
+        avail_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        row2.addWidget(avail_label)
+        layout.addLayout(row2)
+
+        # Row 3: Stats
+        row3 = QHBoxLayout()
+        stats = []
+        if rec.weekly_traffic:
+            stats.append(f"{rec.weekly_traffic:,} shoppers/week")
+        if rec.distance_miles is not None:
+            stats.append(f"{rec.distance_miles:.1f} mi")
+        if rec.price_display:
+            stats.append(rec.price_display)
+        for s in stats:
+            lbl = QLabel(s)
+            lbl.setObjectName("projectMeta")
+            row3.addWidget(lbl)
+        row3.addStretch(1)
+        layout.addLayout(row3)
+
+        # Row 4: Why this fits
+        if rec.reasons:
+            rlbl = QLabel("Why this fits")
+            rlbl.setObjectName("projectMeta")
+            layout.addWidget(rlbl)
+        # Row 5: Actions
+        actions = QHBoxLayout()
+        if rec.project_id:
+            open_btn = QPushButton("Open Project")
+            open_btn.clicked.connect(
+                lambda checked=False, r=rec: (
+                    self._controller.open_recommendation_project(r)
+                    if self._controller else None
+                )
+            )
+            actions.addWidget(open_btn)
+
+        view_btn = QPushButton("View Opportunity")
+        view_btn.clicked.connect(
+            lambda checked=False, r=rec: self._show_status(
+                f"Opportunity: {r.opportunity_id[:12]}... | "
+                f"{r.placement_name} | {r.location_name}"
+            )
+        )
+        actions.addWidget(view_btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        return card
+
+
+    def _on_refresh_recommendations(self) -> None:
+        if self._controller is None:
+            return
+        self._controller.refresh_recommendations()
+
+    # ------------------------------------------------------------------
     # Controller wiring
     # ------------------------------------------------------------------
 
@@ -525,6 +692,8 @@ class ProspectWorkspacePage(QWidget):
         research.progress.connect(self._on_research_progress)
         research.running_changed.connect(self._on_research_running)
         research.status_message.connect(self._show_status)
+        # Sprint 5D: recommendation panel
+        controller.recommendations_changed.connect(self._refresh_recommendations)
         self._populate_filter_options()
         self.load()
         self.refresh()
@@ -670,6 +839,8 @@ class ProspectWorkspacePage(QWidget):
         prospect_id = self.get_selected_prospect_id()
         if prospect_id:
             self._selected_id = prospect_id
+            if self._controller:
+                self._controller.select(prospect_id)
         self._update_actions()
 
     def _update_actions(self) -> None:
