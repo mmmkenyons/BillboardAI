@@ -36,6 +36,7 @@ from gui.services.location_enrichment import (
     LocationEnrichmentService,
 )
 from gui.services.prospect_follow_up import ProspectFollowUpService
+from gui.services.prospect_pipeline import ProspectPipelineService
 from gui.services.prospect_opportunity_workspace import (
     ProspectOpportunitySnapshot,
     ProspectOpportunityWorkspaceService,
@@ -86,6 +87,7 @@ class ProspectController(QObject):
         # the same wired stores (no duplicate default-store instances).
         self._rec_svc = self._snapshot_svc.recommendation_service
         self._follow_up_svc: Optional[ProspectFollowUpService] = None
+        self._pipeline_svc: Optional[ProspectPipelineService] = None
         self._recommendations: List[StoreRecommendation] = []
         self._rec_limit: int = 3
         self._rec_mode: str = RANK_BEST_MATCH
@@ -112,6 +114,13 @@ class ProspectController(QObject):
         if not hasattr(self, "_follow_up_svc") or self._follow_up_svc is None:
             self._follow_up_svc = ProspectFollowUpService(store=self.store)
         return self._follow_up_svc
+
+    @property
+    def pipeline_service(self) -> ProspectPipelineService:
+        """Sprint 5I: read-only query service for the Pipeline page."""
+        if not hasattr(self, "_pipeline_svc") or self._pipeline_svc is None:
+            self._pipeline_svc = ProspectPipelineService(store=self.store)
+        return self._pipeline_svc
 
     @property
     def research(self) -> ResearchController:

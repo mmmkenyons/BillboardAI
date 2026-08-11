@@ -13,6 +13,7 @@ from datetime import date
 from typing import Any, Dict, Iterable, List, Optional
 
 from gui.models.prospect import (
+    CLOSED_WORKFLOW_STATUSES,
     PRIORITY_HIGH,
     PRIORITY_LOW,
     PRIORITY_NORMAL,
@@ -54,11 +55,7 @@ TIMING_FILTER_NEEDS_ATTENTION = "NEEDS_ATTENTION"
 SORT_MODE_DEFAULT = "DEFAULT"
 
 # Terminal workflow statuses excluded from the default active queue.
-_TERMINAL_STATUSES = {
-    WORKFLOW_STATUS_NOT_INTERESTED,
-    WORKFLOW_STATUS_WON,
-    WORKFLOW_STATUS_LOST,
-}
+_TERMINAL_STATUSES = set(CLOSED_WORKFLOW_STATUSES)
 
 # Deterministic ordering weights.
 _TIMING_SORT_WEIGHT: Dict[str, int] = {
@@ -280,12 +277,7 @@ class ProspectFollowUpService:
         Defaults: active/non-terminal prospects, all priorities, all non-closed
         timing states, default deterministic sort.
         """
-        try:
-            self._store.load()
-        except FileNotFoundError:
-            pass
-
-        prospects: Iterable[Prospect] = self._store.list()
+        prospects = self._load_prospects()
         items = [_build_item(p, today) for p in prospects]
 
         search = (search_text or "").strip()
@@ -315,4 +307,9 @@ class ProspectFollowUpService:
         if (sort_mode or SORT_MODE_DEFAULT) == SORT_MODE_DEFAULT:
             result.sort(key=_sort_key)
         return result
+
+    def _load_prospects(self) -> List[Prospect]:
+        """Load the authoritative snapshot once without clobbering injected memory."""
+        self._store.load_or_empty()
+        return self._store.list()
 
