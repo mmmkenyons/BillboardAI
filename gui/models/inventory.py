@@ -291,6 +291,7 @@ class Location:
     longitude: Optional[float] = None
     weekly_traffic: Optional[int] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    geocode_metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -307,6 +308,7 @@ class Location:
             "longitude": self.longitude,
             "weekly_traffic": self.weekly_traffic,
             "metadata": dict(self.metadata),
+            "geocode_metadata": dict(self.geocode_metadata),
         }
 
     @classmethod
@@ -326,6 +328,7 @@ class Location:
             longitude=_optional_float(data.get("longitude")),
             weekly_traffic=_optional_int(data.get("weekly_traffic")),
             metadata=dict(data.get("metadata") or {}),
+            geocode_metadata=dict(data.get("geocode_metadata") or {}),
         )
 # --------------------------------------------------------------------------
 # Placement

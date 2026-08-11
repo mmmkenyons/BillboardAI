@@ -327,6 +327,13 @@ class ProspectStore:
         self._collection.prospects[index] = prospect
         return prospect
 
+    def upsert(self, prospect: Prospect) -> Prospect:
+        """Insert or update a prospect (idempotent by prospect_id)."""
+        existing = self.get(prospect.prospect_id)
+        if existing is None:
+            return self.create(prospect)
+        return self.update(prospect)
+
     def archive(self, prospect_id: str) -> Optional[Prospect]:
         """Mark a prospect as ARCHIVED (non-destructive). Returns the prospect."""
         prospect = self.get(prospect_id)

@@ -348,6 +348,23 @@ class ProspectWorkspacePage(QWidget):
         self.category_filter.currentIndexChanged.connect(self._on_filter_changed)
         layout.addWidget(self.category_filter)
 
+        layout.addSpacing(8)
+
+        # Sprint 5E: Location enrichment section
+        loc_lbl = QLabel("Location", side)
+        loc_lbl.setObjectName("projectMeta")
+        layout.addWidget(loc_lbl)
+
+        self.location_display = QLabel("", side)
+        self.location_display.setObjectName("emptyState")
+        self.location_display.setWordWrap(True)
+        layout.addWidget(self.location_display)
+
+        self.resolve_location_button = QPushButton("Resolve Location", side)
+        self.resolve_location_button.clicked.connect(self._on_resolve_location)
+        self.resolve_location_button.setEnabled(False)
+        layout.addWidget(self.resolve_location_button)
+
         layout.addStretch(1)
 
         count_lbl = QLabel("Overview", side)
@@ -694,6 +711,8 @@ class ProspectWorkspacePage(QWidget):
         research.status_message.connect(self._show_status)
         # Sprint 5D: recommendation panel
         controller.recommendations_changed.connect(self._refresh_recommendations)
+        # Sprint 5E: location enrichment
+        controller.enrichment_changed.connect(self._refresh_location_display)
         self._populate_filter_options()
         self.load()
         self.refresh()
@@ -842,6 +861,7 @@ class ProspectWorkspacePage(QWidget):
             if self._controller:
                 self._controller.select(prospect_id)
         self._update_actions()
+        self._refresh_location_display()
 
     def _update_actions(self) -> None:
         has_selection = self.table.currentRow() >= 0
@@ -1013,6 +1033,49 @@ class ProspectWorkspacePage(QWidget):
     def _category_filter_value(self) -> str:
         return str(self.category_filter.currentData() or _CATEGORY_ALL)
 
+
+    # ------------------------------------------------------------------
+    # Sprint 5E: Location enrichment UI handlers
+    # ------------------------------------------------------------------
+
+    def _on_resolve_location(self) -> None:
+        """Trigger geocoding enrichment for the selected prospect."""
+        if self._controller is None:
+            self._show_error("No controller attached.")
+            return
+        self._controller.enrich_location_for_selected()
+
+    def _refresh_location_display(self) -> None:
+        """Update the location display in the sidebar."""
+        if self._controller is None:
+            self.location_display.setText("")
+            self.resolve_location_button.setEnabled(False)
+            return
+
+        prospect = self._controller.get_selected()
+        if prospect is None:
+            self.location_display.setText("(select a prospect)")
+            self.resolve_location_button.setEnabled(False)
+            return
+
+        # Build display text
+        lines = []
+        addr = _location_text(prospect)
+        if addr:
+            lines.append(f"Address: {addr}")
+        if prospect.latitude is not None and prospect.longitude is not None:
+            lines.append(
+                f"Coordinates: {prospect.latitude:.4f}, {prospect.longitude:.4f}"
+            )
+            geo = getattr(prospect, "geocode_metadata", None) or {}
+            source = geo.get("source", "Unknown")
+            lines.append(f"Source: {source.title()}")
+        else:
+            lines.append("Coordinates: not resolved")
+            lines.append("Source: unknown")
+
+        self.location_display.setText("\n".join(lines))
+        self.resolve_location_button.setEnabled(True)
 
 def _location_text(p: Prospect) -> str:
     parts = [part for part in (p.city, p.state) if part]

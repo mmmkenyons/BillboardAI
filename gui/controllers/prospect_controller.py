@@ -30,6 +30,10 @@ from gui.services.store_recommendation import (
     StoreRecommendation,
     StoreRecommendationService,
 )
+from gui.services.location_enrichment import (
+    EnrichmentOutcome,
+    LocationEnrichmentService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,7 @@ class ProspectController(QObject):
     status_message = Signal(str)
     open_project_requested = Signal(str)  # ask the app to open a Project workspace
     recommendations_changed = Signal()  # Sprint 5D: store recommendations updated
+    enrichment_changed = Signal()  # Sprint 5E: location enrichment updated
 
     def __init__(
         self,
@@ -63,6 +68,8 @@ class ProspectController(QObject):
         self._recommendations: List[StoreRecommendation] = []
         self._rec_limit: int = 3
         self._rec_mode: str = RANK_BEST_MATCH
+        # Sprint 5E: location enrichment
+        self._enrichment_last_outcome: Optional[EnrichmentOutcome] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -89,6 +96,12 @@ class ProspectController(QObject):
         """Track the currently selected prospect id."""
         self._selected_id = prospect_id
         self._refresh_recommendations()
+
+    def get_selected(self) -> Optional[Prospect]:
+        """Return the currently selected Prospect, or None if none selected."""
+        if not self._selected_id:
+            return None
+        return self.get_prospect(self._selected_id)
 
     def open_project(self, project_id: Optional[str]) -> None:
         """Request the app to open an existing Project workspace."""
@@ -313,3 +326,32 @@ class ProspectController(QObject):
             f"Imported {result.imported}, merged {result.merged}, "
             f"invalid {result.invalid}, skipped {result.skipped}."
         )
+    # ------------------------------------------------------------------
+    # Sprint 5E: Location enrichment
+    # ------------------------------------------------------------------
+
+    def enrich_location_for_selected(self) -> None:
+        """Run geocoding enrichment for the currently selected prospect."""
+        prospect = self.get_selected()
+        if prospect is None:
+            self.status_message.emit("No prospect selected.")
+            return
+
+        svc = LocationEnrichmentService()
+        outcome = svc.enrich_prospect(prospect, self.store)
+        self._enrichment_last_outcome = outcome
+
+        if outcome.success:
+            self._selected_id = prospect.prospect_id
+            self.prospects_changed.emit()
+            self._refresh_recommendations()
+            self.status_message.emit(outcome.message)
+        else:
+            self.error_message.emit(outcome.message)
+
+        self.enrichment_changed.emit()
+
+    @property
+    def last_enrichment_outcome(self) -> Optional[EnrichmentOutcome]:
+        """The outcome from the most recent enrichment operation."""
+        return self._enrichment_last_outcome

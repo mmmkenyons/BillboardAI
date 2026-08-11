@@ -527,19 +527,26 @@ class OpportunityEngine:
     # ------------------------------------------------------------------
 
     def _prospect_coords(self, prospect: Any) -> Tuple[Optional[float], Optional[float]]:
-        """Prospect lat/lng from metadata (forward-compatible seam).
+        """Prospect lat/lng — prefers explicit fields, falls back to metadata.
 
-        The current ``Prospect`` model has no native coordinates, so this looks
-        in ``prospect.metadata["latitude"]`` / ``["longitude"]`` (float or
-        numeric string). Sprint 5D will add real geocoding; until then real
-        prospects typically yield ``None``.
+        Sprint 5E adds explicit latitude/longitude fields. Legacy prospects
+        may have coordinates stored in metadata['latitude'] / ['longitude'].
+        This method prefers the canonical explicit fields, falls back to
+        legacy metadata for backward compatibility.
         """
+        # 1. Prefer explicit fields (Sprint 5E canonical representation).
+        lat = _as_float(getattr(prospect, "latitude", None))
+        lng = _as_float(getattr(prospect, "longitude", None))
+        if lat is not None and lng is not None:
+            return lat, lng
+
+        # 2. Fall back to legacy metadata (pre-Sprint 5E).
         meta = getattr(prospect, "metadata", None) or {}
-        lat = None
-        lng = None
         if isinstance(meta, dict):
-            lat = _as_float(meta.get("latitude") or meta.get("lat"))
-            lng = _as_float(meta.get("longitude") or meta.get("lng") or meta.get("lon"))
+            if lat is None:
+                lat = _as_float(meta.get("latitude") or meta.get("lat"))
+            if lng is None:
+                lng = _as_float(meta.get("longitude") or meta.get("lng") or meta.get("lon"))
         return lat, lng
 
     def _distance(

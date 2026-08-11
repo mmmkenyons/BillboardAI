@@ -263,3 +263,38 @@ class TestProspectPage:
         h.controller.import_csv("company,website\nBob,bob.com\n")
         svc = h.controller.service
         assert svc.imported_count() == 1
+
+    # ------------------------------------------------------------------
+    # Sprint 5E regression: get_selected + location display
+    # ------------------------------------------------------------------
+
+    def test_get_selected_returns_none_when_unselected(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=False)
+        assert h.controller.get_selected() is None
+
+    def test_get_selected_returns_selected_prospect(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        p = h.controller.list_prospects()[0]
+        h.controller.select(p.prospect_id)
+        assert h.controller.get_selected() is not None
+        assert h.controller.get_selected().prospect_id == p.prospect_id
+
+    def test_location_display_refresh_does_not_crash(self, tmp_path) -> None:
+        # Regression: _refresh_location_display depends on controller.get_selected()
+        h = _ProspectHarness(tmp_path, seed=True)
+        h.page._refresh_location_display()  # must not raise AttributeError
+        assert h.page.location_display.text() != ""
+
+    def test_location_display_honest_unresolved(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        p = h.controller.list_prospects()[0]
+        h.controller.select(p.prospect_id)
+        h.page._refresh_location_display()
+        text = h.page.location_display.text()
+        assert "not resolved" in text
+
+    def test_resolve_location_button_wired_to_controller(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        assert hasattr(h.page, "resolve_location_button")
+        assert hasattr(h.page, "_on_resolve_location")
+        assert hasattr(h.controller, "enrich_location_for_selected")

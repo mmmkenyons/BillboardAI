@@ -87,6 +87,16 @@ def _clean(value: Any) -> str:
     return str(value).strip()
 
 
+def _optional_float(value: Any) -> Optional[float]:
+    """Coerce to float or None."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def collapse_whitespace(value: str) -> str:
     """Collapse runs of whitespace into a single space; strip ends."""
     return re.sub(r"\s+", " ", value).strip()
@@ -369,6 +379,10 @@ class Prospect:
     state: str = ""
     postal_code: str = ""
 
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    geocode_metadata: Dict[str, Any] = field(default_factory=dict)
+
     category: str = ""
     subcategory: str = ""
 
@@ -433,6 +447,9 @@ class Prospect:
             "city": self.city,
             "state": self.state,
             "postal_code": self.postal_code,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "geocode_metadata": dict(self.geocode_metadata),
             "category": self.category,
             "subcategory": self.subcategory,
             "contact_name": self.contact_name,
@@ -476,6 +493,9 @@ class Prospect:
             city=_clean(data.get("city")),
             state=_clean(data.get("state")),
             postal_code=_clean(data.get("postal_code")),
+            latitude=_optional_float(data.get("latitude")),
+            longitude=_optional_float(data.get("longitude")),
+            geocode_metadata=dict(data.get("geocode_metadata") or {}),
             category=_clean(data.get("category")),
             subcategory=_clean(data.get("subcategory")),
             contact_name=_clean(data.get("contact_name")),
