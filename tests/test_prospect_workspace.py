@@ -13,12 +13,19 @@ from __future__ import annotations
 import os
 
 import pytest
+from PySide6.QtCore import QDate
 
 from gui.models.prospect import (
     STATUS_ARCHIVED,
     STATUS_DISQUALIFIED,
     STATUS_IMPORTED,
     STATUS_READY_FOR_RESEARCH,
+    PRIORITY_HIGH,
+    PRIORITY_NORMAL,
+    WORKFLOW_STATUS_CONTACTED,
+    WORKFLOW_STATUS_FOLLOW_UP,
+    WORKFLOW_STATUS_NEW,
+    WORKFLOW_STATUS_READY_TO_CONTACT,
     Prospect,
 )
 from gui.models.prospect_store import ProspectCorruptionError, ProspectStore
@@ -147,6 +154,164 @@ class TestService:
         assert svc.imported_count() == 1
         p = svc.list_prospects()[0]
         assert p.prospect_id
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5G: workflow service
+# ---------------------------------------------------------------------------
+
+class TestWorkflowService:
+    def test_workflow_update_persists(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        updated = svc.update_workflow(
+            p.prospect_id,
+            status=WORKFLOW_STATUS_READY_TO_CONTACT,
+            priority=PRIORITY_HIGH,
+            next_action="Call owner",
+            next_action_date="2026-08-15",
+            notes="Hot lead",
+        )
+        assert updated.workflow_status == WORKFLOW_STATUS_READY_TO_CONTACT
+        assert updated.priority == PRIORITY_HIGH
+        assert updated.next_action == "Call owner"
+        assert updated.next_action_date == "2026-08-15"
+        assert updated.workflow_notes == "Hot lead"
+
+    def test_partial_workflow_update_preserves_unspecified_fields(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        svc.update_workflow(
+            p.prospect_id,
+            status=WORKFLOW_STATUS_CONTACTED,
+            priority=PRIORITY_HIGH,
+            next_action="Call owner",
+            next_action_date="2026-08-15",
+            notes="Hot lead",
+        )
+        updated = svc.update_workflow(p.prospect_id, next_action="Email owner")
+        assert updated.workflow_status == WORKFLOW_STATUS_CONTACTED
+        assert updated.priority == PRIORITY_HIGH
+        assert updated.next_action == "Email owner"
+        assert updated.next_action_date == "2026-08-15"
+        assert updated.workflow_notes == "Hot lead"
+
+    def test_workflow_reload_preserves_state(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        svc.update_workflow(
+            p.prospect_id,
+            status=WORKFLOW_STATUS_FOLLOW_UP,
+            priority=PRIORITY_NORMAL,
+            next_action="Follow up",
+            next_action_date="2026-09-01",
+            notes="",
+        )
+        svc2 = _service(tmp_path)
+        svc2.load()
+        reloaded = svc2.get_prospect(p.prospect_id)
+        assert reloaded.workflow_status == WORKFLOW_STATUS_FOLLOW_UP
+        assert reloaded.priority == PRIORITY_NORMAL
+        assert reloaded.next_action_date == "2026-09-01"
+
+    def test_import_merge_does_not_erase_workflow_state(self, tmp_path) -> None:
+        # Critical Sprint 5G scenario: an enrichment/import update with workflow
+        # fields absent/default must NOT destroy the user's sales workflow state.
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        svc.update_workflow(
+            p.prospect_id,
+            status=WORKFLOW_STATUS_CONTACTED,
+            priority=PRIORITY_HIGH,
+            next_action="Call Friday",
+            next_action_date="2026-08-15",
+            notes="Spoke to owner",
+        )
+        svc.store.save()
+
+        # Reload authoritative state, then run the import/merge path with an
+        # incoming record that carries enrichment data but default workflow fields.
+        svc.store.load()
+        existing = svc.store.get(p.prospect_id)
+        incoming = Prospect(
+            prospect_id=p.prospect_id,
+            company_name=p.company_name,
+            website=p.website,
+            address="123 Main St",
+        )  # workflow fields default to NEW / NORMAL / "" / None
+        svc.store.merge(existing, incoming)
+
+        merged = svc.store.get(p.prospect_id)
+        assert merged.workflow_status == WORKFLOW_STATUS_CONTACTED
+        assert merged.priority == PRIORITY_HIGH
+        assert merged.next_action == "Call Friday"
+        assert merged.next_action_date == "2026-08-15"
+        assert merged.workflow_notes == "Spoke to owner"
+        # Enrichment data was applied without touching workflow state.
+        assert merged.address == "123 Main St"
+
+    def test_workflow_update_does_not_duplicate_prospect(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        svc.update_workflow(p.prospect_id, status=WORKFLOW_STATUS_CONTACTED)
+        assert svc.imported_count() == 1
+
+    def test_update_workflow_injected_store_is_authoritative(self, tmp_path) -> None:
+        custom_store = ProspectStore(path=os.path.join(str(tmp_path), "custom.json"))
+        svc = ProspectWorkspaceService(store=custom_store)
+        p = svc.create_prospect(company_name="Injected Co", website="inj.com")
+        svc.update_workflow(p.prospect_id, status=WORKFLOW_STATUS_READY_TO_CONTACT)
+        svc2 = ProspectWorkspaceService(store=custom_store)
+        svc2.load()
+        assert svc2.get_prospect(p.prospect_id).workflow_status == WORKFLOW_STATUS_READY_TO_CONTACT
+
+    def test_update_workflow_does_not_modify_other_prospect(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        a = svc.create_prospect(company_name="A", website="a.com")
+        b = svc.create_prospect(company_name="B", website="b.com")
+        svc.update_workflow(
+            a.prospect_id,
+            status=WORKFLOW_STATUS_CONTACTED,
+            priority=PRIORITY_HIGH,
+            next_action="Call A",
+        )
+        other = svc.get_prospect(b.prospect_id)
+        assert other.workflow_status == WORKFLOW_STATUS_NEW
+        assert other.priority == PRIORITY_NORMAL
+        assert other.next_action == ""
+
+    def test_update_workflow_unknown_status_raises(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        with pytest.raises(ProspectValidationError):
+            svc.update_workflow(p.prospect_id, status="GARBAGE")
+
+    def test_update_workflow_unknown_priority_raises(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        with pytest.raises(ProspectValidationError):
+            svc.update_workflow(p.prospect_id, priority="GARBAGE")
+
+    def test_update_workflow_invalid_date_raises(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        with pytest.raises(ProspectValidationError):
+            svc.update_workflow(p.prospect_id, next_action_date="not-a-date")
+
+    def test_update_workflow_clears_date_with_none(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        p = _seed(svc)
+        svc.update_workflow(p.prospect_id, next_action_date="2026-08-15")
+        updated = svc.update_workflow(p.prospect_id, next_action_date=None)
+        assert updated.next_action_date is None
+
+    def test_update_workflow_missing_prospect_raises(self, tmp_path) -> None:
+        svc = _service(tmp_path)
+        svc.load()
+        with pytest.raises(ProspectValidationError):
+            svc.update_workflow("no-such-id", status=WORKFLOW_STATUS_CONTACTED)
+
+
 # ---------------------------------------------------------------------------
 # GUI (Qt-guarded, offscreen)
 # ---------------------------------------------------------------------------
@@ -298,6 +463,89 @@ class TestProspectPage:
         assert hasattr(h.page, "resolve_location_button")
         assert hasattr(h.page, "_on_resolve_location")
         assert hasattr(h.controller, "enrich_location_for_selected")
+
+    # ------------------------------------------------------------------
+    # Sprint 5G: workflow UI
+    # ------------------------------------------------------------------
+
+    def test_workflow_panel_disabled_when_no_selection(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=False)
+        h.page._populate_workflow_panel()
+        assert h.page.workflow_save_btn.isEnabled() is False
+
+    def test_selecting_prospect_populates_workflow_panel(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        p = h.controller.list_prospects()[0]
+        h.controller.select(p.prospect_id)
+        h.page._populate_workflow_panel()
+        assert h.page.workflow_save_btn.isEnabled() is True
+        assert h.page.workflow_status_combo.currentData() == "NEW"
+        assert h.page.workflow_priority_combo.currentData() == "NORMAL"
+
+    def test_saving_workflow_through_controller_updates_store(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        p = h.controller.list_prospects()[0]
+        h.controller.select(p.prospect_id)
+        h.page._selected_id = p.prospect_id
+        h.page._populate_workflow_panel()
+
+        h.page.workflow_status_combo.setCurrentIndex(
+            h.page.workflow_status_combo.findData(WORKFLOW_STATUS_READY_TO_CONTACT)
+        )
+        h.page.workflow_priority_combo.setCurrentIndex(
+            h.page.workflow_priority_combo.findData(PRIORITY_HIGH)
+        )
+        h.page.workflow_next_action.setText("Call owner")
+        h.page.workflow_date_check.setChecked(True)
+        h.page.workflow_date_edit.setDate(QDate(2026, 8, 15))
+        h.page.workflow_notes.setPlainText("Hot lead")
+
+        h.page._on_save_workflow()
+
+        updated = h.controller.get_prospect(p.prospect_id)
+        assert updated.workflow_status == WORKFLOW_STATUS_READY_TO_CONTACT
+        assert updated.priority == PRIORITY_HIGH
+        assert updated.next_action == "Call owner"
+        assert updated.next_action_date == "2026-08-15"
+        assert updated.workflow_notes == "Hot lead"
+
+    def test_switching_prospects_replaces_workflow_values(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=False)
+        a = h.controller.create_prospect(company_name="A", website="a.com")
+        b = h.controller.create_prospect(company_name="B", website="b.com")
+        h.controller.update_workflow(
+            a.prospect_id,
+            status=WORKFLOW_STATUS_CONTACTED,
+            priority=PRIORITY_HIGH,
+            next_action="Call A",
+            next_action_date="2026-08-10",
+            notes="Note A",
+        )
+        h.controller.update_workflow(
+            b.prospect_id,
+            status=WORKFLOW_STATUS_FOLLOW_UP,
+            priority=PRIORITY_NORMAL,
+            next_action="Call B",
+            next_action_date="2026-08-11",
+            notes="Note B",
+        )
+        h.controller.reload()
+
+        h.controller.select(a.prospect_id)
+        h.page._populate_workflow_panel()
+        assert h.page.workflow_status_combo.currentData() == WORKFLOW_STATUS_CONTACTED
+        assert h.page.workflow_next_action.text() == "Call A"
+
+        h.controller.select(b.prospect_id)
+        h.page._populate_workflow_panel()
+        assert h.page.workflow_status_combo.currentData() == WORKFLOW_STATUS_FOLLOW_UP
+        assert h.page.workflow_next_action.text() == "Call B"
+
+        h.controller.select(a.prospect_id)
+        h.page._populate_workflow_panel()
+        assert h.page.workflow_status_combo.currentData() == WORKFLOW_STATUS_CONTACTED
+        assert h.page.workflow_next_action.text() == "Call A"
+
     # ------------------------------------------------------------------
     # Sprint 5F: Dependency-injection regression
     # ------------------------------------------------------------------

@@ -399,8 +399,15 @@ class ProspectStore:
         existing.notes = _fill(existing.notes, incoming.notes)
         existing.market_id = _fill(existing.market_id, incoming.market_id)
         existing.location_hint = _fill(existing.location_hint, incoming.location_hint)
-        existing.priority = _fill(existing.priority, incoming.priority)
         existing.research_status = _fill(existing.research_status, incoming.research_status)
+
+        # Sprint 5G: merge workflow fields (preserve existing non-blank values).
+        existing.workflow_status = _fill(existing.workflow_status, incoming.workflow_status)
+        existing.priority = _fill(existing.priority, incoming.priority)
+        existing.next_action = _fill(existing.next_action, incoming.next_action)
+        if existing.next_action_date is None and incoming.next_action_date:
+            existing.next_action_date = incoming.next_action_date
+        existing.workflow_notes = _fill(existing.workflow_notes, incoming.workflow_notes)
 
         # Preserve explicit source provenance; fill source/source_id if missing.
         existing.source = _fill(existing.source, incoming.source)

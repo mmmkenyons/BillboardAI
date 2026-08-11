@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -54,6 +54,67 @@ PROSPECT_STATUSES: tuple = (
 )
 
 _DEFAULT_STATUS = STATUS_NEW
+
+# ---------------------------------------------------------------------------
+# Controlled workflow-status model (sales follow-up state, NOT the prospect
+# record lifecycle status). Sprint 5G.
+# ---------------------------------------------------------------------------
+WORKFLOW_STATUS_NEW = "NEW"
+WORKFLOW_STATUS_RESEARCHING = "RESEARCHING"
+WORKFLOW_STATUS_READY_TO_CONTACT = "READY_TO_CONTACT"
+WORKFLOW_STATUS_CONTACTED = "CONTACTED"
+WORKFLOW_STATUS_FOLLOW_UP = "FOLLOW_UP"
+WORKFLOW_STATUS_QUALIFIED = "QUALIFIED"
+WORKFLOW_STATUS_NOT_INTERESTED = "NOT_INTERESTED"
+WORKFLOW_STATUS_WON = "WON"
+WORKFLOW_STATUS_LOST = "LOST"
+
+WORKFLOW_STATUSES: tuple = (
+    WORKFLOW_STATUS_NEW,
+    WORKFLOW_STATUS_RESEARCHING,
+    WORKFLOW_STATUS_READY_TO_CONTACT,
+    WORKFLOW_STATUS_CONTACTED,
+    WORKFLOW_STATUS_FOLLOW_UP,
+    WORKFLOW_STATUS_QUALIFIED,
+    WORKFLOW_STATUS_NOT_INTERESTED,
+    WORKFLOW_STATUS_WON,
+    WORKFLOW_STATUS_LOST,
+)
+
+WORKFLOW_STATUS_LABELS: Dict[str, str] = {
+    WORKFLOW_STATUS_NEW: "New",
+    WORKFLOW_STATUS_RESEARCHING: "Researching",
+    WORKFLOW_STATUS_READY_TO_CONTACT: "Ready to Contact",
+    WORKFLOW_STATUS_CONTACTED: "Contacted",
+    WORKFLOW_STATUS_FOLLOW_UP: "Follow Up",
+    WORKFLOW_STATUS_QUALIFIED: "Qualified",
+    WORKFLOW_STATUS_NOT_INTERESTED: "Not Interested",
+    WORKFLOW_STATUS_WON: "Won",
+    WORKFLOW_STATUS_LOST: "Lost",
+}
+
+_DEFAULT_WORKFLOW_STATUS = WORKFLOW_STATUS_NEW
+
+PRIORITY_LOW = "LOW"
+PRIORITY_NORMAL = "NORMAL"
+PRIORITY_HIGH = "HIGH"
+PRIORITY_URGENT = "URGENT"
+
+PRIORITIES: tuple = (
+    PRIORITY_LOW,
+    PRIORITY_NORMAL,
+    PRIORITY_HIGH,
+    PRIORITY_URGENT,
+)
+
+PRIORITY_LABELS: Dict[str, str] = {
+    PRIORITY_LOW: "Low",
+    PRIORITY_NORMAL: "Normal",
+    PRIORITY_HIGH: "High",
+    PRIORITY_URGENT: "Urgent",
+}
+
+_DEFAULT_PRIORITY = PRIORITY_NORMAL
 
 # ---------------------------------------------------------------------------
 # ID helpers
@@ -93,6 +154,26 @@ def _optional_float(value: Any) -> Optional[float]:
         return None
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_iso_date(value: Any) -> Optional[str]:
+    """Coerce a value to an ISO-8601 date string (YYYY-MM-DD) or None.
+
+    Malformed values are treated consistently with the project's safe-default
+    strategy: return None rather than crashing or inventing a date.
+    """
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value.isoformat()
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = date.fromisoformat(text)
+        return parsed.isoformat()
     except (TypeError, ValueError):
         return None
 
@@ -405,8 +486,14 @@ class Prospect:
     # Future-facing hints (Sprint 5B/5C). Not used for matching yet.
     market_id: str = ""
     location_hint: str = ""
-    priority: str = ""
     research_status: str = ""
+
+    # Sprint 5G: sales follow-up / action workflow state.
+    workflow_status: str = _DEFAULT_WORKFLOW_STATUS
+    priority: str = _DEFAULT_PRIORITY
+    next_action: str = ""
+    next_action_date: Optional[str] = None
+    workflow_notes: str = ""
 
     # For MVP, a prospect carries zero-or-more contacts (usually one primary).
     contacts: List[Contact] = field(default_factory=list)
@@ -464,8 +551,12 @@ class Prospect:
             "metadata": dict(self.metadata),
             "market_id": self.market_id,
             "location_hint": self.location_hint,
-            "priority": self.priority,
             "research_status": self.research_status,
+            "workflow_status": self.workflow_status,
+            "priority": self.priority,
+            "next_action": self.next_action,
+            "next_action_date": self.next_action_date,
+            "workflow_notes": self.workflow_notes,
             "contacts": [c.to_dict() for c in self.contacts],
         }
 
@@ -475,6 +566,13 @@ class Prospect:
         status = _clean(data.get("status")) or _DEFAULT_STATUS
         if status not in PROSPECT_STATUSES:
             status = _DEFAULT_STATUS
+        workflow_status = _clean(data.get("workflow_status")) or _DEFAULT_WORKFLOW_STATUS
+        if workflow_status not in WORKFLOW_STATUSES:
+            workflow_status = _DEFAULT_WORKFLOW_STATUS
+        priority = _clean(data.get("priority")) or _DEFAULT_PRIORITY
+        if priority not in PRIORITIES:
+            priority = _DEFAULT_PRIORITY
+        next_action_date = _optional_iso_date(data.get("next_action_date"))
         contacts_raw = data.get("contacts") or []
         contacts = [
             Contact.from_dict(c)
@@ -510,8 +608,12 @@ class Prospect:
             metadata=dict(data.get("metadata") or {}),
             market_id=_clean(data.get("market_id")),
             location_hint=_clean(data.get("location_hint")),
-            priority=_clean(data.get("priority")),
             research_status=_clean(data.get("research_status")),
+            workflow_status=workflow_status,
+            priority=priority,
+            next_action=_clean(data.get("next_action")),
+            next_action_date=next_action_date,
+            workflow_notes=_clean(data.get("workflow_notes")),
             contacts=contacts,
         )
 # ---------------------------------------------------------------------------

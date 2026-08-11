@@ -15,12 +15,14 @@ import re
 import pytest
 
 from gui.models.prospect import (
+    PRIORITIES,
     STATUS_ARCHIVED,
     STATUS_DISQUALIFIED,
     STATUS_IMPORTED,
     STATUS_NEW,
     STATUS_READY_FOR_RESEARCH,
     STATUS_RESEARCHED,
+    WORKFLOW_STATUSES,
     Contact,
     DEDUP_EXACT,
     DEDUP_POSSIBLE,
@@ -146,6 +148,91 @@ class TestProspectModel:
     def test_contact_round_trip(self) -> None:
         c = Contact(name="Jim", email="j@x.com", is_primary=True)
         assert Contact.from_dict(c.to_dict()).to_dict() == c.to_dict()
+
+    # ------------------------------------------------------------------
+    # Sprint 5G: workflow state
+    # ------------------------------------------------------------------
+
+    def test_default_workflow_state(self) -> None:
+        p = Prospect()
+        assert p.workflow_status == "NEW"
+        assert p.priority == "NORMAL"
+        assert p.next_action == ""
+        assert p.next_action_date is None
+        assert p.workflow_notes == ""
+
+    def test_workflow_fields_serialize(self) -> None:
+        p = Prospect(
+            workflow_status="READY_TO_CONTACT",
+            priority="HIGH",
+            next_action="Call owner",
+            next_action_date="2026-08-15",
+            workflow_notes="Left voicemail",
+        )
+        d = p.to_dict()
+        assert d["workflow_status"] == "READY_TO_CONTACT"
+        assert d["priority"] == "HIGH"
+        assert d["next_action"] == "Call owner"
+        assert d["next_action_date"] == "2026-08-15"
+        assert d["workflow_notes"] == "Left voicemail"
+
+    def test_workflow_fields_deserialize(self) -> None:
+        p = Prospect.from_dict(
+            {
+                "company_name": "X",
+                "workflow_status": "CONTACTED",
+                "priority": "URGENT",
+                "next_action": "Send proposal",
+                "next_action_date": "2026-08-20",
+                "workflow_notes": "Hot lead",
+            }
+        )
+        assert p.workflow_status == "CONTACTED"
+        assert p.priority == "URGENT"
+        assert p.next_action == "Send proposal"
+        assert p.next_action_date == "2026-08-20"
+        assert p.workflow_notes == "Hot lead"
+
+    def test_pre_5g_prospect_loads_with_defaults(self) -> None:
+        d = _prospect(company_name="Legacy Co").to_dict()
+        for key in (
+            "workflow_status",
+            "priority",
+            "next_action",
+            "next_action_date",
+            "workflow_notes",
+        ):
+            d.pop(key, None)
+        restored = Prospect.from_dict(d)
+        assert restored.workflow_status == "NEW"
+        assert restored.priority == "NORMAL"
+        assert restored.next_action == ""
+        assert restored.next_action_date is None
+        assert restored.workflow_notes == ""
+
+    def test_workflow_status_unknown_defaults_to_new(self) -> None:
+        p = Prospect.from_dict(_prospect().to_dict() | {"workflow_status": "GARBAGE"})
+        assert p.workflow_status == "NEW"
+
+    def test_priority_unknown_defaults_to_normal(self) -> None:
+        p = Prospect.from_dict(_prospect().to_dict() | {"priority": "GARBAGE"})
+        assert p.priority == "NORMAL"
+
+    def test_next_action_date_round_trip(self) -> None:
+        p = Prospect(next_action_date="2026-08-10")
+        restored = Prospect.from_dict(p.to_dict())
+        assert restored.next_action_date == "2026-08-10"
+
+    def test_malformed_next_action_date_defaults_to_none(self) -> None:
+        p = Prospect.from_dict(
+            _prospect().to_dict() | {"next_action_date": "not-a-date"}
+        )
+        assert p.next_action_date is None
+
+    def test_empty_next_action_date_defaults_to_none(self) -> None:
+        p = Prospect.from_dict(_prospect().to_dict() | {"next_action_date": ""})
+        assert p.next_action_date is None
+
 # ---------------------------------------------------------------------------
 # NORMALIZATION
 # ---------------------------------------------------------------------------

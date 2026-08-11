@@ -21,12 +21,15 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -37,11 +40,18 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from gui.models.prospect import Prospect
+from gui.models.prospect import (
+    PRIORITIES,
+    PRIORITY_LABELS,
+    WORKFLOW_STATUSES,
+    WORKFLOW_STATUS_LABELS,
+    Prospect,
+)
 
 if TYPE_CHECKING:
     from gui.controllers.prospect_controller import ProspectController
@@ -386,6 +396,49 @@ class ProspectWorkspacePage(QWidget):
         self.view_store_btn.clicked.connect(self._on_view_best_store)
         self.view_store_btn.setEnabled(False)
         layout.addWidget(self.view_store_btn)
+
+        layout.addSpacing(8)
+
+        # Sprint 5G: Sales Follow-Up panel
+        followup_lbl = QLabel("Sales Follow-Up", side)
+        followup_lbl.setObjectName("projectMeta")
+        layout.addWidget(followup_lbl)
+
+        self.workflow_status_combo = QComboBox(side)
+        self.workflow_status_combo.addItem("—", "")
+        for ws in WORKFLOW_STATUSES:
+            self.workflow_status_combo.addItem(WORKFLOW_STATUS_LABELS[ws], ws)
+        layout.addWidget(self.workflow_status_combo)
+
+        self.workflow_priority_combo = QComboBox(side)
+        for pr in PRIORITIES:
+            self.workflow_priority_combo.addItem(PRIORITY_LABELS[pr], pr)
+        layout.addWidget(self.workflow_priority_combo)
+
+        self.workflow_next_action = QLineEdit(side)
+        self.workflow_next_action.setPlaceholderText("Next action...")
+        layout.addWidget(self.workflow_next_action)
+
+        date_row = QHBoxLayout()
+        self.workflow_date_check = QCheckBox("Due", side)
+        self.workflow_date_check.setChecked(False)
+        self.workflow_date_check.stateChanged.connect(self._on_workflow_date_check_changed)
+        date_row.addWidget(self.workflow_date_check)
+        self.workflow_date_edit = QDateEdit(side)
+        self.workflow_date_edit.setCalendarPopup(True)
+        self.workflow_date_edit.setEnabled(False)
+        date_row.addWidget(self.workflow_date_edit, 1)
+        layout.addLayout(date_row)
+
+        self.workflow_notes = QTextEdit(side)
+        self.workflow_notes.setPlaceholderText("Notes...")
+        self.workflow_notes.setMaximumHeight(70)
+        layout.addWidget(self.workflow_notes)
+
+        self.workflow_save_btn = QPushButton("Save Follow-Up", side)
+        self.workflow_save_btn.setObjectName("primaryButton")
+        self.workflow_save_btn.clicked.connect(self._on_save_workflow)
+        layout.addWidget(self.workflow_save_btn)
 
         layout.addSpacing(8)
 
@@ -739,10 +792,13 @@ class ProspectWorkspacePage(QWidget):
         controller.enrichment_changed.connect(self._refresh_location_display)
         # Sprint 5F: opportunity snapshot
         controller.opportunity_snapshot_changed.connect(self._refresh_opportunity_overview)
+        # Sprint 5G: sales follow-up workflow
+        controller.workflow_changed.connect(self._populate_workflow_panel)
         self._populate_filter_options()
         self.load()
         self.refresh()
         self._refresh_research_panel()
+        self._populate_workflow_panel()
 
     def get_selected_prospect_id(self) -> Optional[str]:
         """Return the currently selected prospect id (row-based)."""
@@ -888,6 +944,7 @@ class ProspectWorkspacePage(QWidget):
                 self._controller.select(prospect_id)
         self._update_actions()
         self._refresh_location_display()
+        self._populate_workflow_panel()
 
     def _update_actions(self) -> None:
         has_selection = self.table.currentRow() >= 0
@@ -1182,6 +1239,111 @@ class ProspectWorkspacePage(QWidget):
             self._controller.view_store(snap.best_location_id)
         else:
             self._show_status("No store selected.")
+
+    # ------------------------------------------------------------------
+    # Sprint 5G: Sales follow-up workflow UI handlers
+    # ------------------------------------------------------------------
+
+    def _set_workflow_enabled(self, enabled: bool) -> None:
+        """Enable or disable all workflow input controls together."""
+        self.workflow_status_combo.setEnabled(enabled)
+        self.workflow_priority_combo.setEnabled(enabled)
+        self.workflow_next_action.setEnabled(enabled)
+        self.workflow_date_check.setEnabled(enabled)
+        self.workflow_date_edit.setEnabled(enabled and self.workflow_date_check.isChecked())
+        self.workflow_notes.setEnabled(enabled)
+        self.workflow_save_btn.setEnabled(enabled)
+
+    def _populate_workflow_panel(self) -> None:
+        """Load the selected prospect's workflow state into the sidebar."""
+        if self._controller is None:
+            self._set_workflow_enabled(False)
+            return
+
+        prospect = self._controller.get_selected()
+        if prospect is None:
+            self.workflow_status_combo.setCurrentIndex(0)
+            self.workflow_priority_combo.setCurrentIndex(
+                self.workflow_priority_combo.findData("NORMAL")
+            )
+            self.workflow_next_action.setText("")
+            self.workflow_date_check.setChecked(False)
+            self.workflow_date_edit.setDate(QDate.currentDate())
+            self.workflow_notes.setPlainText("")
+            self._set_workflow_enabled(False)
+            return
+
+        self._set_workflow_enabled(True)
+
+        status_index = self.workflow_status_combo.findData(prospect.workflow_status)
+        if status_index >= 0:
+            self.workflow_status_combo.setCurrentIndex(status_index)
+        else:
+            self.workflow_status_combo.setCurrentIndex(0)
+
+        priority_index = self.workflow_priority_combo.findData(prospect.priority)
+        if priority_index >= 0:
+            self.workflow_priority_combo.setCurrentIndex(priority_index)
+        else:
+            self.workflow_priority_combo.setCurrentIndex(
+                self.workflow_priority_combo.findData("NORMAL")
+            )
+
+        self.workflow_next_action.setText(prospect.next_action)
+
+        if prospect.next_action_date:
+            try:
+                from datetime import date
+                parsed = date.fromisoformat(prospect.next_action_date)
+                self.workflow_date_edit.setDate(
+                    QDate(parsed.year, parsed.month, parsed.day)
+                )
+                self.workflow_date_check.setChecked(True)
+            except (TypeError, ValueError):
+                self.workflow_date_check.setChecked(False)
+                self.workflow_date_edit.setDate(QDate.currentDate())
+        else:
+            self.workflow_date_check.setChecked(False)
+            self.workflow_date_edit.setDate(QDate.currentDate())
+
+        self.workflow_notes.setPlainText(prospect.workflow_notes)
+
+    def _on_workflow_date_check_changed(self, *_args) -> None:
+        self.workflow_date_edit.setEnabled(
+            self.workflow_date_check.isChecked()
+        )
+
+    def _on_save_workflow(self) -> None:
+        """Persist the workflow fields for the currently selected prospect."""
+        if self._controller is None:
+            self._show_error("No controller attached.")
+            return
+
+        prospect_id = self.get_selected_prospect_id()
+        if not prospect_id:
+            self._show_status("Select a prospect to save follow-up.")
+            return
+
+        status = self.workflow_status_combo.currentData()
+        priority = self.workflow_priority_combo.currentData()
+        next_action = self.workflow_next_action.text()
+        notes = self.workflow_notes.toPlainText()
+
+        if self.workflow_date_check.isChecked():
+            qdate = self.workflow_date_edit.date()
+            next_action_date = qdate.toString("yyyy-MM-dd")
+        else:
+            next_action_date = None
+
+        self._controller.update_workflow(
+            prospect_id,
+            status=status if status else None,
+            priority=priority if priority else None,
+            next_action=next_action,
+            next_action_date=next_action_date,
+            notes=notes,
+        )
+
 
 def _location_text(p: Prospect) -> str:
     parts = [part for part in (p.city, p.state) if part]

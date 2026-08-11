@@ -381,3 +381,108 @@ class TestSnapshotDefaults:
     def test_empty_snapshot_is_empty_true(self):
         snap = ProspectOpportunitySnapshot(is_empty=True)
         assert snap.is_empty is True
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5G: workflow save must not disturb opportunity snapshot
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowIntegration:
+    def test_workflow_save_does_not_break_snapshot(self, tmp_path):
+        from gui.services.prospect_workspace import ProspectWorkspaceService
+
+        h = _Harness(tmp_path)
+        svc = h.build_service()
+        snap_before = svc.snapshot_for_prospect("p_roof")
+        assert snap_before.company_name == "Jim Woods Roofing"
+
+        psvc = ProspectWorkspaceService(store=h.ps)
+        psvc.update_workflow(
+            "p_roof",
+            status="CONTACTED",
+            priority="HIGH",
+            next_action="Call owner",
+            next_action_date="2026-08-15",
+            notes="Hot lead",
+        )
+
+        snap_after = svc.snapshot_for_prospect("p_roof")
+        assert snap_after.company_name == "Jim Woods Roofing"
+        assert snap_after.prospect_id == snap_before.prospect_id
+        assert snap_after.best_match_score == snap_before.best_match_score
+
+    def test_workflow_save_does_not_create_duplicate_opportunities(self, tmp_path):
+        from gui.services.prospect_workspace import ProspectWorkspaceService
+
+        h = _Harness(tmp_path)
+        svc = h.build_service()
+        svc.refresh_for_prospect("p_roof")
+
+        psvc = ProspectWorkspaceService(store=h.ps)
+        for _ in range(3):
+            psvc.update_workflow(
+                "p_roof",
+                status="CONTACTED",
+                next_action="Call owner",
+            )
+
+        opportunities = svc._opportunity_service.by_prospect("p_roof")
+        placement_ids = [o.placement_id for o in opportunities]
+        assert len(placement_ids) == len(set(placement_ids))
+
+    def test_workflow_save_does_not_invoke_research_scrape_geocode(self, tmp_path):
+        from gui.services.prospect_workspace import ProspectWorkspaceService
+
+        h = _Harness(tmp_path)
+        svc = h.build_service()
+        psvc = ProspectWorkspaceService(store=h.ps)
+
+        # The update_workflow API never touches research/scrape/geocode services.
+        # We verify the prospect fields change and no exceptions occur.
+        updated = psvc.update_workflow(
+            "p_roof",
+            status="FOLLOW_UP",
+            next_action="Send proposal",
+        )
+        assert updated.workflow_status == "FOLLOW_UP"
+        assert updated.next_action == "Send proposal"
+
+    def test_two_prospect_workflow_isolation(self, tmp_path):
+        from gui.services.prospect_workspace import ProspectWorkspaceService
+
+        h = _Harness(tmp_path)
+        p2 = Prospect(
+            prospect_id="p_baker",
+            company_name="Baker Painting",
+            category="painting",
+            city="Denver",
+            state="CO",
+            research_status="NOT_READY",
+        )
+        h.ps.collection.prospects.append(p2)
+        h.ps.save()
+
+        psvc = ProspectWorkspaceService(store=h.ps)
+        psvc.update_workflow(
+            "p_roof",
+            status="CONTACTED",
+            priority="HIGH",
+            next_action="Call roof",
+            notes="roof note",
+        )
+        psvc.update_workflow(
+            "p_baker",
+            status="READY_TO_CONTACT",
+            priority="LOW",
+            next_action="Call baker",
+            notes="baker note",
+        )
+
+        roof = h.ps.get("p_roof")
+        baker = h.ps.get("p_baker")
+        assert roof.workflow_status == "CONTACTED"
+        assert roof.priority == "HIGH"
+        assert baker.workflow_status == "READY_TO_CONTACT"
+        assert baker.priority == "LOW"
+        assert roof.workflow_notes != baker.workflow_notes

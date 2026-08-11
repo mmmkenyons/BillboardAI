@@ -23,6 +23,7 @@ from gui.services.prospect_csv_import import ProspectImportError, ProspectImport
 from gui.services.prospect_workspace import (
     ProspectValidationError,
     ProspectWorkspaceService,
+    _UNSET,
 )
 from gui.controllers.research_controller import ResearchController
 from gui.services.store_recommendation import (
@@ -54,6 +55,7 @@ class ProspectController(QObject):
     recommendations_changed = Signal()  # Sprint 5D: store recommendations updated
     enrichment_changed = Signal()  # Sprint 5E: location enrichment updated
     opportunity_snapshot_changed = Signal()  # Sprint 5F: opportunity snapshot updated
+    workflow_changed = Signal()  # Sprint 5G: prospect workflow state updated
     view_store_requested = Signal(str)  # Sprint 5F: navigate to inventory + select location
 
     def __init__(
@@ -298,6 +300,41 @@ class ProspectController(QObject):
             lambda: self._service.set_status(prospect_id, status),
             f"Status set to {status}.",
         )
+
+    # ------------------------------------------------------------------
+    # Sprint 5G: sales follow-up workflow
+    # ------------------------------------------------------------------
+
+    def update_workflow(
+        self,
+        prospect_id: str,
+        *,
+        status: Optional[str] = None,
+        priority: Optional[str] = None,
+        next_action: Optional[str] = None,
+        next_action_date: Any = _UNSET,
+        notes: Optional[str] = None,
+    ) -> Optional[Prospect]:
+        """Update the selected prospect's sales follow-up workflow state.
+
+        ``next_action_date`` may be an ISO date string, ``None`` to clear, or
+        omitted to leave unchanged.
+        """
+        result = self._mutate(
+            lambda: self._service.update_workflow(
+                prospect_id,
+                status=status,
+                priority=priority,
+                next_action=next_action,
+                next_action_date=next_action_date,
+                notes=notes,
+            ),
+            "Follow-up saved.",
+        )
+        if result is not None:
+            self._selected_id = result.prospect_id
+            self.workflow_changed.emit()
+        return result
 
     # ------------------------------------------------------------------
     # CSV import

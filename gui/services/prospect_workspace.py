@@ -33,7 +33,9 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from gui.models.prospect import (
+    PRIORITIES,
     PROSPECT_STATUSES,
+    WORKFLOW_STATUSES,
     Contact,
     Prospect,
     normalize_domain,
@@ -231,6 +233,74 @@ class ProspectWorkspaceService:
         if prospect is None:
             raise ProspectValidationError(f"Prospect {prospect_id!r} not found.")
         prospect.status = status
+        prospect.touch()
+        self.save()
+        return prospect
+
+    # ------------------------------------------------------------------
+    # Sprint 5G: sales follow-up workflow
+    # ------------------------------------------------------------------
+
+    def update_workflow(
+        self,
+        prospect_id: str,
+        *,
+        status: Optional[str] = None,
+        priority: Optional[str] = None,
+        next_action: Optional[str] = None,
+        next_action_date: Any = _UNSET,
+        notes: Optional[str] = None,
+    ) -> Prospect:
+        """Update the sales follow-up workflow fields for a prospect.
+
+        Partial updates are supported: ``None`` means "leave unchanged".
+        ``next_action_date=_UNSET`` means "leave unchanged"; ``None`` clears the
+        date. Values are validated against the controlled enums and persisted
+        through the authoritative ProspectStore.
+
+        No scraping, enrichment, research, or opportunity recomputation is
+        performed as a side effect.
+        """
+        self.ensure_loaded()
+        prospect = self._store.get(prospect_id)
+        if prospect is None:
+            raise ProspectValidationError(f"Prospect {prospect_id!r} not found.")
+
+        if status is not None:
+            if status not in WORKFLOW_STATUSES:
+                raise ProspectValidationError(
+                    f"Unknown workflow status: {status!r}"
+                )
+            prospect.workflow_status = status
+
+        if priority is not None:
+            if priority not in PRIORITIES:
+                raise ProspectValidationError(
+                    f"Unknown workflow priority: {priority!r}"
+                )
+            prospect.priority = priority
+
+        if next_action is not None:
+            prospect.next_action = str(next_action).strip()
+
+        if notes is not None:
+            prospect.workflow_notes = str(notes).strip()
+
+        if next_action_date is not _UNSET:
+            if next_action_date is None or str(next_action_date).strip() == "":
+                prospect.next_action_date = None
+            else:
+                from datetime import date
+
+                try:
+                    prospect.next_action_date = date.fromisoformat(
+                        str(next_action_date).strip()
+                    ).isoformat()
+                except (TypeError, ValueError) as exc:
+                    raise ProspectValidationError(
+                        f"Invalid next-action date: {next_action_date!r}"
+                    ) from exc
+
         prospect.touch()
         self.save()
         return prospect
