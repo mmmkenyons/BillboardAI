@@ -30,6 +30,7 @@ from gui.views.home_page import HomePage
 from gui.views.inventory_workspace_page import InventoryWorkspacePage
 from gui.views.project_list_page import ProjectBrowserPage
 from gui.views.project_workspace_page import ProjectWorkspacePage
+from gui.views.prospect_follow_up_page import ProspectFollowUpPage
 from gui.views.prospect_workspace_page import ProspectWorkspacePage
 from gui.views.settings_page import SettingsPage
 
@@ -94,6 +95,7 @@ class MainWindow(QMainWindow):
         self.project_workspace = ProjectWorkspacePage(self._stack)
         self.inventory_workspace = InventoryWorkspacePage(self._stack)
         self.prospects_workspace = ProspectWorkspacePage(self._stack)
+        self.follow_up_page = ProspectFollowUpPage(self._stack)
 
         self._stack.addWidget(self.home_page)
         self._stack.addWidget(self.settings_page)
@@ -103,6 +105,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self.project_workspace)
         self._stack.addWidget(self.inventory_workspace)
         self._stack.addWidget(self.prospects_workspace)
+        self._stack.addWidget(self.follow_up_page)
 
         self._stack.setCurrentWidget(self.home_page)
 
@@ -150,6 +153,10 @@ class MainWindow(QMainWindow):
         prospects_action = QAction("&Prospects", self)
         prospects_action.triggered.connect(lambda: self.show_page("prospects"))
         view_menu.addAction(prospects_action)
+
+        follow_up_action = QAction("&Follow-Up", self)
+        follow_up_action.triggered.connect(lambda: self.show_page("follow_up"))
+        view_menu.addAction(follow_up_action)
 
         history_action = QAction("&History", self)
         history_action.setEnabled(False)
@@ -250,6 +257,7 @@ class MainWindow(QMainWindow):
             "workspace": self.project_workspace,
             "inventory": self.inventory_workspace,
             "prospects": self.prospects_workspace,
+            "follow_up": self.follow_up_page,
         }
         widget = pages.get(page)
         if widget is not None:
@@ -258,6 +266,8 @@ class MainWindow(QMainWindow):
                 self.refresh_project_browser()
             if page == "prospects":
                 self.prospects_workspace.refresh()
+            if page == "follow_up":
+                self.follow_up_page.refresh()
 
     # ------------------------------------------------------------------
     # Prospect workspace wiring (Sprint 5A)
@@ -272,8 +282,15 @@ class MainWindow(QMainWindow):
             return
         ctrl = self._prospect_controller
         self.prospects_workspace.set_controller(ctrl)
+        self.follow_up_page.set_controller(ctrl)
         ctrl.open_project_requested.connect(self._on_prospect_open_project)
+        ctrl.open_prospect_requested.connect(self._on_open_prospect_in_workspace)
         ctrl.view_store_requested.connect(self._on_prospect_view_store)
+
+    def _on_open_prospect_in_workspace(self, prospect_id: str) -> None:
+        """Sprint 5H: open a queue-selected prospect in the Prospect Workspace."""
+        self.prospects_workspace.select_prospect(prospect_id)
+        self.show_page("prospects")
 
     def _on_prospect_open_project(self, project_id: str) -> None:
         """Open a researched prospect's Project in the Project Workspace."""

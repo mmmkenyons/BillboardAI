@@ -35,6 +35,7 @@ from gui.services.location_enrichment import (
     EnrichmentOutcome,
     LocationEnrichmentService,
 )
+from gui.services.prospect_follow_up import ProspectFollowUpService
 from gui.services.prospect_opportunity_workspace import (
     ProspectOpportunitySnapshot,
     ProspectOpportunityWorkspaceService,
@@ -52,6 +53,7 @@ class ProspectController(QObject):
     error_message = Signal(str)
     status_message = Signal(str)
     open_project_requested = Signal(str)  # ask the app to open a Project workspace
+    open_prospect_requested = Signal(str)  # Sprint 5H: ask the app to open a prospect in Prospect Workspace
     recommendations_changed = Signal()  # Sprint 5D: store recommendations updated
     enrichment_changed = Signal()  # Sprint 5E: location enrichment updated
     opportunity_snapshot_changed = Signal()  # Sprint 5F: opportunity snapshot updated
@@ -83,6 +85,7 @@ class ProspectController(QObject):
         # the snapshot service so that recommendations and snapshots read from
         # the same wired stores (no duplicate default-store instances).
         self._rec_svc = self._snapshot_svc.recommendation_service
+        self._follow_up_svc: Optional[ProspectFollowUpService] = None
         self._recommendations: List[StoreRecommendation] = []
         self._rec_limit: int = 3
         self._rec_mode: str = RANK_BEST_MATCH
@@ -102,6 +105,13 @@ class ProspectController(QObject):
     @property
     def store(self) -> ProspectStore:
         return self._service.store
+
+    @property
+    def follow_up_service(self) -> ProspectFollowUpService:
+        """Sprint 5H: read-only query service for the Follow-Up Queue."""
+        if not hasattr(self, "_follow_up_svc") or self._follow_up_svc is None:
+            self._follow_up_svc = ProspectFollowUpService(store=self.store)
+        return self._follow_up_svc
 
     @property
     def research(self) -> ResearchController:

@@ -654,8 +654,9 @@ class ProspectWorkspacePage(QWidget):
         """Rebuild recommendation cards from controller."""
         while self.rec_content.count():
             item = self.rec_content.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
 
         if self._controller is None:
             w = QLabel("Select a researched prospect to see store recommendations.")
@@ -841,9 +842,20 @@ class ProspectWorkspacePage(QWidget):
         self._update_summary()
 
     def select_prospect(self, prospect_id: Optional[str]) -> None:
-        """Select a prospect by id (if present in the current table)."""
+        """Select a prospect by id (if present in the current table).
+
+        Sprint 5H: this is the entry point used by the Follow-Up Queue to open a
+        prospect in this workspace. In addition to selecting the correct row, it
+        makes the controller selection (which refreshes the recommendation and
+        opportunity snapshot via signals) and populates the persisted 5G workflow
+        state so the workspace is fully ready for the user.
+        """
         self._selected_id = prospect_id
+        if self._controller is not None and prospect_id:
+            self._controller.select(prospect_id)
         self.refresh()
+        self._populate_workflow_panel()
+        self._refresh_location_display()
 
     # ------------------------------------------------------------------
     # Rendering
@@ -1188,7 +1200,7 @@ class ProspectWorkspacePage(QWidget):
             lines.append("")
             lines.append("Best Store")
             display_name = snap.best_location_name
-            if hasattr(snap.best_store, 'store_number') and snap.best_store.store_number:
+            if snap.best_store is not None and snap.best_store.store_number:
                 display_name = f"{snap.best_retailer} #{snap.best_store.store_number}"
             lines.append(display_name)
 
