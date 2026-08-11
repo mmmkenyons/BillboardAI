@@ -263,10 +263,21 @@ class MainWindow(QMainWindow):
     # Prospect workspace wiring (Sprint 5A)
     # ------------------------------------------------------------------
     def _wire_prospect_controller(self) -> None:
-        """Give the prospects page its controller (loads + refreshes)."""
+        """Give the prospects page its controller (loads + refreshes).
+
+        Sprint 5B: "Open Project" on a researched prospect navigates to the
+        existing Project Workspace by calling the workspace controller.
+        """
         if self._prospect_controller is None:
             return
-        self.prospects_workspace.set_controller(self._prospect_controller)
+        ctrl = self._prospect_controller
+        self.prospects_workspace.set_controller(ctrl)
+        ctrl.open_project_requested.connect(self._on_prospect_open_project)
+
+    def _on_prospect_open_project(self, project_id: str) -> None:
+        """Open a researched prospect's Project in the Project Workspace."""
+        if self._workspace_controller is not None:
+            self._workspace_controller.open_project(project_id)
 
     # ------------------------------------------------------------------
     # Inventory workspace wiring (Sprint 4B)

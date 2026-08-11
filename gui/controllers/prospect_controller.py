@@ -24,6 +24,7 @@ from gui.services.prospect_workspace import (
     ProspectValidationError,
     ProspectWorkspaceService,
 )
+from gui.controllers.research_controller import ResearchController
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class ProspectController(QObject):
     prospects_changed = Signal()  # after any mutation / import / save
     error_message = Signal(str)
     status_message = Signal(str)
+    open_project_requested = Signal(str)  # ask the app to open a Project workspace
 
     def __init__(
         self,
@@ -47,6 +49,9 @@ class ProspectController(QObject):
             service = ProspectWorkspaceService(store=ProspectStore(path=path))
         self._service = service
         self._selected_id: Optional[str] = None
+        # Sprint 5B: batch research queue controller reusing the same prospect
+        # store/service so prospect research_status stays in sync.
+        self._research = ResearchController(prospect_service=service)
 
     # ------------------------------------------------------------------
     # Properties
@@ -61,12 +66,22 @@ class ProspectController(QObject):
         return self._service.store
 
     @property
+    def research(self) -> ResearchController:
+        """The batch research queue controller for this prospects workspace."""
+        return self._research
+
+    @property
     def selected_id(self) -> Optional[str]:
         return self._selected_id
 
     def select(self, prospect_id: Optional[str]) -> None:
         """Track the currently selected prospect id."""
         self._selected_id = prospect_id
+
+    def open_project(self, project_id: Optional[str]) -> None:
+        """Request the app to open an existing Project workspace."""
+        if project_id:
+            self.open_project_requested.emit(str(project_id))
 
     # ------------------------------------------------------------------
     # Load / refresh
@@ -76,6 +91,7 @@ class ProspectController(QObject):
         """Load prospects (empty when missing); surface corruption clearly."""
         try:
             self._service.load()
+            self._research.load()
             self.prospects_loaded.emit()
             self.prospects_changed.emit()
         except ProspectCorruptionError as exc:

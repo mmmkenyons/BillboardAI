@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -57,8 +58,20 @@ _COLUMNS = (
     "category",
     "location",
     "status",
+    "research",
     "contact",
     "ready",
+)
+
+# Research queue table columns.
+_QUEUE_COLUMNS = (
+    "company",
+    "website",
+    "status",
+    "attempts",
+    "last error",
+    "project",
+    "updated",
 )
 
 
@@ -378,11 +391,8 @@ class ProspectWorkspacePage(QWidget):
         self.archive_button.clicked.connect(self._on_archive)
         toolbar.addWidget(self.archive_button)
 
-        self.research_button = QPushButton("Start Research", main)
-        self.research_button.setEnabled(False)
-        toolbar.addWidget(self.research_button)
-
         layout.addLayout(toolbar)
+        layout.addLayout(self._build_research_actions(main))
 
         self.table = QTableWidget(main)
         self.table.setColumnCount(len(_COLUMNS))
@@ -400,9 +410,105 @@ class ProspectWorkspacePage(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.verticalHeader().setVisible(False)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        layout.addWidget(self.table, stretch=1)
+        layout.addWidget(self.table, stretch=3)
+
+        layout.addWidget(self._build_research_panel(main), stretch=2)
 
         return main
+
+    def _build_research_actions(self, parent: QWidget) -> QHBoxLayout:
+        """Row of batch-research actions (queue / run / stop / open project)."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        self.queue_button = QPushButton("Queue Selected", parent)
+        self.queue_button.clicked.connect(self._on_queue_selected)
+        row.addWidget(self.queue_button)
+
+        self.queue_all_button = QPushButton("Queue All Ready", parent)
+        self.queue_all_button.clicked.connect(self._on_queue_all)
+        row.addWidget(self.queue_all_button)
+
+        row.addWidget(QLabel("Next", parent))
+        self.research_next_spin = QSpinBox(parent)
+        self.research_next_spin.setRange(1, 25)
+        self.research_next_spin.setValue(1)
+        row.addWidget(self.research_next_spin)
+
+        self.run_button = QPushButton("Research Next N", parent)
+        self.run_button.setObjectName("primaryButton")
+        self.run_button.clicked.connect(self._on_research_next)
+        row.addWidget(self.run_button)
+
+        self.retry_button = QPushButton("Retry Failed", parent)
+        self.retry_button.clicked.connect(self._on_retry_failed)
+        row.addWidget(self.retry_button)
+
+        self.cancel_button = QPushButton("Cancel Selected", parent)
+        self.cancel_button.clicked.connect(self._on_cancel_selected)
+        row.addWidget(self.cancel_button)
+
+        self.stop_button = QPushButton("Stop After Current", parent)
+        self.stop_button.clicked.connect(self._on_stop_after_current)
+        row.addWidget(self.stop_button)
+
+        self.open_project_button = QPushButton("Open Project", parent)
+        self.open_project_button.clicked.connect(self._on_open_project)
+        row.addWidget(self.open_project_button)
+
+        return row
+
+    def _build_research_panel(self, parent: QWidget) -> QWidget:
+        """Research Queue panel: summary counts, active progress, queue table."""
+        panel = QFrame(parent)
+        panel.setObjectName("workspaceSidebar")
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        head = QHBoxLayout()
+        title = QLabel("Research Queue", panel)
+        title.setObjectName("logoTitle")
+        head.addWidget(title)
+        head.addStretch(1)
+
+        self.research_counts_label = QLabel("Queued 0 | Running 0 | Done 0", panel)
+        self.research_counts_label.setObjectName("projectMeta")
+        head.addWidget(self.research_counts_label)
+        root.addLayout(head)
+
+        self.research_progress_label = QLabel("No active job.", panel)
+        self.research_progress_label.setObjectName("emptyState")
+        self.research_progress_label.setWordWrap(True)
+        root.addWidget(self.research_progress_label)
+
+        self.status_label = QLabel("", panel)
+        self.status_label.setObjectName("projectMeta")
+        self.status_label.setWordWrap(True)
+        root.addWidget(self.status_label)
+
+        self.queue_table = QTableWidget(panel)
+        self.queue_table.setColumnCount(len(_QUEUE_COLUMNS))
+        self.queue_table.setHorizontalHeaderLabels(list(_QUEUE_COLUMNS))
+        self.queue_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.queue_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.queue_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.queue_table.verticalHeader().setVisible(False)
+        self.queue_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.queue_table.itemSelectionChanged.connect(
+            self._on_queue_selection_changed
+        )
+        root.addWidget(self.queue_table, stretch=1)
+
+        return panel
     # ------------------------------------------------------------------
     # Controller wiring
     # ------------------------------------------------------------------
@@ -412,9 +518,17 @@ class ProspectWorkspacePage(QWidget):
         self._controller = controller
         controller.prospects_changed.connect(self.refresh)
         controller.error_message.connect(self._show_error)
+        controller.status_message.connect(self._show_status)
+        research = controller.research
+        research.queue_changed.connect(self._refresh_research_panel)
+        research.counts_changed.connect(self._apply_research_counts)
+        research.progress.connect(self._on_research_progress)
+        research.running_changed.connect(self._on_research_running)
+        research.status_message.connect(self._show_status)
         self._populate_filter_options()
         self.load()
         self.refresh()
+        self._refresh_research_panel()
 
     def get_selected_prospect_id(self) -> Optional[str]:
         """Return the currently selected prospect id (row-based)."""
@@ -478,6 +592,7 @@ class ProspectWorkspacePage(QWidget):
                 p.category,
                 _location_text(p),
                 p.status,
+                _prospect_research_label(p),
                 contact_text,
                 "Yes" if p.is_ready_for_research() else "No",
             ]
@@ -561,9 +676,161 @@ class ProspectWorkspacePage(QWidget):
         has_selection = self.table.currentRow() >= 0
         self.edit_button.setEnabled(has_selection)
         self.archive_button.setEnabled(has_selection)
+        self.queue_button.setEnabled(has_selection)
 
     def _show_error(self, message: str) -> None:
         QMessageBox.warning(self, "Prospects", str(message))
+
+    # ------------------------------------------------------------------
+    # Sprint 5B: research queue handlers
+    # ------------------------------------------------------------------
+
+    def _research_controller(self):
+        """Return the research controller (or None when unattached)."""
+        if self._controller is None:
+            return None
+        return getattr(self._controller, "research", None)
+
+    def _show_status(self, message: str) -> None:
+        if getattr(self, "status_label", None) is not None:
+            self.status_label.setText(str(message))
+
+    def _refresh_research_panel(self) -> None:
+        """Populate the Research Queue table + counts from the controller."""
+        research = self._research_controller()
+        if research is None:
+            return
+        jobs = research.list_jobs()
+        companies: Dict[str, str] = {}
+        if self._controller is not None:
+            for pr in self._controller.list_prospects():
+                companies[pr.prospect_id] = pr.company_name
+        self.queue_table.setRowCount(len(jobs))
+        for row_idx, job in enumerate(jobs):
+            updated = job.completed_at or job.started_at or job.created_at
+            values = [
+                companies.get(job.prospect_id, job.prospect_id),
+                job.website,
+                job.status,
+                str(job.attempt_count),
+                job.last_error or "",
+                (job.project_id or "")[:8],
+                updated,
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if col == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, job.job_id)
+                elif col == 5:
+                    item.setData(Qt.ItemDataRole.UserRole, job.project_id or "")
+                self.queue_table.setItem(row_idx, col, item)
+        self.queue_table.resizeColumnsToContents()
+        self._apply_research_counts(research.counts())
+
+    def _apply_research_counts(self, counts: object) -> None:
+        counts = counts or {}
+        if isinstance(counts, dict):
+            self.research_counts_label.setText(
+                f"Queued {counts.get('queued', 0)} | Running {counts.get('running', 0)} | "
+                f"Succeeded {counts.get('succeeded', 0)} | Failed {counts.get('failed', 0)} | "
+                f"Retry {counts.get('retry_pending', 0)}"
+            )
+
+    def _on_research_progress(self, stage: str, company: str) -> None:
+        self.research_progress_label.setText(f"{company}: {stage}...")
+
+    def _on_research_running(self, running: bool) -> None:
+        self.run_button.setEnabled(not running)
+        self.stop_button.setEnabled(running)
+        if running:
+            self.research_progress_label.setText("Research in progress...")
+
+    def _on_queue_selected(self) -> None:
+        research = self._research_controller()
+        if research is None:
+            return
+        prospect_id = self.get_selected_prospect_id()
+        if not prospect_id:
+            self._show_status("Select a prospect to queue.")
+            return
+        research.enqueue(prospect_id)
+
+    def _on_queue_all(self) -> None:
+        research = self._research_controller()
+        if research is None:
+            return
+        research.enqueue_all()
+
+    def _on_research_next(self) -> None:
+        research = self._research_controller()
+        if research is None:
+            return
+        count = self.research_next_spin.value() if self.research_next_spin else 1
+        research.research_next(count, concurrency=1)
+
+    def _on_retry_failed(self) -> None:
+        research = self._research_controller()
+        if research is None:
+            return
+        research.retry_failed()
+
+    def _on_cancel_selected(self) -> None:
+        research = self._research_controller()
+        if research is None:
+            return
+        job_id = self._selected_queue_job_id()
+        if job_id:
+            research.cancel(job_id)
+        else:
+            self._show_status("Select a queued job to cancel.")
+
+    def _on_stop_after_current(self) -> None:
+        research = self._research_controller()
+        if research is None:
+            return
+        research.stop_after_current()
+
+    def _on_open_project(self) -> None:
+        if self._controller is None:
+            return
+        project_id = self._selected_queue_project_id()
+        if not project_id:
+            prospect_id = self.get_selected_prospect_id()
+            if prospect_id:
+                project_id = self._project_id_for_prospect(prospect_id)
+        if project_id:
+            self._controller.open_project(project_id)
+        else:
+            self._show_status("No project available for the selected prospect.")
+
+    def _on_queue_selection_changed(self) -> None:
+        self.cancel_button.setEnabled(bool(self._selected_queue_job_id()))
+        self.open_project_button.setEnabled(
+            bool(self._selected_queue_project_id())
+        )
+
+    def _selected_queue_job_id(self) -> Optional[str]:
+        row = self.queue_table.currentRow()
+        if row < 0:
+            return None
+        item = self.queue_table.item(row, 0)
+        return str(item.data(Qt.ItemDataRole.UserRole)) if item else None
+
+    def _selected_queue_project_id(self) -> Optional[str]:
+        row = self.queue_table.currentRow()
+        if row < 0:
+            return None
+        item = self.queue_table.item(row, 5)
+        return str(item.data(Qt.ItemDataRole.UserRole)) if item else None
+
+    def _project_id_for_prospect(self, prospect_id: str) -> str:
+        research = self._research_controller()
+        if research is None:
+            return ""
+        for job in research.list_jobs():
+            if job.prospect_id == prospect_id and job.project_id:
+                return job.project_id
+        return ""
 
     # ------------------------------------------------------------------
     # Helpers
@@ -579,6 +846,19 @@ class ProspectWorkspacePage(QWidget):
 def _location_text(p: Prospect) -> str:
     parts = [part for part in (p.city, p.state) if part]
     return ", ".join(parts) or ""
+
+
+def _prospect_research_label(p: Prospect) -> str:
+    """High-level research display value for the prospects table.
+
+    Uses the existing ``Prospect.research_status`` value when set; otherwise
+    falls back to a READY / NOT_READY label derived deterministically from the
+    prospect's website/domain (no second status model).
+    """
+    status = (p.research_status or "").strip()
+    if status:
+        return status
+    return "READY" if p.is_ready_for_research() else "NOT_READY"
 
 
 def _matches_search(p: Prospect, query: str) -> bool:
