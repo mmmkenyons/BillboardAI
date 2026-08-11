@@ -273,11 +273,19 @@ class MainWindow(QMainWindow):
         ctrl = self._prospect_controller
         self.prospects_workspace.set_controller(ctrl)
         ctrl.open_project_requested.connect(self._on_prospect_open_project)
+        ctrl.view_store_requested.connect(self._on_prospect_view_store)
 
     def _on_prospect_open_project(self, project_id: str) -> None:
         """Open a researched prospect's Project in the Project Workspace."""
         if self._workspace_controller is not None:
             self._workspace_controller.open_project(project_id)
+
+    def _on_prospect_view_store(self, location_id: str) -> None:
+        """Navigate to inventory workspace and select a location."""
+        if self._inventory_controller is not None:
+            self._inventory_controller.select("location", location_id)
+            self.inventory_workspace.refresh()
+        self.show_page("inventory")
 
     # ------------------------------------------------------------------
     # Inventory workspace wiring (Sprint 4B)

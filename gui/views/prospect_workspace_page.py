@@ -365,6 +365,30 @@ class ProspectWorkspacePage(QWidget):
         self.resolve_location_button.setEnabled(False)
         layout.addWidget(self.resolve_location_button)
 
+        layout.addSpacing(8)
+
+        # Sprint 5F: Opportunity overview section
+        opp_lbl = QLabel("Opportunity", side)
+        opp_lbl.setObjectName("projectMeta")
+        layout.addWidget(opp_lbl)
+
+        self.opportunity_overview = QLabel("", side)
+        self.opportunity_overview.setObjectName("emptyState")
+        self.opportunity_overview.setWordWrap(True)
+        layout.addWidget(self.opportunity_overview)
+
+        self.open_project_btn = QPushButton("Open Project", side)
+        self.open_project_btn.clicked.connect(self._on_open_best_project)
+        self.open_project_btn.setEnabled(False)
+        layout.addWidget(self.open_project_btn)
+
+        self.view_store_btn = QPushButton("View Store", side)
+        self.view_store_btn.clicked.connect(self._on_view_best_store)
+        self.view_store_btn.setEnabled(False)
+        layout.addWidget(self.view_store_btn)
+
+        layout.addSpacing(8)
+
         layout.addStretch(1)
 
         count_lbl = QLabel("Overview", side)
@@ -713,6 +737,8 @@ class ProspectWorkspacePage(QWidget):
         controller.recommendations_changed.connect(self._refresh_recommendations)
         # Sprint 5E: location enrichment
         controller.enrichment_changed.connect(self._refresh_location_display)
+        # Sprint 5F: opportunity snapshot
+        controller.opportunity_snapshot_changed.connect(self._refresh_opportunity_overview)
         self._populate_filter_options()
         self.load()
         self.refresh()
@@ -1076,6 +1102,86 @@ class ProspectWorkspacePage(QWidget):
 
         self.location_display.setText("\n".join(lines))
         self.resolve_location_button.setEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Sprint 5F: Opportunity overview display
+    # ------------------------------------------------------------------
+
+    def _refresh_opportunity_overview(self) -> None:
+        """Update the opportunity overview section in the sidebar from snapshot."""
+        if self._controller is None:
+            self.opportunity_overview.setText("")
+            self.open_project_btn.setEnabled(False)
+            self.view_store_btn.setEnabled(False)
+            return
+
+        snap = self._controller.snapshot
+        if snap is None or snap.is_empty:
+            self.opportunity_overview.setText("(select a prospect)")
+            self.open_project_btn.setEnabled(False)
+            self.view_store_btn.setEnabled(False)
+            return
+
+        lines = []
+        lines.append(f"Research     {snap.research_status}")
+        lines.append(f"Location     {snap.location_status}")
+        lines.append(f"Opportunity  {snap.match_strength}")
+
+        if snap.best_retailer and snap.best_location_name:
+            lines.append("")
+            lines.append("Best Store")
+            display_name = snap.best_location_name
+            if hasattr(snap.best_store, 'store_number') and snap.best_store.store_number:
+                display_name = f"{snap.best_retailer} #{snap.best_store.store_number}"
+            lines.append(display_name)
+
+        if snap.distance_miles is not None:
+            lines.append(f"Distance     {snap.distance_miles:.1f} mi")
+        else:
+            lines.append("Distance     unavailable")
+
+        if snap.weekly_traffic is not None:
+            lines.append(f"Wkly Traffic {snap.weekly_traffic:,}")
+
+        if snap.price_display:
+            lines.append(f"Price        {snap.price_display}")
+
+        if snap.best_match_score > 0:
+            lines.append(f"Score        {snap.best_match_score}")
+
+        if snap.best_placement_name:
+            lines.append(f"Best Plcmnt  {snap.best_placement_name}")
+
+        # Why This Fits (first few reasons)
+        if snap.reasons:
+            lines.append("")
+            lines.append("Why This Fits")
+            for reason in snap.reasons[:4]:
+                lines.append(f"  • {reason}")
+
+        self.opportunity_overview.setText("\n".join(lines))
+        self.open_project_btn.setEnabled(snap.project_available)
+        self.view_store_btn.setEnabled(bool(snap.best_location_id))
+
+    def _on_open_best_project(self) -> None:
+        """Open the project associated with the best store."""
+        if self._controller is None:
+            return
+        snap = self._controller.snapshot
+        if snap and snap.project_id:
+            self._controller.open_project(snap.project_id)
+        else:
+            self._show_status("No project available.")
+
+    def _on_view_best_store(self) -> None:
+        """Navigate to inventory workspace and select the best store location."""
+        if self._controller is None:
+            return
+        snap = self._controller.snapshot
+        if snap and snap.best_location_id:
+            self._controller.view_store(snap.best_location_id)
+        else:
+            self._show_status("No store selected.")
 
 def _location_text(p: Prospect) -> str:
     parts = [part for part in (p.city, p.state) if part]

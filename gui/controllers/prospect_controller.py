@@ -34,6 +34,10 @@ from gui.services.location_enrichment import (
     EnrichmentOutcome,
     LocationEnrichmentService,
 )
+from gui.services.prospect_opportunity_workspace import (
+    ProspectOpportunitySnapshot,
+    ProspectOpportunityWorkspaceService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +53,14 @@ class ProspectController(QObject):
     open_project_requested = Signal(str)  # ask the app to open a Project workspace
     recommendations_changed = Signal()  # Sprint 5D: store recommendations updated
     enrichment_changed = Signal()  # Sprint 5E: location enrichment updated
+    opportunity_snapshot_changed = Signal()  # Sprint 5F: opportunity snapshot updated
+    view_store_requested = Signal(str)  # Sprint 5F: navigate to inventory + select location
 
     def __init__(
         self,
         service: Optional[ProspectWorkspaceService] = None,
         path: Optional[str] = None,
+        opportunity_workspace_service: Optional[ProspectOpportunityWorkspaceService] = None,
     ) -> None:
         super().__init__()
         if service is None:
@@ -63,13 +70,24 @@ class ProspectController(QObject):
         # Sprint 5B: batch research queue controller reusing the same prospect
         # store/service so prospect research_status stays in sync.
         self._research = ResearchController(prospect_service=service)
-        # Sprint 5D: store recommendation service
-        self._rec_svc = StoreRecommendationService()
+        # Sprint 5F: opportunity workspace snapshot — share the controller's
+        # prospect store so that non-default/test stores are visible.
+        if opportunity_workspace_service is None:
+            opportunity_workspace_service = ProspectOpportunityWorkspaceService(
+                prospect_store=self._service.store,
+            )
+        self._snapshot_svc = opportunity_workspace_service
+        # Sprint 5D: store recommendation service — share the singleton from
+        # the snapshot service so that recommendations and snapshots read from
+        # the same wired stores (no duplicate default-store instances).
+        self._rec_svc = self._snapshot_svc.recommendation_service
         self._recommendations: List[StoreRecommendation] = []
         self._rec_limit: int = 3
         self._rec_mode: str = RANK_BEST_MATCH
         # Sprint 5E: location enrichment
         self._enrichment_last_outcome: Optional[EnrichmentOutcome] = None
+        # Sprint 5F: opportunity workspace snapshot
+        self._snapshot: Optional[ProspectOpportunitySnapshot] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -96,6 +114,7 @@ class ProspectController(QObject):
         """Track the currently selected prospect id."""
         self._selected_id = prospect_id
         self._refresh_recommendations()
+        self._refresh_snapshot()
 
     def get_selected(self) -> Optional[Prospect]:
         """Return the currently selected Prospect, or None if none selected."""
@@ -149,6 +168,43 @@ class ProspectController(QObject):
         """Open the project associated with a store recommendation."""
         if recommendation and recommendation.project_id:
             self.open_project(recommendation.project_id)
+
+    # ------------------------------------------------------------------
+    # Sprint 5F: Opportunity workspace snapshot
+    # ------------------------------------------------------------------
+
+    @property
+    def snapshot(self) -> Optional[ProspectOpportunitySnapshot]:
+        return self._snapshot
+
+    def refresh_opportunity_snapshot(self) -> None:
+        """Explicit refresh (recomputes via existing services)."""
+        self._refresh_snapshot(refresh=True)
+
+    def _refresh_snapshot(self, refresh: bool = False) -> None:
+        """Build the opportunity snapshot for the currently selected prospect."""
+        if not self._selected_id:
+            self._snapshot = None
+        else:
+            try:
+                svc = self._snapshot_svc
+                if refresh:
+                    self._snapshot = svc.refresh_for_prospect(
+                        self._selected_id, recommendation_limit=self._rec_limit,
+                    )
+                else:
+                    self._snapshot = svc.snapshot_for_prospect(
+                        self._selected_id, recommendation_limit=self._rec_limit,
+                    )
+            except Exception as exc:
+                logger.warning("Snapshot build failed: %s", exc)
+                self._snapshot = None
+        self.opportunity_snapshot_changed.emit()
+
+    def view_store(self, location_id: str) -> None:
+        """Request navigation to inventory workspace + select a location."""
+        if location_id:
+            self.view_store_requested.emit(location_id)
 
     # ------------------------------------------------------------------
     # Load / refresh
@@ -345,6 +401,7 @@ class ProspectController(QObject):
             self._selected_id = prospect.prospect_id
             self.prospects_changed.emit()
             self._refresh_recommendations()
+            self._refresh_snapshot()
             self.status_message.emit(outcome.message)
         else:
             self.error_message.emit(outcome.message)

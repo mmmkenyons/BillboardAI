@@ -298,3 +298,209 @@ class TestProspectPage:
         assert hasattr(h.page, "resolve_location_button")
         assert hasattr(h.page, "_on_resolve_location")
         assert hasattr(h.controller, "enrich_location_for_selected")
+    # ------------------------------------------------------------------
+    # Sprint 5F: Dependency-injection regression
+    # ------------------------------------------------------------------
+
+    def test_select_updates_opportunity_snapshot_from_controller_store(
+        self, tmp_path
+    ) -> None:
+        """Controller with injected stores MUST share them with the snapshot svc."""
+        import os
+        from gui.models.inventory import (
+            PERIOD_YEAR, STATUS_AVAILABLE, Money,
+            Location, Market, Placement, Retailer,
+        )
+        from gui.models.inventory_store import InventoryStore
+        from gui.models.opportunity_store import OpportunityStore
+        from gui.models.project_store import ProjectStore
+        from gui.models.prospect import Prospect
+        from gui.models.prospect_store import ProspectStore
+        from gui.services.opportunity_service import OpportunityService
+        from gui.services.prospect_opportunity_workspace import (
+            ProspectOpportunityWorkspaceService,
+        )
+        from gui.controllers.prospect_controller import ProspectController
+
+        root = str(tmp_path)
+
+        # 1. Seeded prospect
+        ps = ProspectStore(path=os.path.join(root, "prospects.json"))
+        p = Prospect(
+            prospect_id="p_test",
+            company_name="Injection Test Co",
+            category="roofing",
+            city="Denver",
+            state="CO",
+            research_status="SUCCEEDED",
+        )
+        ps.collection.prospects.append(p)
+        ps.save()
+
+        # 2. Inventory with one placement
+        invs = InventoryStore(path=os.path.join(root, "inventory.json"))
+        retailer = Retailer(name="Test Retailer")
+        market = Market(name="Test Market", market_id="m_test")
+        loc = Location(
+            location_id="l_test", name="Test Store #1",
+            retailer_id=retailer.retailer_id,
+            market_id=market.market_id,
+            store_number="1", city="Denver", state="CO",
+            latitude=39.74, longitude=-104.99, weekly_traffic=10000,
+        )
+        pl = Placement(
+            placement_id="pl_test", location_id=loc.location_id,
+            name="Window Banner", placement_type="window",
+            status=STATUS_AVAILABLE,
+            price=Money.dollars(6000), price_period=PERIOD_YEAR,
+        )
+        invs.create_inventory(
+            retailers=[retailer], markets=[market],
+            locations=[loc], placements=[pl],
+        )
+        invs.save()
+
+        # 3. Opportunity service wired to the SAME stores
+        opp_store = OpportunityStore(
+            path=os.path.join(root, "opportunities.json")
+        )
+        opp_svc = OpportunityService(
+            prospect_store=ps,
+            project_store=ProjectStore(root=os.path.join(root, "projects")),
+            inventory_store=invs,
+            opportunity_store=opp_store,
+        )
+
+        # 4. Snapshot service wired to SAME stores
+        snap_svc = ProspectOpportunityWorkspaceService(
+            prospect_store=ps,
+            project_store=opp_svc.project_store,
+            inventory_store=invs,
+            opportunity_service=opp_svc,
+        )
+
+        # 5. Controller — shares prospect store AND snapshot svc
+        from gui.services.prospect_workspace import ProspectWorkspaceService
+        controller = ProspectController(
+            service=ProspectWorkspaceService(store=ps),
+            opportunity_workspace_service=snap_svc,
+        )
+
+        # 6. Select → snapshot must reflect injected store data
+        controller.select("p_test")
+        snapshot = controller.snapshot
+        assert snapshot is not None, "Snapshot should not be None after select"
+        assert snapshot.is_empty is False, "Snapshot should not be empty"
+        assert snapshot.company_name == "Injection Test Co", (
+            f"Expected 'Injection Test Co', got {snapshot.company_name!r}"
+        )
+        assert snapshot.prospect_id == "p_test"
+
+        # 7. No duplicate store — snapshot svc shares controller's prospect store
+        assert (
+            controller._snapshot_svc._prospect_store is controller._service.store
+        ), "Snapshot service must share the controller's ProspectStore instance"
+    def test_select_switch_no_stale_snapshot(self, tmp_path) -> None:
+        """Selecting a different prospect must update the snapshot — no stale data."""
+        import os
+        from gui.models.inventory import (
+            PERIOD_YEAR, STATUS_AVAILABLE, Money,
+            Location, Market, Placement, Retailer,
+        )
+        from gui.models.inventory_store import InventoryStore
+        from gui.models.opportunity_store import OpportunityStore
+        from gui.models.project_store import ProjectStore
+        from gui.models.prospect import Prospect
+        from gui.models.prospect_store import ProspectStore
+        from gui.services.opportunity_service import OpportunityService
+        from gui.services.prospect_opportunity_workspace import (
+            ProspectOpportunityWorkspaceService,
+        )
+        from gui.controllers.prospect_controller import ProspectController
+        from gui.services.prospect_workspace import ProspectWorkspaceService
+
+        root = str(tmp_path)
+
+        # Two prospects
+        ps = ProspectStore(path=os.path.join(root, "prospects.json"))
+        p1 = Prospect(
+            prospect_id="p_alpha", company_name="Alpha Inc",
+            category="roofing", city="Denver", state="CO",
+            research_status="SUCCEEDED",
+        )
+        p2 = Prospect(
+            prospect_id="p_beta", company_name="Beta LLC",
+            category="painting", city="Boulder", state="CO",
+            research_status="NOT_READY",
+        )
+        ps.collection.prospects.extend([p1, p2])
+        ps.save()
+
+        # Inventory with two locations/placements
+        invs = InventoryStore(path=os.path.join(root, "inventory.json"))
+        retailer = Retailer(name="Test Retailer")
+        market = Market(name="CO Market", market_id="m_co")
+        loc1 = Location(
+            location_id="l_a", name="Store A",
+            retailer_id=retailer.retailer_id, market_id=market.market_id,
+            store_number="A", city="Denver", state="CO",
+            latitude=39.74, longitude=-104.99, weekly_traffic=10000,
+        )
+        loc2 = Location(
+            location_id="l_b", name="Store B",
+            retailer_id=retailer.retailer_id, market_id=market.market_id,
+            store_number="B", city="Boulder", state="CO",
+            latitude=40.01, longitude=-105.27, weekly_traffic=8000,
+        )
+        pl1 = Placement(
+            placement_id="pl_a", location_id=loc1.location_id,
+            name="Window A", placement_type="window",
+            status=STATUS_AVAILABLE, price=Money.dollars(6000),
+            price_period=PERIOD_YEAR,
+        )
+        pl2 = Placement(
+            placement_id="pl_b", location_id=loc2.location_id,
+            name="Window B", placement_type="window",
+            status=STATUS_AVAILABLE, price=Money.dollars(5000),
+            price_period=PERIOD_YEAR,
+        )
+        invs.create_inventory(
+            retailers=[retailer], markets=[market],
+            locations=[loc1, loc2], placements=[pl1, pl2],
+        )
+        invs.save()
+
+        opp_store = OpportunityStore(
+            path=os.path.join(root, "opportunities.json")
+        )
+        opp_svc = OpportunityService(
+            prospect_store=ps,
+            project_store=ProjectStore(root=os.path.join(root, "projects")),
+            inventory_store=invs,
+            opportunity_store=opp_store,
+        )
+        snap_svc = ProspectOpportunityWorkspaceService(
+            prospect_store=ps,
+            project_store=opp_svc.project_store,
+            inventory_store=invs,
+            opportunity_service=opp_svc,
+        )
+        controller = ProspectController(
+            service=ProspectWorkspaceService(store=ps),
+            opportunity_workspace_service=snap_svc,
+        )
+
+        # Select first
+        controller.select("p_alpha")
+        snap1 = controller.snapshot
+        assert snap1 is not None
+        assert snap1.company_name == "Alpha Inc"
+        assert snap1.prospect_id == "p_alpha"
+
+        # Switch to second — no stale data
+        controller.select("p_beta")
+        snap2 = controller.snapshot
+        assert snap2 is not None
+        assert snap2.company_name == "Beta LLC"
+        assert snap2.prospect_id == "p_beta"
+        assert snap1.prospect_id != snap2.prospect_id

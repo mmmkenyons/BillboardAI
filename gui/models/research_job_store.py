@@ -202,10 +202,9 @@ class ResearchQueueStore:
         return self._collection
 
     def load_or_empty(self) -> ResearchQueueCollection:
-        """Load if present; otherwise keep an empty snapshot (no raise)."""
+        """Load if present; otherwise keep existing in-memory data (no raise)."""
         if self.exists():
             return self.load()
-        self._collection = ResearchQueueCollection()
         return self._collection
 
     # ------------------------------------------------------------------

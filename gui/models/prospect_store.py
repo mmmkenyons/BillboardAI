@@ -288,10 +288,16 @@ class ProspectStore:
         return self._collection
 
     def load_or_empty(self) -> ProspectCollection:
-        """Load if present; otherwise keep/create an empty snapshot (no raise)."""
+        """Load if present; otherwise keep existing in-memory data (no raise).
+
+        IMPORTANT: when no backing file exists the store preserves whatever
+        in-memory data is already present — it does NOT construct a fresh
+        empty collection that would destroy pre-loaded state.  This is
+        essential for dependency-injection scenarios where an in-memory
+        store is populated before any ``load``/``ensure_loaded`` call.
+        """
         if self.exists():
             return self.load()
-        self._collection = ProspectCollection()
         return self._collection
 
     # ------------------------------------------------------------------
