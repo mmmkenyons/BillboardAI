@@ -39,6 +39,7 @@ class BatchPage(QWidget):
     open_project_requested = Signal(str)
     export_requested = Signal(list, str)
     package_requested = Signal(list, str, object)
+    review_requested = Signal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -64,6 +65,9 @@ class BatchPage(QWidget):
         self.package_button = QPushButton("Build Campaign Package", self)
         self.package_button.clicked.connect(self._build_campaign_package)
         actions.addWidget(self.package_button)
+        self.review_button = QPushButton("Review Campaign", self)
+        self.review_button.clicked.connect(self._open_campaign_review)
+        actions.addWidget(self.review_button)
         actions.addStretch(1)
         layout.addLayout(actions)
 
@@ -264,6 +268,10 @@ class BatchPage(QWidget):
             self.show_error(result.message)
             return
         self.show_status(result.message)
+
+    def _open_campaign_review(self) -> None:
+        selected = self.selected_prospect_ids()
+        self.review_requested.emit(selected)
 
     def _default_campaign_name(self, selected: list[str]) -> str:
         companies: list[str] = []

@@ -13,9 +13,18 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 from gui.controllers.app_controller import BillboardController
+from gui.controllers.batch_generation_controller import BatchGenerationController
+from gui.controllers.campaign_review_controller import CampaignReviewController
 from gui.controllers.inventory_controller import InventoryController
 from gui.controllers.project_controller import ProjectWorkspaceController
 from gui.controllers.prospect_controller import ProspectController
+from gui.models.campaign_review_store import CampaignReviewStore
+from gui.models.project_store import ProjectStore
+from gui.models.prospect_generation_store import ProspectGenerationStore
+from gui.services.campaign_export import CampaignExportService
+from gui.services.campaign_package import CampaignPackageService
+from gui.services.campaign_review import CampaignReviewService
+from gui.services.prospect_generation import ProspectGenerationService
 from gui.main_window import MainWindow
 from gui.resources import APP_VERSION
 from gui.resources.styles import APP_STYLESHEET
@@ -59,8 +68,29 @@ def main() -> None:
     workspace_controller = ProjectWorkspaceController()
     inventory_controller = InventoryController()
     prospect_controller = ProspectController()
+    generation_service = ProspectGenerationService(
+        prospect_store=prospect_controller.service.store,
+        job_store=ProspectGenerationStore(),
+        project_store=ProjectStore(),
+    )
+    batch_controller = BatchGenerationController(prospect_controller=prospect_controller, service=generation_service)
+    export_service = CampaignExportService(
+        prospect_store=generation_service.prospect_store,
+        job_store=generation_service.job_store,
+        project_store=generation_service.project_store,
+    )
+    package_service = CampaignPackageService(export_service=export_service)
+    review_service = CampaignReviewService(
+        prospect_store=generation_service.prospect_store,
+        export_service=export_service,
+        review_store=CampaignReviewStore(),
+        package_service=package_service,
+    )
+    review_controller = CampaignReviewController(service=review_service)
     window = MainWindow(
         controller,
+        batch_controller,
+        review_controller,
         workspace_controller,
         inventory_controller,
         prospect_controller,

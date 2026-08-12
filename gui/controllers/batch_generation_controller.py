@@ -27,6 +27,7 @@ class BatchGenerationController(QObject):
     error_message = Signal(str)
     running_changed = Signal(bool)
     open_project_requested = Signal(str)
+    open_campaign_review_requested = Signal(object)
     export_preview_changed = Signal(object)
 
     def __init__(
@@ -128,6 +129,10 @@ class BatchGenerationController(QObject):
         else:
             self.error_message.emit(result.message)
         return result
+
+    def open_campaign_review(self, prospect_ids: list[str] | None = None) -> None:
+        payload = [prospect_id for prospect_id in (prospect_ids or []) if str(prospect_id or "").strip()]
+        self.open_campaign_review_requested.emit(payload)
 
     def open_folder(self, path: str) -> None:
         folder = path or ""

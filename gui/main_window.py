@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from gui.resources import APP_VERSION
 from gui.views.batch_page import BatchPage
+from gui.views.campaign_review_page import CampaignReviewPage
 from gui.views.history_page import HistoryPage
 from gui.views.home_page import HomePage
 from gui.views.inventory_workspace_page import InventoryWorkspacePage
@@ -38,6 +39,7 @@ from gui.views.settings_page import SettingsPage
 if TYPE_CHECKING:
     from gui.controllers.app_controller import BillboardController
     from gui.controllers.batch_generation_controller import BatchGenerationController
+    from gui.controllers.campaign_review_controller import CampaignReviewController
     from gui.controllers.inventory_controller import InventoryController
     from gui.controllers.project_controller import ProjectWorkspaceController
     from gui.controllers.prospect_controller import ProspectController
@@ -52,6 +54,7 @@ class MainWindow(QMainWindow):
         self,
         controller: BillboardController | None = None,
         batch_controller: "BatchGenerationController | None" = None,
+        review_controller: "CampaignReviewController | None" = None,
         workspace_controller: ProjectWorkspaceController | None = None,
         inventory_controller: "InventoryController | None" = None,
         prospect_controller: "ProspectController | None" = None,
@@ -63,6 +66,7 @@ class MainWindow(QMainWindow):
         self._controller = controller
         self._batch_controller = batch_controller
         self._workspace_controller = workspace_controller
+        self._review_controller = review_controller
         self._inventory_controller = inventory_controller
         self._prospect_controller = prospect_controller
 
@@ -87,6 +91,8 @@ class MainWindow(QMainWindow):
 
         if self._batch_controller is not None:
             self._wire_batch_controller()
+        if self._review_controller is not None:
+            self._wire_review_controller()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -97,6 +103,7 @@ class MainWindow(QMainWindow):
         self.home_page = HomePage(self._stack)
         self.settings_page = SettingsPage(self._stack)
         self.batch_page = BatchPage(self._stack)
+        self.campaign_review_page = CampaignReviewPage(self._stack)
         self.history_page = HistoryPage(self._stack)
         self.project_browser = ProjectBrowserPage(self._stack)
         self.project_workspace = ProjectWorkspacePage(self._stack)
@@ -108,6 +115,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self.home_page)
         self._stack.addWidget(self.settings_page)
         self._stack.addWidget(self.batch_page)
+        self._stack.addWidget(self.campaign_review_page)
         self._stack.addWidget(self.history_page)
         self._stack.addWidget(self.project_browser)
         self._stack.addWidget(self.project_workspace)
@@ -170,6 +178,10 @@ class MainWindow(QMainWindow):
         pipeline_action = QAction("&Pipeline", self)
         pipeline_action.triggered.connect(lambda: self.show_page("pipeline"))
         view_menu.addAction(pipeline_action)
+
+        review_action = QAction("Campaign &Review", self)
+        review_action.triggered.connect(lambda: self.show_page("campaign_review"))
+        view_menu.addAction(review_action)
 
         history_action = QAction("&History", self)
         history_action.setEnabled(False)
@@ -265,6 +277,7 @@ class MainWindow(QMainWindow):
             "home": self.home_page,
             "settings": self.settings_page,
             "batch": self.batch_page,
+            "campaign_review": self.campaign_review_page,
             "history": self.history_page,
             "projects": self.project_browser,
             "workspace": self.project_workspace,
@@ -284,6 +297,8 @@ class MainWindow(QMainWindow):
                 self.follow_up_page.refresh()
             if page == "pipeline":
                 self.pipeline_page.refresh()
+            if page == "campaign_review":
+                self.campaign_review_page.show_status("")
 
     # ------------------------------------------------------------------
     # Prospect workspace wiring (Sprint 5A)
@@ -310,6 +325,21 @@ class MainWindow(QMainWindow):
         ctrl = self._batch_controller
         self.batch_page.set_controller(ctrl)
         ctrl.open_project_requested.connect(self._on_prospect_open_project)
+        self.batch_page.review_requested.connect(ctrl.open_campaign_review)
+        ctrl.open_campaign_review_requested.connect(self._on_open_campaign_review)
+
+    def _wire_review_controller(self) -> None:
+        if self._review_controller is None:
+            return
+        ctrl = self._review_controller
+        self.campaign_review_page.set_controller(ctrl)
+        ctrl.open_project_requested.connect(self._on_prospect_open_project)
+
+    def _on_open_campaign_review(self, prospect_ids: object) -> None:
+        if self._review_controller is not None:
+            ids = list(prospect_ids) if isinstance(prospect_ids, list) else []
+            self._review_controller.set_scope(ids)
+        self.show_page("campaign_review")
 
     def _on_open_prospect_in_workspace(self, prospect_id: str) -> None:
         """Sprint 5H: open a queue-selected prospect in the Prospect Workspace."""
