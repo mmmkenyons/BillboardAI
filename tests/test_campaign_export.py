@@ -229,6 +229,8 @@ def test_cross_prospect_isolation(tmp_path):
     assert row_b.company == 'B Co'
     assert row_a.mockup_path.endswith('a.png')
     assert row_b.mockup_path.endswith('b.png')
+    assert 'B Co' not in row_a.email_body
+    assert 'A Co' not in row_b.email_body
 
 
 def test_legacy_pre_5k_job_compatibility(tmp_path):
@@ -248,6 +250,24 @@ def test_legacy_pre_5k_job_compatibility(tmp_path):
     row = service.build_row(prospect.prospect_id)
     assert row.project_id == project.id
     assert row.opportunity_id == ''
+    assert row.email_subject == 'Quick idea for ABC Roofing'
+    assert 'Castle Rock' in row.email_body
+    assert 'placement' not in row.email_body
+
+
+def test_csv_includes_email_columns_and_multiline_round_trip(tmp_path):
+    prospect_store, job_store, project_store, service = _runtime(tmp_path)
+    prospect = _prospect(prospect_store, company_name="ABC, Roofing")
+    project, concept = _project_with_concept(project_store, prospect)
+    _job(job_store, prospect_id=prospect.prospect_id, project_id=project.id, result_path=concept.image_path)
+    output_path = os.path.join(str(tmp_path), "campaign.csv")
+    service.export_csv([prospect.prospect_id], output_path)
+    with open(output_path, 'r', encoding='utf-8', newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    assert 'email_subject' in rows[0]
+    assert 'email_body' in rows[0]
+    assert rows[0]['email_subject'] == 'Quick idea for ABC, Roofing'
+    assert '\n\n' in rows[0]['email_body']
 
 
 def test_preview_is_read_only_and_non_mutating(tmp_path):

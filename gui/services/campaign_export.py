@@ -25,6 +25,10 @@ from gui.models.prospect_generation import (
 )
 from gui.models.prospect_generation_store import ProspectGenerationStore
 from gui.models.prospect_store import ProspectStore
+from gui.services.outreach_generation import (
+    OutreachGenerationService,
+    OutreachPersonalizationContext,
+)
 
 
 EXPORT_STATUS_READY = "READY"
@@ -36,6 +40,10 @@ CSV_COLUMNS: tuple[str, ...] = (
     "first_name",
     "contact_name",
     "company",
+    "email_subject",
+    "email_body",
+    "email_opening_line",
+    "personalization_basis",
     "website",
     "category",
     "city",
@@ -75,6 +83,10 @@ class CampaignExportRow:
     first_name: str = ""
     contact_name: str = ""
     company: str = ""
+    email_subject: str = ""
+    email_body: str = ""
+    email_opening_line: str = ""
+    personalization_basis: str = ""
     website: str = ""
     category: str = ""
     city: str = ""
@@ -135,6 +147,7 @@ class CampaignExportService:
         self._prospect_store = prospect_store
         self._job_store = job_store
         self._project_store = project_store
+        self._outreach_service = OutreachGenerationService()
 
     def check_eligibility(self, prospect_id: str) -> CampaignExportEligibility:
         prospect = self._prospect_store.get(prospect_id)
@@ -264,11 +277,35 @@ class CampaignExportService:
         headline = _clean(concept.headline)
         city = _clean(prospect.city)
         state = _clean(prospect.state)
+        outreach = self._outreach_service.generate_message(
+            OutreachPersonalizationContext(
+                first_name=_derive_first_name(prospect.contact_name),
+                contact_name=_clean(prospect.contact_name),
+                company_name=_clean(prospect.company_name),
+                website=_clean(prospect.website),
+                category=_clean(prospect.category),
+                prospect_city=city,
+                prospect_state=state,
+                headline=headline,
+                cta=_clean(concept.cta),
+                template=_clean(concept.template or job.template),
+                personalization_location=_clean(_trustworthy_location(prospect, context)),
+                opportunity_city=_clean(context.city) if context else "",
+                opportunity_state=_clean(context.state) if context else "",
+                placement_name=_clean(context.placement_name) if context else "",
+                placement_type=_clean(context.placement_type) if context else "",
+                retailer_name=_clean(context.retailer_name) if context else "",
+            )
+        )
         return CampaignExportRow(
             email=_clean(prospect.email),
             first_name=_derive_first_name(prospect.contact_name),
             contact_name=_clean(prospect.contact_name),
             company=_clean(prospect.company_name),
+            email_subject=outreach.subject,
+            email_body=outreach.body,
+            email_opening_line=outreach.opening_line,
+            personalization_basis=outreach.personalization_basis,
             website=_clean(prospect.website),
             category=_clean(prospect.category),
             city=city,
