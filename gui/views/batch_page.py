@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -25,6 +26,7 @@ class BatchPage(QWidget):
     COL_TEMPLATE = 3
     COL_OPPORTUNITY = 4
     COL_ELIGIBILITY = 5
+    COL_EXPORT_STATUS = 6
 
     JOB_COL_COMPANY = 0
     JOB_COL_TEMPLATE = 1
@@ -35,6 +37,7 @@ class BatchPage(QWidget):
     queue_requested = Signal(list, dict, dict)
     run_requested = Signal(list)
     open_project_requested = Signal(str)
+    export_requested = Signal(list, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -46,14 +49,17 @@ class BatchPage(QWidget):
         label.setObjectName("previewHeading")
         layout.addWidget(label)
 
-        self.prospect_table = QTableWidget(0, 6, self)
-        self.prospect_table.setHorizontalHeaderLabels(["Select", "Company", "Website", "Template", "Opportunity", "Eligibility"])
+        self.prospect_table = QTableWidget(0, 7, self)
+        self.prospect_table.setHorizontalHeaderLabels(["Select", "Company", "Website", "Template", "Opportunity", "Eligibility", "Export"])
         layout.addWidget(self.prospect_table)
 
         actions = QHBoxLayout()
         self.queue_button = QPushButton("Queue Selected", self)
         self.queue_button.clicked.connect(self._emit_queue)
         actions.addWidget(self.queue_button)
+        self.export_button = QPushButton("Export Campaign CSV", self)
+        self.export_button.clicked.connect(self._export_campaign_csv)
+        actions.addWidget(self.export_button)
         actions.addStretch(1)
         layout.addLayout(actions)
 
@@ -92,16 +98,21 @@ class BatchPage(QWidget):
             controller.error_message.connect(self.show_error)
         if hasattr(controller, "running_changed"):
             controller.running_changed.connect(self.set_running)
+        if hasattr(controller, "export_preview_changed"):
+            controller.export_preview_changed.connect(self._consume_export_preview)
         if hasattr(controller, "queue_selected"):
             self.queue_requested.connect(controller.queue_selected)
         if hasattr(controller, "run_queue"):
             self.run_requested.connect(lambda _ignored: controller.run_queue())
         if hasattr(controller, "open_project_for_prospect"):
             self.open_project_requested.connect(controller.open_project_for_prospect)
+        if hasattr(controller, "export_campaign_csv"):
+            self.export_requested.connect(controller.export_campaign_csv)
         if hasattr(controller, "refresh"):
             controller.refresh()
 
     def set_prospects(self, rows: list[dict]) -> None:
+        selected_before = set(self.selected_prospect_ids())
         self.prospect_table.setRowCount(0)
         self._row_ids = []
         for row_data in rows:
@@ -112,7 +123,11 @@ class BatchPage(QWidget):
 
             select_item = QTableWidgetItem("")
             select_item.setFlags(select_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            select_item.setCheckState(Qt.CheckState.Unchecked)
+            select_item.setCheckState(
+                Qt.CheckState.Checked
+                if prospect_id in selected_before
+                else Qt.CheckState.Unchecked
+            )
             select_item.setData(Qt.ItemDataRole.UserRole, prospect_id)
             self.prospect_table.setItem(row, self.COL_SELECT, select_item)
 
@@ -131,6 +146,7 @@ class BatchPage(QWidget):
             self.prospect_table.setCellWidget(row, self.COL_TEMPLATE, combo)
             self.prospect_table.setItem(row, self.COL_OPPORTUNITY, QTableWidgetItem(str(row_data.get("opportunity") or "Generic")))
             self.prospect_table.setItem(row, self.COL_ELIGIBILITY, QTableWidgetItem(str(row_data.get("eligibility") or "")))
+            self.prospect_table.setItem(row, self.COL_EXPORT_STATUS, QTableWidgetItem(str(row_data.get("export_status") or "")))
 
     def set_jobs(self, rows: list[dict]) -> None:
         self.jobs_table.setRowCount(0)
@@ -153,6 +169,11 @@ class BatchPage(QWidget):
         self.queue_button.setEnabled(not running)
         self.run_button.setEnabled(not running)
         self.open_project_button.setEnabled(not running)
+        self.export_button.setEnabled(not running)
+
+    def _consume_export_preview(self, _rows: list[dict]) -> None:
+        # Preview is currently summarized directly in the prospect table's Export column.
+        return
 
     def selected_prospect_ids(self) -> list[str]:
         selected: list[str] = []
@@ -191,3 +212,25 @@ class BatchPage(QWidget):
             self.show_error("Select a prospect first.")
             return
         self.open_project_requested.emit(selected[0])
+
+    def _export_campaign_csv(self) -> None:
+        if self._controller is None:
+            self.show_error("No batch controller attached.")
+            return
+        selected = self.selected_prospect_ids()
+        if not selected:
+            self.show_error("Select at least one prospect to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Campaign CSV",
+            "campaign_export.csv",
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            self.show_status("Campaign export cancelled.")
+            return
+        try:
+            self.export_requested.emit(selected, path)
+        except Exception as exc:  # noqa: BLE001
+            self.show_error(f"Campaign export failed: {exc}")

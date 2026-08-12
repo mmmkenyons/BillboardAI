@@ -8,6 +8,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, QThread, Signal
 
 from gui.controllers.prospect_controller import ProspectController
+from gui.services.campaign_export import CampaignExportService
 from gui.services.prospect_generation import ProspectGenerationService
 from gui.workers.prospect_generation_worker import ProspectGenerationWorker
 
@@ -21,6 +22,7 @@ class BatchGenerationController(QObject):
     error_message = Signal(str)
     running_changed = Signal(bool)
     open_project_requested = Signal(str)
+    export_preview_changed = Signal(object)
 
     def __init__(
         self,
@@ -31,6 +33,11 @@ class BatchGenerationController(QObject):
         super().__init__()
         self._prospect_controller = prospect_controller
         self._service = service
+        self._export_service = CampaignExportService(
+            prospect_store=service.prospect_store,
+            job_store=service.job_store,
+            project_store=service.project_store,
+        )
         self._thread: Optional[QThread] = None
         self._worker: Optional[ProspectGenerationWorker] = None
         prospect_controller.prospects_changed.connect(self.refresh)
@@ -42,6 +49,8 @@ class BatchGenerationController(QObject):
     def refresh(self) -> None:
         self.prospects_changed.emit(self._build_prospect_rows())
         self.jobs_changed.emit(self._build_job_rows())
+        all_ids = [prospect.prospect_id for prospect in self._prospect_controller.list_prospects()]
+        self.export_preview_changed.emit(self._build_export_rows(all_ids))
 
     def queue_selected(
         self,
@@ -100,6 +109,12 @@ class BatchGenerationController(QObject):
             return
         self.open_project_requested.emit(project_id)
 
+    def export_campaign_csv(self, prospect_ids: list[str], output_path: str) -> str:
+        exported = self._export_service.export_csv(prospect_ids, output_path)
+        self.status_message.emit(f"Campaign CSV exported: {exported}")
+        self.refresh()
+        return exported
+
     def _on_worker_progress(self, _job_id: str, status: str) -> None:
         self.status_message.emit(f"Job update: {status}")
         self.refresh()
@@ -129,6 +144,7 @@ class BatchGenerationController(QObject):
         rows: list[dict] = []
         for prospect in self._prospect_controller.list_prospects():
             eligibility = self._service.check_eligibility(prospect.prospect_id)
+            export_eligibility = self._export_service.check_eligibility(prospect.prospect_id)
             rows.append(
                 {
                     "prospect_id": prospect.prospect_id,
@@ -138,6 +154,7 @@ class BatchGenerationController(QObject):
                     "template_options": ["contractor", "dentist", "realtor"],
                     "opportunity": self._service.recommended_opportunity_label(prospect.prospect_id),
                     "eligibility": "Ready" if eligibility.eligible else ", ".join(eligibility.reasons),
+                    "export_status": export_eligibility.status.title(),
                 }
             )
         return rows
@@ -154,6 +171,22 @@ class BatchGenerationController(QObject):
                     "opportunity": job.metadata.get("opportunity_label", "Generic"),
                     "status": job.status,
                     "result": job.result_path or job.error,
+                }
+            )
+        return rows
+
+    def _build_export_rows(self, prospect_ids: list[str]) -> list[dict]:
+        rows: list[dict] = []
+        for preview in self._export_service.preview_rows(prospect_ids):
+            rows.append(
+                {
+                    "prospect_id": preview.prospect_id,
+                    "company_name": preview.company,
+                    "email": preview.email,
+                    "status": preview.status,
+                    "reasons": "; ".join(preview.reasons or preview.warnings),
+                    "generation_job_id": preview.generation_job_id,
+                    "project_id": preview.project_id,
                 }
             )
         return rows
