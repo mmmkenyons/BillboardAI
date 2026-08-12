@@ -281,3 +281,20 @@ def test_preview_is_read_only_and_non_mutating(tmp_path):
     assert previews[0].status == EXPORT_STATUS_READY
     assert len(job_store.list()) == before_jobs
     assert len(project_store.list()) == before_projects
+
+
+def test_resolve_for_package_matches_build_row_and_eligibility(tmp_path):
+    prospect_store, job_store, project_store, service = _runtime(tmp_path)
+    prospect = _prospect(prospect_store)
+    project, concept = _project_with_concept(project_store, prospect)
+    _job(job_store, prospect_id=prospect.prospect_id, project_id=project.id, result_path=concept.image_path)
+
+    eligibility, row, resolved = service.resolve_for_package(prospect.prospect_id)
+
+    assert eligibility.status == EXPORT_STATUS_READY
+    assert row is not None
+    assert resolved is not None
+    assert row == service.build_row(prospect.prospect_id)
+    assert resolved.job.id == row.generation_job_id
+    assert resolved.project.id == row.project_id
+    assert resolved.concept.image_path == row.mockup_path

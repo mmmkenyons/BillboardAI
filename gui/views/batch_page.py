@@ -38,6 +38,7 @@ class BatchPage(QWidget):
     run_requested = Signal(list)
     open_project_requested = Signal(str)
     export_requested = Signal(list, str)
+    package_requested = Signal(list, str, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -60,6 +61,9 @@ class BatchPage(QWidget):
         self.export_button = QPushButton("Export Campaign CSV", self)
         self.export_button.clicked.connect(self._export_campaign_csv)
         actions.addWidget(self.export_button)
+        self.package_button = QPushButton("Build Campaign Package", self)
+        self.package_button.clicked.connect(self._build_campaign_package)
+        actions.addWidget(self.package_button)
         actions.addStretch(1)
         layout.addLayout(actions)
 
@@ -108,6 +112,8 @@ class BatchPage(QWidget):
             self.open_project_requested.connect(controller.open_project_for_prospect)
         if hasattr(controller, "export_campaign_csv"):
             self.export_requested.connect(controller.export_campaign_csv)
+        if hasattr(controller, "build_campaign_package"):
+            self.package_requested.connect(controller.build_campaign_package)
         if hasattr(controller, "refresh"):
             controller.refresh()
 
@@ -170,6 +176,7 @@ class BatchPage(QWidget):
         self.run_button.setEnabled(not running)
         self.open_project_button.setEnabled(not running)
         self.export_button.setEnabled(not running)
+        self.package_button.setEnabled(not running)
 
     def _consume_export_preview(self, _rows: list[dict]) -> None:
         # Preview is currently summarized directly in the prospect table's Export column.
@@ -234,3 +241,44 @@ class BatchPage(QWidget):
             self.export_requested.emit(selected, path)
         except Exception as exc:  # noqa: BLE001
             self.show_error(f"Campaign export failed: {exc}")
+
+    def _build_campaign_package(self) -> None:
+        if self._controller is None:
+            self.show_error("No batch controller attached.")
+            return
+        selected = self.selected_prospect_ids()
+        if not selected:
+            self.show_error("Select at least one prospect to package.")
+            return
+        destination = QFileDialog.getExistingDirectory(self, "Choose Campaign Package Destination")
+        if not destination:
+            self.show_status("Campaign package cancelled.")
+            return
+        campaign_name = self._default_campaign_name(selected)
+        try:
+            result = self._controller.build_campaign_package(selected, destination, campaign_name)
+        except Exception as exc:  # noqa: BLE001
+            self.show_error(f"Campaign package failed: {exc}")
+            return
+        if not getattr(result, "success", False):
+            self.show_error(result.message)
+            return
+        self.show_status(result.message)
+
+    def _default_campaign_name(self, selected: list[str]) -> str:
+        companies: list[str] = []
+        for row in range(self.prospect_table.rowCount()):
+            item = self.prospect_table.item(row, self.COL_SELECT)
+            if item is None:
+                continue
+            prospect_id = item.data(Qt.ItemDataRole.UserRole)
+            if prospect_id not in selected:
+                continue
+            company_item = self.prospect_table.item(row, self.COL_COMPANY)
+            if company_item is not None and company_item.text():
+                companies.append(company_item.text())
+        if not companies:
+            return "campaign_package"
+        if len(companies) == 1:
+            return companies[0]
+        return f"{companies[0]}_{len(companies)}_prospects"

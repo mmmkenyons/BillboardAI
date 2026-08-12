@@ -1,4 +1,4 @@
-"""Qt controller for Sprint 5J batch mockup generation."""
+"""Qt controller for Sprint 5J/5N batch mockup generation and packaging."""
 
 from __future__ import annotations
 
@@ -8,9 +8,14 @@ from typing import Optional
 from PySide6.QtCore import QObject, QThread, Signal
 
 from gui.controllers.prospect_controller import ProspectController
+from gui.models.campaign_package import CampaignPackageResult
 from gui.services.campaign_export import CampaignExportService
+from gui.services.campaign_package import CampaignPackageService
 from gui.services.prospect_generation import ProspectGenerationService
 from gui.workers.prospect_generation_worker import ProspectGenerationWorker
+import os
+import subprocess
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,7 @@ class BatchGenerationController(QObject):
             job_store=service.job_store,
             project_store=service.project_store,
         )
+        self._package_service = CampaignPackageService(export_service=self._export_service)
         self._thread: Optional[QThread] = None
         self._worker: Optional[ProspectGenerationWorker] = None
         prospect_controller.prospects_changed.connect(self.refresh)
@@ -114,6 +120,30 @@ class BatchGenerationController(QObject):
         self.status_message.emit(f"Campaign CSV exported: {exported}")
         self.refresh()
         return exported
+
+    def build_campaign_package(self, prospect_ids: list[str], destination: str, campaign_name: str | None = None) -> CampaignPackageResult:
+        result = self._package_service.build_package(prospect_ids, destination, campaign_name=campaign_name)
+        if result.success:
+            self.status_message.emit(result.message)
+        else:
+            self.error_message.emit(result.message)
+        return result
+
+    def open_folder(self, path: str) -> None:
+        folder = path or ""
+        if not folder or not os.path.isdir(folder):
+            self.error_message.emit("Folder does not exist.")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(folder)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except OSError as exc:  # noqa: BLE001
+            logger.warning("Could not open folder: %s", exc)
+            self.error_message.emit(f"Could not open folder:\n{exc}")
 
     def _on_worker_progress(self, _job_id: str, status: str) -> None:
         self.status_message.emit(f"Job update: {status}")

@@ -203,6 +203,22 @@ class CampaignExportService:
             raise ValueError(f"Prospect {prospect_id!r} is not exportable")
         return self._build_row_from_resolved(resolved)
 
+    def resolve_for_package(self, prospect_id: str) -> tuple[CampaignExportEligibility, CampaignExportRow | None, _ResolvedExport | None]:
+        """Return canonical export eligibility/row plus the authoritative resolved source.
+
+        This preserves CampaignExportService as the single source of truth for
+        successful-job, project, concept, and outreach selection while allowing
+        package creation to add package-specific validation such as missing
+        source asset files.
+        """
+        eligibility = self.check_eligibility(prospect_id)
+        prospect = self._prospect_store.get(prospect_id)
+        if prospect is None:
+            return eligibility, None, None
+        resolved = self._resolve_export(prospect)
+        row = self._build_row_from_resolved(resolved) if resolved is not None else None
+        return eligibility, row, resolved
+
     def build_rows(self, prospect_ids: Sequence[str]) -> list[CampaignExportRow]:
         rows: list[CampaignExportRow] = []
         seen: set[str] = set()

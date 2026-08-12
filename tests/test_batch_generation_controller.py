@@ -401,3 +401,77 @@ def test_export_button_cancel_does_not_call_export(tmp_path, monkeypatch) -> Non
     _qapplication().processEvents()
     assert calls == []
     assert "cancelled" in page.message_label.text().lower()
+
+
+def test_package_button_cancel_creates_nothing_and_selection_survives(tmp_path, monkeypatch) -> None:
+    _qapplication()
+    _, prospect_controller, batch_controller = _setup(tmp_path)
+    page = BatchPage()
+    page.set_controller(batch_controller)
+    prospect_controller.load()
+    batch_controller.refresh()
+    page.prospect_table.item(0, BatchPage.COL_SELECT).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
+
+    monkeypatch.setattr(
+        "gui.views.batch_page.QFileDialog.getExistingDirectory",
+        lambda *args, **kwargs: "",
+    )
+    page.package_button.click()
+    _qapplication().processEvents()
+    assert page.selected_prospect_ids() == ["a"]
+    assert "cancelled" in page.message_label.text().lower()
+
+
+def test_package_button_signal_flow_and_idempotent_controller(tmp_path, monkeypatch) -> None:
+    _qapplication()
+
+    def fake_generate(request):
+        os.makedirs(os.path.dirname(request.output_path), exist_ok=True)
+        with open(request.output_path, "w", encoding="utf-8") as handle:
+            handle.write("synthetic")
+        return MockupResult(
+            success=True,
+            website=request.url,
+            output_path=request.output_path,
+            preview_path=request.output_path,
+            company_name="A Co",
+            headline="Headline",
+            cta="CTA",
+            quality_score=90,
+        )
+
+    _, prospect_controller, batch_controller = _setup(tmp_path, fake_generate=fake_generate)
+    exportable = batch_controller._service.prospect_store.get("a")
+    assert exportable is not None
+    exportable.email = "owner@a.com"
+    batch_controller._service.prospect_store.save()
+
+    page = BatchPage()
+    page.set_controller(batch_controller)
+    page.set_controller(batch_controller)
+    prospect_controller.load()
+    batch_controller.refresh()
+    page.prospect_table.item(0, BatchPage.COL_SELECT).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
+    combo = page.prospect_table.cellWidget(0, BatchPage.COL_TEMPLATE)
+    assert combo is not None
+    combo.setCurrentIndex(combo.findData("contractor"))
+    batch_controller.queue_selected(page.selected_prospect_ids(), page.selected_templates())
+    batch_controller.run_queue()
+    _wait_until(lambda: batch_controller.is_running is False)
+
+    destination = os.path.join(str(tmp_path), "packages")
+    monkeypatch.setattr(
+        "gui.views.batch_page.QFileDialog.getExistingDirectory",
+        lambda *args, **kwargs: destination,
+    )
+    direct_result = batch_controller.build_campaign_package(["a"], destination, "A Co")
+    assert direct_result.success is True
+    assert os.path.isdir(direct_result.package_directory)
+    page.package_button.click()
+    _qapplication().processEvents()
+
+    assert page.selected_prospect_ids() == ["a"]
+    assert os.path.isdir(destination)
+    created = [entry for entry in os.listdir(destination) if os.path.isdir(os.path.join(destination, entry))]
+    assert len(created) == 1
+    assert "Campaign package created" in page.message_label.text()
