@@ -13,12 +13,15 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QDialog,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+from gui.views.smartlead_handoff_page import SmartleadHandoffPage
 
 
 class CampaignReviewPage(QWidget):
@@ -124,6 +127,9 @@ class CampaignReviewPage(QWidget):
         self.build_package_button = QPushButton("Build Approved Package", right)
         self.build_package_button.clicked.connect(self._build_approved_package)
         open_actions.addWidget(self.build_package_button)
+        self.smartlead_button = QPushButton("Prepare Smartlead Handoff", right)
+        self.smartlead_button.clicked.connect(self._prepare_smartlead_handoff)
+        open_actions.addWidget(self.smartlead_button)
         right_layout.addLayout(open_actions)
 
         self.message_label = QLabel("", self)
@@ -145,6 +151,8 @@ class CampaignReviewPage(QWidget):
             controller.status_message.connect(self.show_status)
         if hasattr(controller, "error_message"):
             controller.error_message.connect(self.show_error)
+        if hasattr(controller, "smartlead_handoff_ready"):
+            controller.smartlead_handoff_ready.connect(self._show_smartlead_handoff)
         if hasattr(controller, "refresh"):
             controller.refresh()
 
@@ -306,3 +314,28 @@ class CampaignReviewPage(QWidget):
         result = self._controller.build_approved_package(destination, "approved_campaign")
         if getattr(result, "success", False):
             self.show_status(result.message)
+
+    def _prepare_smartlead_handoff(self) -> None:
+        if self._controller is None:
+            return
+        directory = QFileDialog.getExistingDirectory(self, "Choose Approved Campaign Package Directory")
+        if not directory:
+            self.show_status("Smartlead handoff cancelled.")
+            return
+        self._controller.prepare_smartlead_handoff(directory)
+
+    def _show_smartlead_handoff(self, result: object) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Smartlead Preflight")
+        dialog.resize(900, 600)
+        layout = QVBoxLayout(dialog)
+        page = SmartleadHandoffPage(dialog)
+        layout.addWidget(page)
+        from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
+        from gui.services.smartlead_handoff import SmartleadHandoffService
+
+        controller = SmartleadHandoffController(service=SmartleadHandoffService())
+        page.set_controller(controller)
+        controller.summary_changed.emit(getattr(result, "summary", None))
+        controller.rows_changed.emit([row.to_dict() for row in getattr(result, "rows", ())])
+        dialog.exec()

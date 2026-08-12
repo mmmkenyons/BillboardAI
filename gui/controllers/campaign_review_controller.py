@@ -9,6 +9,7 @@ import sys
 from PySide6.QtCore import QObject, Signal
 
 from gui.services.campaign_review import CampaignReviewService
+from gui.services.smartlead_handoff import SmartleadHandoffService
 
 
 class CampaignReviewController(QObject):
@@ -18,10 +19,12 @@ class CampaignReviewController(QObject):
     status_message = Signal(str)
     error_message = Signal(str)
     open_project_requested = Signal(str)
+    smartlead_handoff_ready = Signal(object)
 
     def __init__(self, *, service: CampaignReviewService) -> None:
         super().__init__()
         self._service = service
+        self._handoff_service = SmartleadHandoffService()
         self._selected_ids: list[str] = []
         self._scope_ids: list[str] | None = None
         self._filter = "ALL"
@@ -132,6 +135,19 @@ class CampaignReviewController(QObject):
         else:
             self.error_message.emit(result.message)
         self.refresh()
+        return result
+
+    def prepare_smartlead_handoff(self, package_directory: str) -> object:
+        result = self._handoff_service.prepare_handoff(package_directory)
+        if getattr(result, "rows", ()):
+            self.smartlead_handoff_ready.emit(result)
+        if getattr(result, "success", False):
+            self.status_message.emit(result.message)
+        else:
+            if getattr(result, "rows", ()):
+                self.status_message.emit(result.message)
+            else:
+                self.error_message.emit(result.message)
         return result
 
     def _row_to_dict(self, row: object) -> dict:
