@@ -37,6 +37,7 @@ from gui.views.settings_page import SettingsPage
 
 if TYPE_CHECKING:
     from gui.controllers.app_controller import BillboardController
+    from gui.controllers.batch_generation_controller import BatchGenerationController
     from gui.controllers.inventory_controller import InventoryController
     from gui.controllers.project_controller import ProjectWorkspaceController
     from gui.controllers.prospect_controller import ProspectController
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
     def __init__(
         self,
         controller: BillboardController | None = None,
+        batch_controller: "BatchGenerationController | None" = None,
         workspace_controller: ProjectWorkspaceController | None = None,
         inventory_controller: "InventoryController | None" = None,
         prospect_controller: "ProspectController | None" = None,
@@ -59,6 +61,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(960, 640)
 
         self._controller = controller
+        self._batch_controller = batch_controller
         self._workspace_controller = workspace_controller
         self._inventory_controller = inventory_controller
         self._prospect_controller = prospect_controller
@@ -81,6 +84,9 @@ class MainWindow(QMainWindow):
 
         if self._prospect_controller is not None:
             self._wire_prospect_controller()
+
+        if self._batch_controller is not None:
+            self._wire_batch_controller()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -297,6 +303,16 @@ class MainWindow(QMainWindow):
         ctrl.open_project_requested.connect(self._on_prospect_open_project)
         ctrl.open_prospect_requested.connect(self._on_open_prospect_in_workspace)
         ctrl.view_store_requested.connect(self._on_prospect_view_store)
+
+    def _wire_batch_controller(self) -> None:
+        if self._batch_controller is None:
+            return
+        ctrl = self._batch_controller
+        self.batch_page.set_controller(ctrl)
+        self.batch_page.queue_requested.connect(ctrl.queue_selected)
+        self.batch_page.run_requested.connect(lambda _ignored: ctrl.run_queue())
+        self.batch_page.open_project_requested.connect(ctrl.open_project_for_prospect)
+        ctrl.open_project_requested.connect(self._on_prospect_open_project)
 
     def _on_open_prospect_in_workspace(self, prospect_id: str) -> None:
         """Sprint 5H: open a queue-selected prospect in the Prospect Workspace."""
