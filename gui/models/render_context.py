@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from gui.models.prospect_generation import OpportunityGenerationContext
+
 
 RENDER_CONTEXT_VERSION = 1
 
@@ -76,6 +78,8 @@ class RenderContext:
     quality_score: float = 0.0
     source_url: str = ""
     brand_colors: list = field(default_factory=list)
+    scene_template: str = "cart_corral"
+    opportunity_context: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Construction
@@ -164,6 +168,7 @@ class RenderContext:
             quality_score=float(profile.quality_score or 0),
             source_url=str(profile.website or ""),
             brand_colors=[str(c) for c in brand_colors],
+            scene_template="cart_corral",
         )
 
     @classmethod
@@ -248,6 +253,12 @@ class RenderContext:
         brand_colors = raw.get("brand_colors") or []
         if not isinstance(brand_colors, list):
             brand_colors = []
+        opportunity_raw = raw.get("opportunity_context")
+        opportunity_context = (
+            OpportunityGenerationContext.from_dict(opportunity_raw).to_dict()
+            if isinstance(opportunity_raw, dict)
+            else {}
+        )
 
         secondary = raw.get("secondary_color") or theme.get("background_color") or "#FFFFFF"
 
@@ -273,6 +284,8 @@ class RenderContext:
             quality_score=float(raw.get("quality_score") or 0),
             source_url=str(raw.get("source_url") or ""),
             brand_colors=[str(c) for c in brand_colors],
+            scene_template=str(raw.get("scene_template") or "cart_corral"),
+            opportunity_context=opportunity_context,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -353,7 +366,7 @@ class RenderContext:
         return {
             "template": self.template or "contractor",
             "selected_template": self.template or "contractor",
-            "scene_template": "cart_corral",
+            "scene_template": self.scene_template or "cart_corral",
             "canvas": {
                 "width": int(canvas.get("width") or 1600),
                 "height": int(canvas.get("height") or 900),
@@ -373,6 +386,7 @@ class RenderContext:
             "hero_path": hero,
             "brand_colors": list(self.brand_colors or []),
             "source_url": self.source_url or "",
+            "opportunity_context": dict(self.opportunity_context or {}),
         }
 
 

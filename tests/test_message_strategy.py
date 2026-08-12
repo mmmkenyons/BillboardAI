@@ -32,6 +32,7 @@ from engine.message_strategy import (
     _PROBLEM_FRAME_MAP,
     _ANCILLARY_SERVICES,
     _CORE_SERVICE_PRIORITY,
+    _normalize_creative_locality,
 )
 
 
@@ -698,6 +699,63 @@ class TestCTA:
             if s.phone:
                 assert s.phone == "(605) 555-1234"
                 assert "Call" in s.cta
+
+
+class TestCreativeLocality:
+    def test_locality_normalizes_whitespace(self):
+        assert _normalize_creative_locality("  Castle   Rock  ") == "Castle Rock"
+
+    def test_missing_locality_keeps_existing_behavior(self):
+        engine = MessageStrategyEngine()
+        profile = _roofing_profile()
+        base = [s.to_dict() for s in engine.generate(profile)]
+        missing = [s.to_dict() for s in engine.generate(profile, creative_locality="   ")]
+        assert missing == base
+
+    def test_localized_candidate_can_be_produced_for_contractor(self):
+        engine = MessageStrategyEngine()
+        profile = _roofing_profile()
+        results = engine.generate(profile, creative_locality="Castle Rock")
+        assert any("Castle Rock" in s.primary_message for s in results)
+
+    def test_dentist_localization_remains_dentist_specific(self):
+        engine = MessageStrategyEngine()
+        profile = _dentist_profile()
+        results = engine.generate(profile, creative_locality="Austin")
+        localized = [s for s in results if "Austin" in s.primary_message]
+        assert localized
+        assert any("Dental" in s.primary_message or "Dent" in s.primary_message for s in localized)
+
+    def test_realtor_localization_remains_realtor_specific(self):
+        engine = MessageStrategyEngine()
+        profile = _realtor_profile()
+        results = engine.generate(profile, creative_locality="Parker")
+        localized = [s for s in results if "Parker" in s.primary_message]
+        assert localized
+        assert any("Realtor" in s.primary_message for s in localized)
+
+    def test_long_city_cannot_bypass_constraints(self):
+        engine = MessageStrategyEngine()
+        profile = _roofing_profile()
+        results = engine.generate(profile, creative_locality="Colorado Springs Metropolitan Area")
+        localized = [s for s in results if "Colorado Springs" in s.primary_message]
+        assert localized == []
+
+    def test_sales_metadata_not_injected_into_copy(self):
+        engine = MessageStrategyEngine()
+        profile = _roofing_profile()
+        results = engine.generate(profile, creative_locality="Castle Rock")
+        forbidden = ("12000", "score", "distance", "opportunity_", "location_id", "placement_id")
+        joined = " ".join(f"{s.primary_message} {s.cta}" for s in results).lower()
+        for token in forbidden:
+            assert token not in joined
+
+    def test_cta_behavior_unchanged_under_localization(self):
+        engine = MessageStrategyEngine()
+        profile = _roofing_profile()
+        base_ctas = {s.cta for s in engine.generate(profile)}
+        localized_ctas = {s.cta for s in engine.generate(profile, creative_locality="Castle Rock")}
+        assert localized_ctas <= (base_ctas | {"Call (605) 555-1234", "Get a Free Estimate", "Learn More"})
 
 
 # ======================================================================

@@ -20,10 +20,16 @@ from gui.models.prospect_generation import (
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
+    OpportunityGenerationContext,
     ProspectGenerationJob,
 )
 from gui.models.prospect_generation_store import ProspectGenerationStore
 from gui.models.prospect_store import ProspectStore
+from gui.services.prospect_opportunity_workspace import ProspectOpportunityWorkspaceService
+
+
+class OpportunitySelectionError(ValueError):
+    """Raised when an explicit opportunity selection is invalid."""
 
 GenerationCallable = Callable[[MockupRequest], MockupResult]
 
@@ -58,12 +64,17 @@ class ProspectGenerationService:
         generation_callable: GenerationCallable | None = None,
         default_output_root: str | None = None,
         project_store: ProjectStore | None = None,
+        opportunity_workspace_service: ProspectOpportunityWorkspaceService | None = None,
     ) -> None:
         self._prospect_store = prospect_store
         self._job_store = job_store or ProspectGenerationStore()
         self._generate = generation_callable or (lambda request: engine_generate(request))
         self._default_output_root = os.path.abspath(default_output_root) if default_output_root else os.path.abspath(os.path.join("output", "prospect_mockups"))
         self._project_store = project_store or ProjectStore(root=self._default_output_root)
+        self._opportunity_workspace_service = opportunity_workspace_service or ProspectOpportunityWorkspaceService(
+            prospect_store=self._prospect_store,
+            project_store=self._project_store,
+        )
 
     @property
     def prospect_store(self) -> ProspectStore:
@@ -118,6 +129,7 @@ class ProspectGenerationService:
         *,
         template: str | None = None,
         output_root: str | None = None,
+        opportunity_id: str | None = None,
     ) -> JobCreationResult:
         eligibility = self.check_eligibility(prospect_id, template)
         if not eligibility.eligible:
@@ -128,6 +140,10 @@ class ProspectGenerationService:
         prospect = self._prospect_store.get(prospect_id)
         if prospect is None:
             return JobCreationResult(prospect_id, False, ["Prospect not found"])
+        try:
+            opportunity_context = self._resolve_opportunity_context(prospect_id, opportunity_id=opportunity_id)
+        except OpportunitySelectionError as exc:
+            return JobCreationResult(prospect_id, False, [str(exc)])
         effective_root = os.path.abspath(output_root or self._default_output_root)
         job = ProspectGenerationJob(
             prospect_id=prospect.prospect_id,
@@ -135,7 +151,14 @@ class ProspectGenerationService:
             template=eligibility.resolved_template,
             status=JOB_STATUS_QUEUED,
             output_root=effective_root,
-            metadata={"company_name": prospect.company_name},
+            opportunity_id=opportunity_context.opportunity_id if opportunity_context else "",
+            location_id=opportunity_context.location_id if opportunity_context else "",
+            placement_id=opportunity_context.placement_id if opportunity_context else "",
+            opportunity_context=opportunity_context,
+            metadata={
+                "company_name": prospect.company_name,
+                "opportunity_label": self._format_opportunity_label(opportunity_context),
+            },
         )
         self._job_store.upsert(job)
         self._job_store.save()
@@ -147,15 +170,18 @@ class ProspectGenerationService:
         *,
         templates: dict[str, str] | None = None,
         output_root: str | None = None,
+        opportunity_ids: dict[str, str] | None = None,
     ) -> list[JobCreationResult]:
         results: list[JobCreationResult] = []
         template_map = templates or {}
+        opportunity_map = opportunity_ids or {}
         for prospect_id in prospect_ids:
             results.append(
                 self.create_job(
                     prospect_id,
                     template=template_map.get(prospect_id),
                     output_root=output_root,
+                    opportunity_id=opportunity_map.get(prospect_id),
                 )
             )
         return results
@@ -194,6 +220,7 @@ class ProspectGenerationService:
             template=job.template,
             output_folder=project.root_dir,
             output_path=output_path,
+            opportunity_context=job.opportunity_context,
         )
         return self._generate(request)
 
@@ -209,6 +236,13 @@ class ProspectGenerationService:
         )
         project.add_concept(concept)
         project.metadata["prospect_id"] = job.prospect_id
+        project.metadata["generation_job_id"] = job.id
+        if job.opportunity_id:
+            project.metadata["opportunity_id"] = job.opportunity_id
+        if job.location_id:
+            project.metadata["location_id"] = job.location_id
+        if job.placement_id:
+            project.metadata["placement_id"] = job.placement_id
         if isinstance(result.extra, dict):
             render_context = result.extra.get("render_context")
             if isinstance(render_context, dict):
@@ -273,3 +307,84 @@ class ProspectGenerationService:
         job.project_root = project.root_dir
         self._save_job(job)
         return project
+
+    def recommended_opportunity_label(self, prospect_id: str) -> str:
+        return self._format_opportunity_label(self._resolve_opportunity_context(prospect_id, opportunity_id=None))
+
+    def _resolve_opportunity_context(
+        self,
+        prospect_id: str,
+        *,
+        opportunity_id: str | None,
+    ) -> OpportunityGenerationContext | None:
+        workspace = self._opportunity_workspace_service
+        recommendation_service = workspace.recommendation_service
+        inventory_store = recommendation_service._inventory_store
+        opportunity_service = recommendation_service._opportunity_service
+        try:
+            inventory_store.load()
+        except FileNotFoundError:
+            pass
+        opportunity_service.ensure_loaded()
+
+        if opportunity_id:
+            opportunity = opportunity_service.get(opportunity_id)
+            if opportunity is None:
+                raise OpportunitySelectionError("Opportunity not found")
+            if opportunity.prospect_id != prospect_id:
+                raise OpportunitySelectionError("Opportunity does not belong to prospect")
+            location = inventory_store.inventory.get_location(opportunity.location_id)
+            if location is None:
+                raise OpportunitySelectionError("Opportunity location not found")
+            placement = inventory_store.inventory.get_placement(opportunity.placement_id)
+            if placement is None:
+                raise OpportunitySelectionError("Opportunity placement not found")
+            retailer = inventory_store.inventory.get_retailer(location.retailer_id)
+            return OpportunityGenerationContext(
+                opportunity_id=opportunity.opportunity_id,
+                location_id=location.location_id,
+                placement_id=placement.placement_id,
+                scene_template=placement.scene_template or "cart_corral",
+                retailer_name=retailer.name if retailer is not None else "",
+                location_name=location.name or "",
+                store_number=location.store_number or "",
+                city=location.city or "",
+                state=location.state or "",
+                placement_name=placement.name or "",
+                placement_type=placement.placement_type or "",
+            )
+
+        snapshot = workspace.snapshot_for_prospect(prospect_id)
+        best_store = snapshot.best_store
+        if best_store is None:
+            return None
+        placement = inventory_store.inventory.get_placement(best_store.placement_id)
+        return OpportunityGenerationContext(
+            opportunity_id=best_store.opportunity_id or "",
+            location_id=best_store.location_id or "",
+            placement_id=best_store.placement_id or "",
+            scene_template=(placement.scene_template if placement is not None else "") or "cart_corral",
+            retailer_name=best_store.retailer_name or "",
+            location_name=best_store.location_name or "",
+            store_number=best_store.store_number or "",
+            city=best_store.city or "",
+            state=best_store.state or "",
+            placement_name=best_store.placement_name or "",
+            placement_type=best_store.placement_type or "",
+        )
+
+    @staticmethod
+    def _format_opportunity_label(context: OpportunityGenerationContext | None) -> str:
+        if context is None or not context.opportunity_id:
+            return "Generic"
+        retailer = context.retailer_name.strip()
+        store = context.store_number.strip()
+        city = context.city.strip()
+        name = retailer
+        if retailer and store:
+            name = f"{retailer} #{store}"
+        elif context.location_name.strip():
+            name = context.location_name.strip()
+        if city:
+            return f"{name} — {city}" if name else city
+        return name or "Generic"

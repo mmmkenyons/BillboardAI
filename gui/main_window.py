@@ -309,9 +309,6 @@ class MainWindow(QMainWindow):
             return
         ctrl = self._batch_controller
         self.batch_page.set_controller(ctrl)
-        self.batch_page.queue_requested.connect(ctrl.queue_selected)
-        self.batch_page.run_requested.connect(lambda _ignored: ctrl.run_queue())
-        self.batch_page.open_project_requested.connect(ctrl.open_project_for_prospect)
         ctrl.open_project_requested.connect(self._on_prospect_open_project)
 
     def _on_open_prospect_in_workspace(self, prospect_id: str) -> None:

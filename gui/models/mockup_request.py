@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from gui.models.prospect_generation import OpportunityGenerationContext
+
 
 @dataclass
 class MockupRequest:
@@ -22,3 +24,4 @@ class MockupRequest:
     options: dict = field(default_factory=dict)
     # Extra data for flags like is_new_concept (Sprint 4B Phase E1, no behavior change).
     extra: dict = field(default_factory=dict)
+    opportunity_context: OpportunityGenerationContext | None = None

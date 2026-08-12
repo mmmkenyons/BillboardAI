@@ -70,7 +70,7 @@ def test_batch_page_constructs_and_populates(tmp_path) -> None:
     prospect_controller.load()
     batch_controller.refresh()
     assert page.prospect_table.rowCount() == 3
-    assert page.prospect_table.item(0, 1) is not None
+    assert page.prospect_table.item(0, BatchPage.COL_COMPANY) is not None
 
 
 def test_eligibility_renders_and_no_generation_on_open(tmp_path) -> None:
@@ -86,8 +86,9 @@ def test_eligibility_renders_and_no_generation_on_open(tmp_path) -> None:
     page.set_controller(batch_controller)
     prospect_controller.load()
     batch_controller.refresh()
-    assert "Ready" in page.prospect_table.item(0, 4).text()
-    assert "No supported template" in page.prospect_table.item(1, 4).text()
+    assert "Ready" in page.prospect_table.item(0, BatchPage.COL_ELIGIBILITY).text()
+    assert "No supported template" in page.prospect_table.item(1, BatchPage.COL_ELIGIBILITY).text()
+    assert page.prospect_table.item(0, BatchPage.COL_OPPORTUNITY).text() in {"Generic", "No opportunity"}
     assert calls == []
 
 
@@ -98,13 +99,45 @@ def test_queue_selected_and_template_override(tmp_path) -> None:
     page.set_controller(batch_controller)
     prospect_controller.load()
     batch_controller.refresh()
-    page.prospect_table.item(0, 0).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
-    page.prospect_table.item(1, 0).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
-    combo = page.prospect_table.cellWidget(1, 3)
-    idx = combo.findData("contractor")
-    combo.setCurrentIndex(idx)
-    batch_controller.queue_selected(page.selected_prospect_ids(), page.selected_templates())
+    row_by_prospect_id = {}
+    for row in range(page.prospect_table.rowCount()):
+        item = page.prospect_table.item(row, BatchPage.COL_SELECT)
+        assert item is not None
+        prospect_id = item.data(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.ItemDataRole.UserRole)
+        row_by_prospect_id[str(prospect_id)] = row
+
+    row_a = row_by_prospect_id["a"]
+    row_b = row_by_prospect_id["b"]
+
+    combo_a = page.prospect_table.cellWidget(row_a, BatchPage.COL_TEMPLATE)
+    combo_b = page.prospect_table.cellWidget(row_b, BatchPage.COL_TEMPLATE)
+    assert combo_a is not None
+    assert combo_b is not None
+
+    idx_a = combo_a.findData("contractor")
+    idx_b = combo_b.findData("contractor")
+    assert idx_a >= 0
+    assert idx_b >= 0
+    combo_a.setCurrentIndex(idx_a)
+    combo_b.setCurrentIndex(idx_b)
+
+    item_a = page.prospect_table.item(row_a, BatchPage.COL_SELECT)
+    item_b = page.prospect_table.item(row_b, BatchPage.COL_SELECT)
+    assert item_a is not None
+    assert item_b is not None
+    item_a.setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
+    item_b.setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
+
+    assert page.selected_prospect_ids() == ["a", "b"]
+    assert page.selected_templates() == {"a": "contractor", "b": "contractor"}
+
+    page.queue_button.click()
     assert page.jobs_table.rowCount() == 2
+    jobs = batch_controller._service.list_jobs()
+    assert [job.prospect_id for job in jobs] == ["a", "b"]
+    templates_by_prospect = {job.prospect_id: job.template for job in jobs}
+    assert templates_by_prospect["a"] == "contractor"
+    assert templates_by_prospect["b"] == "contractor"
 
 
 def test_stable_selection_uses_prospect_id(tmp_path) -> None:
@@ -114,7 +147,8 @@ def test_stable_selection_uses_prospect_id(tmp_path) -> None:
     page.set_controller(batch_controller)
     prospect_controller.load()
     batch_controller.refresh()
-    item = page.prospect_table.item(2, 0)
+    item = page.prospect_table.item(0, BatchPage.COL_SELECT)
+    assert item is not None
     item.setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
     assert page.selected_prospect_ids() == [item.data(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.ItemDataRole.UserRole)]
 
@@ -135,7 +169,7 @@ def test_run_queue_prevents_overlap_and_updates_status(tmp_path) -> None:
     prospect_controller.load()
     batch_controller.refresh()
     for row in (0, 2):
-        page.prospect_table.item(row, 0).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
+        page.prospect_table.item(row, BatchPage.COL_SELECT).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
     batch_controller.queue_selected(page.selected_prospect_ids(), page.selected_templates())
     batch_controller.run_queue()
     assert batch_controller.is_running is True
@@ -145,7 +179,7 @@ def test_run_queue_prevents_overlap_and_updates_status(tmp_path) -> None:
     job_statuses = {job.prospect_id: job.status for job in jobs}
     assert job_statuses["a"] == "SUCCEEDED"
     assert job_statuses["c"] == "FAILED"
-    statuses = [page.jobs_table.item(row, 2).text() for row in range(page.jobs_table.rowCount())]
+    statuses = [page.jobs_table.item(row, BatchPage.JOB_COL_STATUS).text() for row in range(page.jobs_table.rowCount())]
     assert "SUCCEEDED" in statuses
     assert "FAILED" in statuses
 
@@ -191,3 +225,18 @@ def test_main_window_prospect_only_wiring_does_not_call_batch_set_prospects_with
     window = MainWindow(prospect_controller=controller)
     window.show_page("pipeline")
     assert window.batch_page.prospect_table.rowCount() == 0
+
+
+def test_set_controller_same_controller_is_idempotent(tmp_path) -> None:
+    _qapplication()
+    _, prospect_controller, batch_controller = _setup(tmp_path)
+    page = BatchPage()
+    page.set_controller(batch_controller)
+    page.set_controller(batch_controller)
+    prospect_controller.load()
+    batch_controller.refresh()
+    page.prospect_table.item(0, BatchPage.COL_SELECT).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
+    page.queue_button.click()
+    jobs = batch_controller._service.list_jobs()
+    assert len(jobs) == 1
+    assert page.jobs_table.rowCount() == 1

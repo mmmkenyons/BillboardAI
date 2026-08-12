@@ -20,7 +20,7 @@ Design principles:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields as dc_fields
+from dataclasses import dataclass, field, fields as dc_fields, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from engine.brand_profile import BrandProfile
@@ -104,20 +104,17 @@ class MessageStrategy:
         known = {f.name for f in dc_fields(cls)}
         filtered = {k: v for k, v in data.items() if k in known}
 
-        # Coerce list fields
         for list_key in ("supporting_proof", "evidence"):
             val = filtered.get(list_key)
             if not isinstance(val, list):
                 filtered[list_key] = []
 
-        # Coerce float fields
         for float_key in ("score", "confidence"):
             try:
                 filtered[float_key] = float(filtered.get(float_key, 0.0))
             except (TypeError, ValueError):
                 filtered[float_key] = 0.0
 
-        # Coerce string fields
         for str_key in (
             "strategy_type", "primary_message", "cta", "rationale",
             "service_focus", "geographic_focus", "phone",
@@ -127,6 +124,119 @@ class MessageStrategy:
                 filtered[str_key] = str(val) if val else ""
 
         return cls(**filtered)
+
+
+def _normalize_creative_locality(value: str) -> str:
+    """Return a safe locality string for customer-facing creative use.
+
+    Only trims/normalizes whitespace; it never invents or parses geography.
+    """
+    if not isinstance(value, str):
+        return ""
+    cleaned = " ".join(value.split())
+    return cleaned.strip()
+
+
+def _localized_service_message(service_focus: str, locality: str) -> str:
+    """Return a concise localized service-led candidate when feasible."""
+    service = (service_focus or "").strip()
+    city = _normalize_creative_locality(locality)
+    if not service or not city:
+        return ""
+    candidate = f"{service.title()} In {city}"
+    if len(candidate.split()) > 7 or len(candidate) > 40:
+        fallback = f"Serving {city}"
+        return fallback if len(fallback.split()) <= 4 and len(fallback) <= 30 else ""
+    return candidate
+
+
+def _localized_category_message(profile: BrandProfile, locality: str) -> str:
+    """Return a concise locality-aware category headline when supported."""
+    city = _normalize_creative_locality(locality)
+    if not city:
+        return ""
+
+    categories = [c.strip() for c in profile.categories if isinstance(c, str) and c.strip()]
+    services = [s.strip() for s in profile.services if isinstance(s, str) and s.strip()]
+    corpus = " ".join(categories + services).lower()
+
+    if "dent" in corpus:
+        candidate = f"Trusted Dental Care In {city}"
+    elif "real estate" in corpus or "realtor" in corpus:
+        candidate = f"Your {city} Realtor"
+    elif any(token in corpus for token in ("roof", "contractor", "plumb", "hvac", "paint", "remodel", "repair")):
+        candidate = f"Trusted Local Service In {city}"
+    else:
+        candidate = ""
+
+    if candidate and (len(candidate.split()) > 7 or len(candidate) > 40):
+        return ""
+    return candidate
+
+
+def _compact_locality_message(locality: str, *, prefix: str = "Serving") -> str:
+    city = _normalize_creative_locality(locality)
+    if not city:
+        return ""
+    candidate = f"{prefix} {city}".strip()
+    if len(candidate.split()) > 4 or len(candidate) > 30:
+        return ""
+    return candidate
+
+
+def _inject_localized_variants(
+    profile: BrandProfile,
+    candidates: List[MessageStrategy],
+    creative_locality: str,
+) -> List[MessageStrategy]:
+    """Extend the existing strategy set with optional locality-aware variants.
+
+    Variants compete with existing strategies; locality never forces itself.
+    """
+    city = _normalize_creative_locality(creative_locality)
+    if not city:
+        return candidates
+
+    variants: List[MessageStrategy] = []
+    for strategy in candidates:
+        if strategy is None:
+            continue
+
+        localized_primary = ""
+        localized_geo = city
+
+        if strategy.strategy_type == LOCAL_AUTHORITY:
+            localized_primary = _compact_locality_message(city)
+        elif strategy.strategy_type == SERVICE_LED:
+            localized_primary = _localized_service_message(strategy.service_focus or strategy.primary_message, city)
+        elif strategy.strategy_type == TRUST_LED:
+            localized_primary = _localized_category_message(profile, city)
+
+        if not localized_primary:
+            continue
+        if localized_primary.strip().lower() == (strategy.primary_message or "").strip().lower():
+            continue
+
+        evidence = list(strategy.evidence)
+        if "creative_locality" not in evidence:
+            evidence.append("creative_locality")
+        proof = list(strategy.supporting_proof)
+        if city not in proof and len(proof) < 2:
+            proof.append(city)
+        proof = [p for p in proof if p.strip().lower() != localized_primary.strip().lower()][:2]
+        localized = replace(
+            strategy,
+            primary_message=localized_primary,
+            supporting_proof=proof,
+            geographic_focus=localized_geo,
+            evidence=evidence,
+            rationale=f"{strategy.rationale} Creative locality: {city}.",
+            score=min(1.0, round(strategy.score + 0.04, 2)),
+            confidence=min(1.0, round(strategy.confidence + 0.02, 2)),
+        )
+        variants.append(localized)
+
+    return candidates + variants
 
 
 # ======================================================================
@@ -1405,6 +1515,8 @@ def _compute_confidence(profile: BrandProfile, evidence: List[str]) -> float:
         confidence += 0.05
     if "location" in evidence_set:
         confidence += 0.03
+    if "creative_locality" in evidence_set:
+        confidence += 0.04
     if "trust_signals" in evidence_set:
         confidence += 0.05
     if "categories" in evidence_set:
@@ -1474,7 +1586,12 @@ class MessageStrategyEngine:
     - Generate final advertising copy
     """
 
-    def generate(self, profile: BrandProfile) -> List[MessageStrategy]:
+    def generate(
+        self,
+        profile: BrandProfile,
+        *,
+        creative_locality: str = "",
+    ) -> List[MessageStrategy]:
         """Generate message strategy candidates for a BrandProfile.
 
         Args:
@@ -1502,6 +1619,12 @@ class MessageStrategyEngine:
             candidate = builder(profile)
             if candidate is not None:
                 candidates.append(candidate)
+
+        candidates = _inject_localized_variants(
+            profile,
+            candidates,
+            creative_locality,
+        )
 
         # Deduplicate
         candidates = _deduplicate_strategies(candidates)

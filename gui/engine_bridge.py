@@ -18,6 +18,9 @@ import os
 import time
 from typing import Any, Callable
 
+from engine.ad_concept import AdConceptEngine
+from engine.brand_profile import BrandProfileBuilder
+from engine.message_strategy import MessageStrategyEngine
 from engine.renderer.renderer import render_billboard
 from engine.scraper.site import WebsiteScraper, ScreenshotValidationError
 
@@ -29,6 +32,45 @@ from gui.models.render_context import RenderContext, ensure_render_context
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, str, str | None], None]
+
+
+def _apply_opportunity_context(ctx: RenderContext, request: MockupRequest) -> RenderContext:
+    opportunity = request.opportunity_context
+    if opportunity is None:
+        return ctx
+    merged = RenderContext.from_dict(ctx.to_dict())
+    merged.scene_template = opportunity.scene_template or merged.scene_template or "cart_corral"
+    merged.opportunity_context = opportunity.to_dict()
+    return merged
+
+
+def _creative_city_from_request(request: MockupRequest) -> str:
+    opportunity = request.opportunity_context
+    if opportunity is None:
+        return ""
+    return " ".join(str(opportunity.city or "").split()).strip()
+
+
+def _apply_localized_creative(ctx: RenderContext, data: dict[str, Any], request: MockupRequest) -> RenderContext:
+    """Optionally refine headline/CTA through the existing message strategy seam."""
+    creative_city = _creative_city_from_request(request)
+    if not creative_city:
+        return ctx
+
+    profile = BrandProfileBuilder.from_scrape_data(data if isinstance(data, dict) else {})
+    strategies = MessageStrategyEngine().generate(profile, creative_locality=creative_city)
+    if not strategies:
+        return ctx
+    concepts = AdConceptEngine().generate(profile, strategies)
+    if not concepts:
+        return ctx
+    best = max(concepts, key=lambda concept: concept.score)
+    merged = RenderContext.from_dict(ctx.to_dict())
+    if (best.headline or "").strip():
+        merged.headline = best.headline
+    if (best.cta or "").strip():
+        merged.cta = best.cta
+    return merged
 
 
 def _report(
@@ -130,6 +172,12 @@ def generate(
             template=template_name,
             source_url=request.url,
         )
+        ctx_obj = _apply_opportunity_context(
+            ensure_render_context(render_context),
+            request,
+        )
+        ctx_obj = _apply_localized_creative(ctx_obj, data if isinstance(data, dict) else {}, request)
+        render_context = ctx_obj.to_dict()
 
         # Prefer painting from the contract (single path with re_render).
         _ensure_parent_dir(request.output_path)

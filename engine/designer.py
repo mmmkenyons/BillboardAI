@@ -113,7 +113,7 @@ def render_spec_from_context(context: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "template": template_name,
         "selected_template": template_name,
-        "scene_template": "cart_corral",
+        "scene_template": ctx.get("scene_template") or "cart_corral",
         "canvas": {
             "width": int(canvas.get("width") or 1600),
             "height": int(canvas.get("height") or 900),
@@ -133,6 +133,7 @@ def render_spec_from_context(context: Dict[str, Any]) -> Dict[str, Any]:
         "hero_path": hero,
         "brand_colors": list(ctx.get("brand_colors") or []),
         "source_url": ctx.get("source_url") or ctx.get("url") or "",
+        "opportunity_context": dict(ctx.get("opportunity_context") or {}),
     }
 
 

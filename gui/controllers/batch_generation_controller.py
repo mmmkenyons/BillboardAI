@@ -43,8 +43,13 @@ class BatchGenerationController(QObject):
         self.prospects_changed.emit(self._build_prospect_rows())
         self.jobs_changed.emit(self._build_job_rows())
 
-    def queue_selected(self, prospect_ids: list[str], templates: dict[str, str]) -> None:
-        results = self._service.create_jobs(prospect_ids, templates=templates)
+    def queue_selected(
+        self,
+        prospect_ids: list[str],
+        templates: dict[str, str],
+        opportunity_ids: dict[str, str] | None = None,
+    ) -> None:
+        results = self._service.create_jobs(prospect_ids, templates=templates, opportunity_ids=opportunity_ids)
         rejected = []
         queued = 0
         for result in results:
@@ -131,6 +136,7 @@ class BatchGenerationController(QObject):
                     "website": prospect.website,
                     "resolved_template": eligibility.resolved_template,
                     "template_options": ["contractor", "dentist", "realtor"],
+                    "opportunity": self._service.recommended_opportunity_label(prospect.prospect_id),
                     "eligibility": "Ready" if eligibility.eligible else ", ".join(eligibility.reasons),
                 }
             )
@@ -145,6 +151,7 @@ class BatchGenerationController(QObject):
                     "prospect_id": job.prospect_id,
                     "company_name": prospect.company_name if prospect is not None else job.metadata.get("company_name", ""),
                     "template": job.template,
+                    "opportunity": job.metadata.get("opportunity_label", "Generic"),
                     "status": job.status,
                     "result": job.result_path or job.error,
                 }
