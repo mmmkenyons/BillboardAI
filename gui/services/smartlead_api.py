@@ -222,6 +222,24 @@ class SmartleadApiClient:
             json_body=payload,
         )
 
+    def start_campaign(self, campaign_id: str) -> Any:
+        """Intent-based Smartlead activation seam.
+
+        Smartlead's official documentation is currently internally inconsistent
+        about the exact activation wire contract. This method isolates that
+        ambiguity behind one narrow API seam so the rest of BillboardAI only
+        expresses the intent: start/resume this campaign.
+
+        Current provisional implementation uses PATCH /campaigns/{id}/status
+        with {"status": "ACTIVE"}, matching one official signal. This must not
+        be treated as fully provider-confirmed for first real activation.
+        """
+        return self._request_json(
+            "PATCH",
+            f"/campaigns/{campaign_id}/status",
+            json_body={"status": "ACTIVE"},
+        )
+
     def build_request_url(self, path: str) -> str:
         base = self._settings.base_url.rstrip("/")
         suffix = path if path.startswith("/") else f"/{path}"

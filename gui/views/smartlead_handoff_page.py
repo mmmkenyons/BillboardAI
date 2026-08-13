@@ -36,6 +36,8 @@ class SmartleadHandoffPage(QWidget):
         self._campaigns: list[object] = []
         self._handoff_directory: str = ""
         self._package_directory: str = ""
+        self._last_launch_readiness = None
+        self._last_activation_result = None
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Smartlead Preflight", self))
@@ -146,10 +148,15 @@ class SmartleadHandoffPage(QWidget):
         launch_row = QHBoxLayout()
         self.launch_status_label = QLabel("No launch-control audit yet.", self)
         self.refresh_status_button = QPushButton("Refresh Status", self)
+        self.activation_dry_run_button = QPushButton("Activation Dry Run", self)
+        self.activate_campaign_button = QPushButton("Activate Campaign", self)
+        self.activate_campaign_button.setEnabled(False)
         self.resume_publication_button = QPushButton("Resume Publication", self)
         launch_row.addWidget(self.launch_status_label)
         launch_row.addStretch(1)
         launch_row.addWidget(self.refresh_status_button)
+        launch_row.addWidget(self.activation_dry_run_button)
+        launch_row.addWidget(self.activate_campaign_button)
         launch_row.addWidget(self.resume_publication_button)
         layout.addLayout(launch_row)
 
@@ -186,6 +193,8 @@ class SmartleadHandoffPage(QWidget):
             controller.reconciliation_changed.connect(self.set_reconciliation)
         if hasattr(controller, "launch_readiness_changed"):
             controller.launch_readiness_changed.connect(self.set_launch_readiness)
+        if hasattr(controller, "activation_result_changed"):
+            controller.activation_result_changed.connect(self.set_activation_result)
         self.test_connection_button.clicked.connect(self._on_test_connection)
         self.refresh_campaigns_button.clicked.connect(self._on_refresh_campaigns)
         self.publish_button.clicked.connect(self._on_publish)
@@ -196,8 +205,12 @@ class SmartleadHandoffPage(QWidget):
         self.prepare_sequence_button.clicked.connect(self._on_prepare_sequence)
         self.sync_urls_button.clicked.connect(self._on_sync_urls)
         self.refresh_status_button.clicked.connect(self._on_refresh_status)
+        self.activation_dry_run_button.clicked.connect(self._on_activation_dry_run)
+        self.activate_campaign_button.clicked.connect(self._on_activate_campaign)
         self.resume_publication_button.clicked.connect(self._on_resume_publication)
         self.target_mode_combo.currentTextChanged.connect(self._sync_target_mode)
+        self.campaign_combo.currentIndexChanged.connect(self._update_activation_button_state)
+        self.live_checkbox.toggled.connect(self._update_activation_button_state)
         self._sync_target_mode(self.target_mode_combo.currentText())
 
     def set_summary(self, summary: object) -> None:
@@ -426,6 +439,7 @@ class SmartleadHandoffPage(QWidget):
         self.show_status("\n".join(lines))
 
     def set_launch_readiness(self, result: object) -> None:
+        self._last_launch_readiness = result
         text = (
             f"Campaign: {getattr(result, 'campaign_name', '') or getattr(result, 'campaign_id', '')} | "
             f"Publication: {getattr(result, 'published_count', 0)} published / {getattr(result, 'failed_count', 0)} failed / {getattr(result, 'pending_count', 0)} pending | "
@@ -441,6 +455,20 @@ class SmartleadHandoffPage(QWidget):
         if warnings:
             lines.append("Warnings: " + "; ".join(warnings))
         self.show_status("\n".join(lines))
+        self._update_activation_button_state()
+
+    def set_activation_result(self, result: object) -> None:
+        self._last_activation_result = result
+        lines = [str(getattr(result, "message", "") or "")]
+        lines.append(
+            f"Remote Status: {getattr(result, 'resulting_remote_status', '') or getattr(result, 'prior_remote_status', '')} | "
+            f"Readiness: {getattr(result, 'readiness_status', '')} | Result: {getattr(result, 'status', '')}"
+        )
+        receipt = getattr(result, "receipt", None)
+        if receipt is not None:
+            lines.append(f"Activated At: {getattr(receipt, 'completed_at', '')}")
+        self.show_status("\n".join(lines))
+        self._update_activation_button_state()
 
     def _on_refresh_readiness(self) -> None:
         if self._controller is None:
@@ -496,6 +524,50 @@ class SmartleadHandoffPage(QWidget):
         if hasattr(self._controller, "refresh_launch_readiness"):
             self._controller.refresh_launch_readiness(source_package_id=source_package_id, campaign_id=campaign_id)
 
+    def _on_activation_dry_run(self) -> None:
+        if self._controller is None:
+            return
+        source_package_id = self._package_id()
+        campaign_id = str(self.campaign_combo.currentData() or "")
+        if not source_package_id or not campaign_id:
+            self.show_status("Activation preview requires an approved package and a target campaign.")
+            return
+        if hasattr(self._controller, "activation_preview"):
+            self._controller.activation_preview(source_package_id=source_package_id, campaign_id=campaign_id)
+
+    def _on_activate_campaign(self) -> None:
+        if self._controller is None:
+            return
+        source_package_id = self._package_id()
+        campaign_id = str(self.campaign_combo.currentData() or "")
+        if not source_package_id or not campaign_id:
+            self.show_status("Campaign activation requires an approved package and a target campaign.")
+            return
+        if not self.live_checkbox.isChecked():
+            self.show_status("Enable live Smartlead writes before activating a campaign.")
+            return
+        if hasattr(self._controller, "activation_preview"):
+            self._controller.activation_preview(source_package_id=source_package_id, campaign_id=campaign_id)
+        box = QMessageBox(self)
+        box.setWindowTitle("Confirm Campaign Activation")
+        box.setText(self._build_activation_confirmation_message(campaign_id))
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+        yes = box.button(QMessageBox.StandardButton.Yes)
+        if yes is not None:
+            yes.setText(self._activation_button_text())
+        cancel = box.button(QMessageBox.StandardButton.Cancel)
+        if cancel is not None:
+            cancel.setText("Cancel")
+        confirmed = box.exec() == int(QMessageBox.StandardButton.Yes)
+        if hasattr(self._controller, "activate_campaign"):
+            self._controller.activate_campaign(
+                source_package_id=source_package_id,
+                campaign_id=campaign_id,
+                mode=SMARTLEAD_PUBLISH_MODE_LIVE,
+                live_enabled=self.live_checkbox.isChecked(),
+                confirmed=confirmed,
+            )
+
     def _on_resume_publication(self) -> None:
         if self._controller is None:
             return
@@ -524,3 +596,42 @@ class SmartleadHandoffPage(QWidget):
             except Exception:  # noqa: BLE001
                 return ""
         return ""
+
+    def _activation_button_text(self) -> str:
+        prior = str(getattr(self._last_activation_result, "prior_remote_status", "") or "").upper()
+        return "Resume Campaign" if prior == "PAUSED" else "Activate Campaign"
+
+    def _build_activation_confirmation_message(self, campaign_id: str) -> str:
+        readiness = self._last_launch_readiness
+        campaign_name = self.campaign_combo.currentText().split(" (")[0].strip()
+        remote_status = str(getattr(self._last_activation_result, "prior_remote_status", "") or "").upper() or "DRAFT / PAUSED"
+        return "\n".join(
+            [
+                f"Campaign: {campaign_name}",
+                f"Smartlead Campaign ID: {campaign_id}",
+                f"Published Leads: {getattr(readiness, 'published_count', 0) if readiness is not None else 0}",
+                f"Sequence: {'Ready' if getattr(readiness, 'sequence_ready', False) else 'Not Ready'}",
+                f"Hosted Assets: {'Ready' if getattr(readiness, 'missing_asset_count', 0) == 0 else 'Not Ready'}",
+                f"Sender Accounts: {self._sender_accounts_summary()}",
+                f"Reconciliation: {'Matched' if readiness is not None and not getattr(readiness, 'reconciliation_required', False) else 'Attention Required'}",
+                f"Remote Status: {remote_status}",
+                "",
+                "Warning:",
+                "Smartlead may begin sending according to the campaign's configured schedule and settings.",
+            ]
+        )
+
+    def _sender_accounts_summary(self) -> str:
+        text = self.readiness_label.text()
+        marker = "Sender accounts: "
+        if marker in text:
+            return text.split(marker, 1)[1].split(" |", 1)[0]
+        return "Unknown"
+
+    def _update_activation_button_state(self, *_args) -> None:
+        campaign_selected = bool(str(self.campaign_combo.currentData() or ""))
+        live_enabled = self.live_checkbox.isChecked()
+        readiness_ready = str(getattr(self._last_launch_readiness, "status", "") or "") == "READY"
+        remote_active = str(getattr(self._last_activation_result, "resulting_remote_status", "") or "").upper() in {"ACTIVE", "STARTED", "RUNNING", "SENDING"}
+        self.activate_campaign_button.setText(self._activation_button_text())
+        self.activate_campaign_button.setEnabled(campaign_selected and live_enabled and readiness_ready and not remote_active)

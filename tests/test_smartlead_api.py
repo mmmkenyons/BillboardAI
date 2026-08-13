@@ -157,9 +157,19 @@ def test_add_sequence_endpoint(monkeypatch):
     assert call["url"].endswith("/campaigns/10/sequences/create")
 
 
-def test_no_activation_endpoint_exposed_or_invoked(monkeypatch):
+def test_start_campaign_intent_endpoint_current_provisional_contract(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"success": True})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    client.start_campaign("10")
+    call = transport.calls[0]
+    assert call["method"].upper() == "PATCH"
+    assert call["url"].endswith("/campaigns/10/status")
+    assert call["json"] == {"status": "ACTIVE"}
+    assert call["params"]["api_key"] == "super-secret-test-key"
+
+
+def test_start_campaign_intent_is_exposed_not_raw_status_update(monkeypatch):
     client = SmartleadApiClient(settings=_settings(monkeypatch), transport=FakeTransport([]), sleeper=lambda _: None)
-    # The API boundary must not expose any start/activate capability.
-    assert not hasattr(client, "start_campaign")
+    assert hasattr(client, "start_campaign")
     assert not hasattr(client, "activate_campaign")
     assert not hasattr(client, "update_campaign_status")

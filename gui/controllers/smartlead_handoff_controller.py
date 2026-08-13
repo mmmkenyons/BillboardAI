@@ -6,6 +6,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, Signal
 
 from gui.models.smartlead_publication import SmartleadPublishTarget
+from gui.services.smartlead_activation import SmartleadActivationService
 from gui.services.smartlead_reconciliation import SmartleadReconciliationService
 from gui.services.smartlead_handoff import SmartleadHandoffService
 from gui.services.smartlead_publish import SmartleadPublishService
@@ -25,6 +26,7 @@ class SmartleadHandoffController(QObject):
     url_sync_changed = Signal(object)
     reconciliation_changed = Signal(object)
     launch_readiness_changed = Signal(object)
+    activation_result_changed = Signal(object)
 
     def __init__(
         self,
@@ -34,6 +36,7 @@ class SmartleadHandoffController(QObject):
         hosting_service: object | None = None,
         sequence_service: object | None = None,
         reconciliation_service: SmartleadReconciliationService | None = None,
+        activation_service: SmartleadActivationService | None = None,
     ) -> None:
         super().__init__()
         self._service = service
@@ -41,6 +44,7 @@ class SmartleadHandoffController(QObject):
         self._hosting_service = hosting_service
         self._sequence_service = sequence_service
         self._reconciliation_service = reconciliation_service
+        self._activation_service = activation_service
         self._last_result = None
 
     def prepare(self, package_directory: str) -> object:
@@ -220,6 +224,47 @@ class SmartleadHandoffController(QObject):
             result = self._reconciliation_service.evaluate_launch_readiness(source_package_id=source_package_id, campaign_id=campaign_id)
         if result is not None:
             self.launch_readiness_changed.emit(result)
+        return result
+
+    def activation_preview(self, *, source_package_id: str, campaign_id: str) -> object:
+        if self._activation_service is None:
+            result = None
+        else:
+            result = self._activation_service.activation_preview(source_package_id=source_package_id, campaign_id=campaign_id)
+        if result is not None:
+            self.activation_result_changed.emit(result)
+        return result
+
+    def activate_campaign(
+        self,
+        *,
+        source_package_id: str,
+        campaign_id: str,
+        mode: str,
+        live_enabled: bool,
+        confirmed: bool,
+    ) -> object:
+        if self._activation_service is None:
+            result = None
+        else:
+            result = self._activation_service.activate_campaign(
+                source_package_id=source_package_id,
+                campaign_id=campaign_id,
+                mode=mode,
+                live_enabled=live_enabled,
+                confirmed=confirmed,
+            )
+        if result is not None:
+            self.activation_result_changed.emit(result)
+            if getattr(result, "success", False):
+                self.status_message.emit(result.message)
+            else:
+                self.error_message.emit(result.message)
+            if self._reconciliation_service is not None:
+                self.refresh_reconciliation(source_package_id=source_package_id, campaign_id=campaign_id)
+                self.refresh_launch_readiness(source_package_id=source_package_id, campaign_id=campaign_id)
+            if self._sequence_service is not None:
+                self.refresh_sequence_readiness(campaign_id)
         return result
 
     def resume_publication(

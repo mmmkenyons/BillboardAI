@@ -46,6 +46,7 @@ def test_controller_wiring_idempotency():
             self.url_sync_changed = DummySignal()
             self.reconciliation_changed = DummySignal()
             self.launch_readiness_changed = DummySignal()
+            self.activation_result_changed = DummySignal()
 
     app = QApplication.instance() or QApplication([])
     page = SmartleadHandoffPage()
