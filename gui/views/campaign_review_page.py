@@ -332,10 +332,19 @@ class CampaignReviewPage(QWidget):
         page = SmartleadHandoffPage(dialog)
         layout.addWidget(page)
         from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
+        from gui.models.smartlead_connection import SmartleadConnectionSettings
+        from gui.models.smartlead_publication_store import SmartleadPublicationStore
+        from gui.services.smartlead_api import SmartleadApiClient
         from gui.services.smartlead_handoff import SmartleadHandoffService
+        from gui.services.smartlead_publish import SmartleadPublishService
 
-        controller = SmartleadHandoffController(service=SmartleadHandoffService())
+        publish_service = SmartleadPublishService(
+            api_client=SmartleadApiClient(settings=SmartleadConnectionSettings()),
+            receipt_store=SmartleadPublicationStore(),
+        )
+        controller = SmartleadHandoffController(service=SmartleadHandoffService(), publish_service=publish_service)
         page.set_controller(controller)
         controller.summary_changed.emit(getattr(result, "summary", None))
         controller.rows_changed.emit([row.to_dict() for row in getattr(result, "rows", ())])
+        page.set_handoff_directory(getattr(result, "handoff_directory", ""))
         dialog.exec()
