@@ -341,6 +341,7 @@ class CampaignReviewPage(QWidget):
         from gui.services.smartlead_api import SmartleadApiClient
         from gui.services.smartlead_handoff import SmartleadHandoffService
         from gui.services.smartlead_publish import SmartleadPublishService
+        from gui.services.smartlead_reconciliation import SmartleadReconciliationService
         from gui.services.smartlead_sequence_readiness import SmartleadSequenceReadinessService
 
         api_client = SmartleadApiClient(settings=SmartleadConnectionSettings())
@@ -356,11 +357,18 @@ class CampaignReviewPage(QWidget):
             api_client=api_client,
             change_store=SequenceChangeStore(),
         )
+        reconciliation_service = SmartleadReconciliationService(
+            api_client=api_client,
+            publication_store=SmartleadPublicationStore(),
+            hosted_asset_store=HostedAssetStore(),
+            sequence_service=sequence_service,
+        )
         controller = SmartleadHandoffController(
             service=SmartleadHandoffService(),
             publish_service=publish_service,
             hosting_service=hosting_service,
             sequence_service=sequence_service,
+            reconciliation_service=reconciliation_service,
         )
         page.set_controller(controller)
         controller.summary_changed.emit(getattr(result, "summary", None))

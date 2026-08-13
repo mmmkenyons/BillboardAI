@@ -19,6 +19,43 @@ from gui.services.campaign_review import CampaignReviewService
 from gui.services.smartlead_handoff import SmartleadHandoffService
 
 
+def test_controller_wiring_idempotency():
+    from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
+    from gui.views.smartlead_handoff_page import SmartleadHandoffPage
+    from PySide6.QtWidgets import QApplication
+
+    class DummySignal:
+        def __init__(self):
+            self.connections = []
+
+        def connect(self, fn):
+            self.connections.append(fn)
+
+    class DummyController:
+        def __init__(self):
+            self.summary_changed = DummySignal()
+            self.rows_changed = DummySignal()
+            self.status_message = DummySignal()
+            self.error_message = DummySignal()
+            self.connection_changed = DummySignal()
+            self.campaigns_changed = DummySignal()
+            self.publish_result_changed = DummySignal()
+            self.hosting_connection_changed = DummySignal()
+            self.hosting_summary_changed = DummySignal()
+            self.readiness_changed = DummySignal()
+            self.url_sync_changed = DummySignal()
+            self.reconciliation_changed = DummySignal()
+            self.launch_readiness_changed = DummySignal()
+
+    app = QApplication.instance() or QApplication([])
+    page = SmartleadHandoffPage()
+    controller = DummyController()
+    page.set_controller(controller)
+    page.set_controller(controller)
+    assert len(controller.summary_changed.connections) == 1
+    assert len(controller.launch_readiness_changed.connections) == 1
+
+
 def _runtime(tmp_path):
     prospect_store = ProspectStore(path=os.path.join(str(tmp_path), "prospects.json"))
     job_store = ProspectGenerationStore(path=os.path.join(str(tmp_path), "jobs.json"))

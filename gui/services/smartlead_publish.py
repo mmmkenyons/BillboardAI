@@ -115,12 +115,39 @@ class SmartleadPublishService:
         if details.status and details.status.upper() not in SAFE_EXISTING_CAMPAIGN_STATUSES:
             return SmartleadPublishResult(success=False, message=f"Campaign status {details.status} is not safe for upload.", mode=resolved_mode, target_mode=target.mode, dry_run=False, campaign_id=campaign_id, campaign_name=campaign_name)
 
-        prior_success = self._successful_publication_keys(source_package_id=str(manifest.get("package_id") or ""), campaign_id=campaign_id)
+        source_package_id = str(manifest.get("package_id") or "")
+        prior_success = self._successful_publication_keys(source_package_id=source_package_id, campaign_id=campaign_id)
         lead_results: list[SmartleadPublishedLead] = []
         live_payloads: list[dict[str, Any]] = []
         for lead in candidates:
-            if lead.publication_key in prior_success:
-                lead_results.append(SmartleadPublishedLead(publication_key=lead.publication_key, prospect_id=lead.prospect_id, email=lead.email, status=SMARTLEAD_PUBLISH_STATUS_SKIPPED, campaign_id=campaign_id, reason="Already published to this campaign."))
+            existing_success = self._find_latest_success(source_package_id=source_package_id, campaign_id=campaign_id, publication_key=lead.publication_key)
+            remote_existing = None
+            if existing_success is None:
+                remote_existing = self._find_remote_existing_lead(campaign_id=campaign_id, email=lead.email)
+            if lead.publication_key in prior_success or existing_success is not None:
+                lead_results.append(
+                    SmartleadPublishedLead(
+                        publication_key=lead.publication_key,
+                        prospect_id=lead.prospect_id,
+                        email=lead.email,
+                        status=SMARTLEAD_PUBLISH_STATUS_SKIPPED,
+                        campaign_id=campaign_id,
+                        remote_lead_id=getattr(existing_success, "remote_lead_id", "") if existing_success is not None else "",
+                        reason="Already published to this campaign.",
+                    )
+                )
+            elif remote_existing is not None:
+                lead_results.append(
+                    SmartleadPublishedLead(
+                        publication_key=lead.publication_key,
+                        prospect_id=lead.prospect_id,
+                        email=lead.email,
+                        status=SMARTLEAD_PUBLISH_STATUS_SKIPPED,
+                        campaign_id=campaign_id,
+                        remote_lead_id=str(remote_existing.get("id") or remote_existing.get("lead_id") or ""),
+                        reason="Skipped because matching remote Smartlead lead already exists.",
+                    )
+                )
             else:
                 live_payloads.append(self._lead_payload(lead))
         payload_batches = self._batch(live_payloads, UPLOAD_BATCH_SIZE)
@@ -177,6 +204,23 @@ class SmartleadPublishService:
             receipt=receipt,
             payload_preview=tuple(payload_preview),
             lead_results=tuple(lead_results),
+        )
+
+    def resume_publication(
+        self,
+        handoff_directory: str,
+        *,
+        target: SmartleadPublishTarget,
+        mode: str = SMARTLEAD_PUBLISH_MODE_DRY_RUN,
+        live_enabled: bool = False,
+        confirmed: bool = False,
+    ) -> SmartleadPublishResult:
+        return self.publish_from_handoff(
+            handoff_directory,
+            target=target,
+            mode=mode,
+            live_enabled=live_enabled,
+            confirmed=confirmed,
         )
 
     def _resolve_live_target(self, target: SmartleadPublishTarget) -> tuple[str, str]:
@@ -424,6 +468,30 @@ class SmartleadPublishService:
                 if lead.status == SMARTLEAD_PUBLISH_STATUS_SUCCEEDED:
                     keys.add(lead.publication_key)
         return keys
+
+    def _find_latest_success(self, *, source_package_id: str, campaign_id: str, publication_key: str) -> SmartleadPublishedLead | None:
+        for receipt in reversed(self._receipt_store.list()):
+            if receipt.source_package_id != source_package_id or receipt.campaign_id != campaign_id:
+                continue
+            for lead in reversed(receipt.lead_results):
+                if lead.publication_key == publication_key and lead.status == SMARTLEAD_PUBLISH_STATUS_SUCCEEDED:
+                    return lead
+        return None
+
+    def _find_remote_existing_lead(self, *, campaign_id: str, email: str) -> dict[str, Any] | None:
+        normalized = str(email or "").strip().lower()
+        if not normalized:
+            return None
+        if not hasattr(self._api_client, "get_campaign_leads"):
+            return None
+        try:
+            remote_leads = self._api_client.get_campaign_leads(campaign_id)
+        except (AttributeError, SmartleadApiError):
+            return None
+        matches = [lead for lead in remote_leads if str(lead.get("email") or "").strip().lower() == normalized]
+        if len(matches) != 1:
+            return None
+        return matches[0]
 
     def _extract_remote_ids(self, response: Any, batch: list[dict[str, Any]]) -> dict[str, str]:
         result: dict[str, str] = {}

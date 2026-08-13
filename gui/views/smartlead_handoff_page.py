@@ -136,6 +136,26 @@ class SmartleadHandoffPage(QWidget):
         sequence_row.addWidget(self.sync_urls_button)
         layout.addLayout(sequence_row)
 
+        # ------------------------------------------------------------------
+        # Launch Control / Publication Status (Sprint 5S)
+        # ------------------------------------------------------------------
+        launch_title = QLabel("Launch Control / Publication Status", self)
+        launch_title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(launch_title)
+
+        launch_row = QHBoxLayout()
+        self.launch_status_label = QLabel("No launch-control audit yet.", self)
+        self.refresh_status_button = QPushButton("Refresh Status", self)
+        self.resume_publication_button = QPushButton("Resume Publication", self)
+        launch_row.addWidget(self.launch_status_label)
+        launch_row.addStretch(1)
+        launch_row.addWidget(self.refresh_status_button)
+        launch_row.addWidget(self.resume_publication_button)
+        layout.addLayout(launch_row)
+
+        self.reconciliation_label = QLabel("Reconciliation: Not checked", self)
+        layout.addWidget(self.reconciliation_label)
+
     def set_controller(self, controller: object) -> None:
         if controller is self._controller:
             return
@@ -162,6 +182,10 @@ class SmartleadHandoffPage(QWidget):
             controller.readiness_changed.connect(self.set_readiness)
         if hasattr(controller, "url_sync_changed"):
             controller.url_sync_changed.connect(self.set_url_sync)
+        if hasattr(controller, "reconciliation_changed"):
+            controller.reconciliation_changed.connect(self.set_reconciliation)
+        if hasattr(controller, "launch_readiness_changed"):
+            controller.launch_readiness_changed.connect(self.set_launch_readiness)
         self.test_connection_button.clicked.connect(self._on_test_connection)
         self.refresh_campaigns_button.clicked.connect(self._on_refresh_campaigns)
         self.publish_button.clicked.connect(self._on_publish)
@@ -171,6 +195,8 @@ class SmartleadHandoffPage(QWidget):
         self.refresh_readiness_button.clicked.connect(self._on_refresh_readiness)
         self.prepare_sequence_button.clicked.connect(self._on_prepare_sequence)
         self.sync_urls_button.clicked.connect(self._on_sync_urls)
+        self.refresh_status_button.clicked.connect(self._on_refresh_status)
+        self.resume_publication_button.clicked.connect(self._on_resume_publication)
         self.target_mode_combo.currentTextChanged.connect(self._sync_target_mode)
         self._sync_target_mode(self.target_mode_combo.currentText())
 
@@ -382,6 +408,40 @@ class SmartleadHandoffPage(QWidget):
         )
         self.show_status("\n".join(lines))
 
+    def set_reconciliation(self, result: object) -> None:
+        text = (
+            f"Reconciliation: {'Matched' if not getattr(result, 'reconciliation_required', False) else 'Attention Required'} | "
+            f"Matched: {getattr(result, 'matched', 0)} | Local Only: {getattr(result, 'local_only', 0)} | "
+            f"Remote Only: {getattr(result, 'remote_only', 0)} | Mismatch: {getattr(result, 'mismatched', 0)} | "
+            f"Duplicate Remote: {getattr(result, 'duplicate_remote', 0)}"
+        )
+        self.reconciliation_label.setText(text)
+        lines = [text]
+        reasons = list(getattr(result, "reasons", ()) or ())
+        warnings = list(getattr(result, "warnings", ()) or ())
+        if reasons:
+            lines.append("Reasons: " + "; ".join(reasons))
+        if warnings:
+            lines.append("Warnings: " + "; ".join(warnings))
+        self.show_status("\n".join(lines))
+
+    def set_launch_readiness(self, result: object) -> None:
+        text = (
+            f"Campaign: {getattr(result, 'campaign_name', '') or getattr(result, 'campaign_id', '')} | "
+            f"Publication: {getattr(result, 'published_count', 0)} published / {getattr(result, 'failed_count', 0)} failed / {getattr(result, 'pending_count', 0)} pending | "
+            f"Sequence: {'Ready' if getattr(result, 'sequence_ready', False) else 'Not Ready'} | "
+            f"Assets Missing: {getattr(result, 'missing_asset_count', 0)} | Overall: {getattr(result, 'status', 'NOT_READY')}"
+        )
+        self.launch_status_label.setText(text)
+        lines = [text]
+        reasons = list(getattr(result, "reasons", ()) or ())
+        warnings = list(getattr(result, "warnings", ()) or ())
+        if reasons:
+            lines.append("Reasons: " + "; ".join(reasons))
+        if warnings:
+            lines.append("Warnings: " + "; ".join(warnings))
+        self.show_status("\n".join(lines))
+
     def _on_refresh_readiness(self) -> None:
         if self._controller is None:
             return
@@ -419,6 +479,36 @@ class SmartleadHandoffPage(QWidget):
                 source_package_id=source_package_id,
                 campaign_id=campaign_id,
                 mode="LIVE" if live else "DRY_RUN",
+                live_enabled=live,
+                confirmed=confirmed,
+            )
+
+    def _on_refresh_status(self) -> None:
+        if self._controller is None:
+            return
+        source_package_id = self._package_id()
+        campaign_id = str(self.campaign_combo.currentData() or "")
+        if not source_package_id or not campaign_id:
+            self.show_status("Status refresh requires an approved package and a target campaign.")
+            return
+        if hasattr(self._controller, "refresh_reconciliation"):
+            self._controller.refresh_reconciliation(source_package_id=source_package_id, campaign_id=campaign_id)
+        if hasattr(self._controller, "refresh_launch_readiness"):
+            self._controller.refresh_launch_readiness(source_package_id=source_package_id, campaign_id=campaign_id)
+
+    def _on_resume_publication(self) -> None:
+        if self._controller is None:
+            return
+        target = self._publish_target()
+        live = self.live_checkbox.isChecked()
+        confirmed = True
+        if live:
+            confirmed = QMessageBox.question(self, "Confirm Resume", self._confirmation_message(target, SMARTLEAD_PUBLISH_MODE_LIVE)) == QMessageBox.StandardButton.Yes
+        if hasattr(self._controller, "resume_publication"):
+            self._controller.resume_publication(
+                self._handoff_directory,
+                target=target,
+                mode=SMARTLEAD_PUBLISH_MODE_LIVE if live else SMARTLEAD_PUBLISH_MODE_DRY_RUN,
                 live_enabled=live,
                 confirmed=confirmed,
             )

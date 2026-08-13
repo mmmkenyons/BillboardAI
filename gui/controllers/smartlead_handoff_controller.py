@@ -6,6 +6,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, Signal
 
 from gui.models.smartlead_publication import SmartleadPublishTarget
+from gui.services.smartlead_reconciliation import SmartleadReconciliationService
 from gui.services.smartlead_handoff import SmartleadHandoffService
 from gui.services.smartlead_publish import SmartleadPublishService
 
@@ -22,6 +23,8 @@ class SmartleadHandoffController(QObject):
     hosting_summary_changed = Signal(object)
     readiness_changed = Signal(object)
     url_sync_changed = Signal(object)
+    reconciliation_changed = Signal(object)
+    launch_readiness_changed = Signal(object)
 
     def __init__(
         self,
@@ -30,12 +33,14 @@ class SmartleadHandoffController(QObject):
         publish_service: SmartleadPublishService | None = None,
         hosting_service: object | None = None,
         sequence_service: object | None = None,
+        reconciliation_service: SmartleadReconciliationService | None = None,
     ) -> None:
         super().__init__()
         self._service = service
         self._publish_service = publish_service
         self._hosting_service = hosting_service
         self._sequence_service = sequence_service
+        self._reconciliation_service = reconciliation_service
         self._last_result = None
 
     def prepare(self, package_directory: str) -> object:
@@ -193,6 +198,51 @@ class SmartleadHandoffController(QObject):
             )
         if result is not None:
             self.url_sync_changed.emit(result)
+            if getattr(result, "success", False):
+                self.status_message.emit(result.message)
+            else:
+                self.error_message.emit(result.message)
+        return result
+
+    def refresh_reconciliation(self, *, source_package_id: str, campaign_id: str) -> object:
+        if self._reconciliation_service is None:
+            result = None
+        else:
+            result = self._reconciliation_service.reconcile_campaign(source_package_id=source_package_id, campaign_id=campaign_id)
+        if result is not None:
+            self.reconciliation_changed.emit(result)
+        return result
+
+    def refresh_launch_readiness(self, *, source_package_id: str, campaign_id: str) -> object:
+        if self._reconciliation_service is None:
+            result = None
+        else:
+            result = self._reconciliation_service.evaluate_launch_readiness(source_package_id=source_package_id, campaign_id=campaign_id)
+        if result is not None:
+            self.launch_readiness_changed.emit(result)
+        return result
+
+    def resume_publication(
+        self,
+        handoff_directory: str,
+        *,
+        target: SmartleadPublishTarget,
+        mode: str,
+        live_enabled: bool,
+        confirmed: bool,
+    ) -> object:
+        if self._publish_service is None:
+            result = None
+        else:
+            result = self._publish_service.resume_publication(
+                handoff_directory,
+                target=target,
+                mode=mode,
+                live_enabled=live_enabled,
+                confirmed=confirmed,
+            )
+        if result is not None:
+            self.publish_result_changed.emit(result)
             if getattr(result, "success", False):
                 self.status_message.emit(result.message)
             else:

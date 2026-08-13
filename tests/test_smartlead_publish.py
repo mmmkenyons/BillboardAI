@@ -23,6 +23,7 @@ class FakeApiClient:
         self.created = []
         self.settings = SmartleadConnectionSettings()
         self.fail_batch = False
+        self.remote_leads = {}
 
     def test_connection(self):
         return type("Result", (), {"connected": True, "status": "CONNECTED", "message": "ok"})()
@@ -44,6 +45,9 @@ class FakeApiClient:
 
             raise SmartleadApiError("UNAVAILABLE", "Smartlead service unavailable.")
         return {"data": [{"email": item["email"], "id": f"lead-{index}"} for index, item in enumerate(lead_list, start=1)]}
+
+    def get_campaign_leads(self, campaign_id):
+        return list(self.remote_leads.get(campaign_id, []))
 
 
 def _seed_handoff(root):
@@ -127,6 +131,53 @@ def test_live_partial_failure_and_resume_skip(tmp_path):
     resumed = service.publish_from_handoff(handoff, target=SmartleadPublishTarget(mode=SMARTLEAD_TARGET_MODE_EXISTING, campaign_id="1", campaign_name="Existing"), mode=SMARTLEAD_PUBLISH_MODE_LIVE, live_enabled=True, confirmed=True)
     assert resumed.skipped >= 1
     service._batch = original_batch
+
+
+def test_resume_publication_explicit_method(tmp_path):
+    handoff = _seed_handoff(str(tmp_path))
+    api = FakeApiClient()
+    service = SmartleadPublishService(api_client=api, receipt_store=SmartleadPublicationStore(path=os.path.join(str(tmp_path), "receipts.json")))
+    first = service.publish_from_handoff(handoff, target=SmartleadPublishTarget(mode=SMARTLEAD_TARGET_MODE_EXISTING, campaign_id="1", campaign_name="Existing"), mode=SMARTLEAD_PUBLISH_MODE_LIVE, live_enabled=True, confirmed=True)
+    resumed = service.resume_publication(handoff, target=SmartleadPublishTarget(mode=SMARTLEAD_TARGET_MODE_EXISTING, campaign_id="1", campaign_name="Existing"), mode=SMARTLEAD_PUBLISH_MODE_LIVE, live_enabled=True, confirmed=True)
+    assert first.succeeded == 2
+    assert resumed.skipped == 2
+
+
+def test_remote_duplicate_protection_skips_existing_remote(tmp_path):
+    handoff = _seed_handoff(str(tmp_path))
+    api = FakeApiClient()
+    api.remote_leads = {"1": [{"id": "lead-a", "email": "a@example.com"}]}
+    service = SmartleadPublishService(api_client=api, receipt_store=SmartleadPublicationStore(path=os.path.join(str(tmp_path), "receipts.json")))
+    result = service.publish_from_handoff(handoff, target=SmartleadPublishTarget(mode=SMARTLEAD_TARGET_MODE_EXISTING, campaign_id="1", campaign_name="Existing"), mode=SMARTLEAD_PUBLISH_MODE_LIVE, live_enabled=True, confirmed=True)
+    assert result.skipped >= 1
+    posted = [item["email"] for _, batch in api.add_calls for item in batch]
+    assert "a@example.com" not in posted
+
+
+def test_two_different_prospects_not_deduped(tmp_path):
+    handoff = _seed_handoff(str(tmp_path))
+    api = FakeApiClient()
+    service = SmartleadPublishService(api_client=api, receipt_store=SmartleadPublicationStore(path=os.path.join(str(tmp_path), "receipts.json")))
+    result = service.publish_from_handoff(handoff, target=SmartleadPublishTarget(mode=SMARTLEAD_TARGET_MODE_EXISTING, campaign_id="1", campaign_name="Existing"), mode=SMARTLEAD_PUBLISH_MODE_LIVE, live_enabled=True, confirmed=True)
+    assert result.succeeded == 2
+
+
+def test_restart_then_resume_uses_persisted_success(tmp_path):
+    handoff = _seed_handoff(str(tmp_path))
+    store_path = os.path.join(str(tmp_path), "receipts.json")
+    api = FakeApiClient()
+    SmartleadPublishService(api_client=api, receipt_store=SmartleadPublicationStore(path=store_path)).publish_from_handoff(
+        handoff,
+        target=SmartleadPublishTarget(mode=SMARTLEAD_TARGET_MODE_EXISTING, campaign_id="1", campaign_name="Existing"),
+        mode=SMARTLEAD_PUBLISH_MODE_LIVE,
+        live_enabled=True,
+        confirmed=True,
+    )
+    api2 = FakeApiClient()
+    restarted = SmartleadPublishService(api_client=api2, receipt_store=SmartleadPublicationStore(path=store_path))
+    resumed = restarted.resume_publication(handoff, target=SmartleadPublishTarget(mode=SMARTLEAD_TARGET_MODE_EXISTING, campaign_id="1", campaign_name="Existing"), mode=SMARTLEAD_PUBLISH_MODE_LIVE, live_enabled=True, confirmed=True)
+    assert resumed.skipped == 2
+    assert api2.add_calls == []
 
 
 def test_create_draft_dry_run_and_live_no_activation(tmp_path):

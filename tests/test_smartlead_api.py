@@ -140,6 +140,14 @@ def test_read_campaign_lead_endpoint(monkeypatch):
     assert transport.calls[0]["method"].upper() == "GET"
 
 
+def test_read_campaign_leads_endpoint(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"data": [{"id": "id1", "email": "a@example.com"}]})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    leads = client.get_campaign_leads("10")
+    assert leads[0]["email"] == "a@example.com"
+    assert transport.calls[0]["method"].upper() == "GET"
+
+
 def test_add_sequence_endpoint(monkeypatch):
     transport = FakeTransport([FakeResponse(payload={"id": "seq1"})])
     client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
