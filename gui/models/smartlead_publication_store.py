@@ -33,6 +33,15 @@ class SmartleadPublicationStore:
         self._receipts.append(receipt)
         return receipt
 
+    def replace(self, receipt: SmartleadPublicationReceipt) -> SmartleadPublicationReceipt:
+        """Replace an existing receipt by publication_id (used to persist sync state)."""
+        for index, existing in enumerate(self._receipts):
+            if existing.publication_id == receipt.publication_id:
+                self._receipts[index] = receipt
+                return receipt
+        self._receipts.append(receipt)
+        return receipt
+
     def load(self, safe_missing: bool = False, safe_corrupt: bool = False) -> None:
         if not os.path.exists(self._path):
             self._receipts = []

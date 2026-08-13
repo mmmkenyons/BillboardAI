@@ -116,3 +116,42 @@ def test_campaign_detail(monkeypatch):
     campaign = client.get_campaign("4")
     assert campaign.campaign_id == "4"
     assert campaign.sequence_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5R endpoints
+# ---------------------------------------------------------------------------
+def test_lead_custom_field_update_endpoint(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"success": True})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    client.update_campaign_lead("10", "lead-99", {"bb_mockup_url": "https://cdn.example.com/a.png"})
+    call = transport.calls[0]
+    assert call["method"].upper() == "PUT"
+    assert call["url"].endswith("/campaigns/10/leads/lead-99")
+    assert call["json"] == {"custom_fields": {"bb_mockup_url": "https://cdn.example.com/a.png"}}
+    assert call["params"]["api_key"] == "super-secret-test-key"
+
+
+def test_read_campaign_lead_endpoint(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"data": {"id": "id1", "custom_fields": {"bb_mockup_url": "x"}}})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    lead = client.get_campaign_lead("10", "id1")
+    assert lead["custom_fields"]["bb_mockup_url"] == "x"
+    assert transport.calls[0]["method"].upper() == "GET"
+
+
+def test_add_sequence_endpoint(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"id": "seq1"})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    client.add_sequence("10", {"steps": [{"subject": "{{bb_subject}}", "content": "{{bb_body}}"}]})
+    call = transport.calls[0]
+    assert call["method"].upper() == "POST"
+    assert call["url"].endswith("/campaigns/10/sequences/create")
+
+
+def test_no_activation_endpoint_exposed_or_invoked(monkeypatch):
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=FakeTransport([]), sleeper=lambda _: None)
+    # The API boundary must not expose any start/activate capability.
+    assert not hasattr(client, "start_campaign")
+    assert not hasattr(client, "activate_campaign")
+    assert not hasattr(client, "update_campaign_status")

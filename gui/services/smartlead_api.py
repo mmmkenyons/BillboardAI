@@ -173,6 +173,55 @@ class SmartleadApiClient:
             return [item for item in data if isinstance(item, dict)]
         return []
 
+    def get_campaign_email_accounts(self, campaign_id: str) -> list[dict[str, Any]]:
+        payload = self._request_json("GET", f"/campaigns/{campaign_id}/email-accounts")
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            data = payload.get("data") or payload.get("email_accounts") or []
+            return [item for item in data if isinstance(item, dict)]
+        return []
+
+    def get_campaign_lead(self, campaign_id: str, lead_id: str) -> dict[str, Any] | None:
+        """Read a single campaign lead (used to verify existing custom fields)."""
+        payload = self._request_json("GET", f"/campaigns/{campaign_id}/leads/{lead_id}")
+        if isinstance(payload, list):
+            payload = payload[0] if payload else {}
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        return data if isinstance(data, dict) else None
+
+    def update_campaign_lead(self, campaign_id: str, lead_id: str, custom_fields: dict[str, Any]) -> Any:
+        """Update custom fields on an existing campaign lead (no duplicate lead creation).
+
+        This is the target update path for bb_mockup_url sync on already-published
+        leads. The live payload semantics (path/method) follow the repository's
+        canonical Smartlead API convention and are verified with a fake transport.
+        """
+        return self._request_json(
+            "PUT",
+            f"/campaigns/{campaign_id}/leads/{lead_id}",
+            json_body={"custom_fields": dict(custom_fields or {})},
+        )
+
+    def add_sequence(self, campaign_id: str, payload: dict[str, Any]) -> Any:
+        """Create a campaign sequence. Callers gate this behind explicit confirmation."""
+        return self._request_json(
+            "POST",
+            f"/campaigns/{campaign_id}/sequences/create",
+            json_body=payload,
+        )
+
+    def update_campaign_sequence(self, campaign_id: str, sequence_id: str, payload: dict[str, Any]) -> Any:
+        """Update an existing campaign sequence. Callers gate this explicitly; it is
+        never invoked automatically and active campaigns are protected upstream."""
+        return self._request_json(
+            "PUT",
+            f"/campaigns/{campaign_id}/sequences/{sequence_id}",
+            json_body=payload,
+        )
+
     def build_request_url(self, path: str) -> str:
         base = self._settings.base_url.rstrip("/")
         suffix = path if path.startswith("/") else f"/{path}"

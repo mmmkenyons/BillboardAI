@@ -1,4 +1,5 @@
-"""Qt controller for Smartlead handoff preflight and artifact generation."""
+"""Qt controller for Smartlead handoff preflight, hosted mockups, sequence
+readiness, and safe URL sync (Sprint 5R)."""
 
 from __future__ import annotations
 
@@ -17,11 +18,24 @@ class SmartleadHandoffController(QObject):
     connection_changed = Signal(object)
     campaigns_changed = Signal(object)
     publish_result_changed = Signal(object)
+    hosting_connection_changed = Signal(object)
+    hosting_summary_changed = Signal(object)
+    readiness_changed = Signal(object)
+    url_sync_changed = Signal(object)
 
-    def __init__(self, *, service: SmartleadHandoffService, publish_service: SmartleadPublishService | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        service: SmartleadHandoffService,
+        publish_service: SmartleadPublishService | None = None,
+        hosting_service: object | None = None,
+        sequence_service: object | None = None,
+    ) -> None:
         super().__init__()
         self._service = service
         self._publish_service = publish_service
+        self._hosting_service = hosting_service
+        self._sequence_service = sequence_service
         self._last_result = None
 
     def prepare(self, package_directory: str) -> object:
@@ -76,6 +90,109 @@ class SmartleadHandoffController(QObject):
             )
         if result is not None:
             self.publish_result_changed.emit(result)
+            if getattr(result, "success", False):
+                self.status_message.emit(result.message)
+            else:
+                self.error_message.emit(result.message)
+        return result
+
+    # ------------------------------------------------------------------
+    # Hosting + sequence + URL sync (Sprint 5R)
+    # ------------------------------------------------------------------
+    def test_hosting_connection(self) -> object:
+        if self._hosting_service is None:
+            result = type("HostingConnectionResult", (), {"connected": False, "status": "UNAVAILABLE", "message": "Hosting service unavailable."})()
+        else:
+            result = self._hosting_service.test_connection()
+        self.hosting_connection_changed.emit(result)
+        return result
+
+    def hosting_dry_run(self, package_directory: str, handoff_directory: str) -> object:
+        if self._hosting_service is None:
+            result = None
+        else:
+            result = self._hosting_service.dry_run(package_directory, handoff_directory)
+        if result is not None:
+            self.hosting_summary_changed.emit(result)
+        return result
+
+    def host_mockups(
+        self,
+        package_directory: str,
+        handoff_directory: str,
+        *,
+        mode: str,
+        live_enabled: bool,
+        confirmed: bool,
+    ) -> object:
+        if self._hosting_service is None:
+            result = None
+        else:
+            result = self._hosting_service.host(
+                package_directory,
+                handoff_directory,
+                mode=mode,
+                live_enabled=live_enabled,
+                confirmed=confirmed,
+            )
+        if result is not None:
+            self.hosting_summary_changed.emit(result)
+            if getattr(result, "success", False):
+                self.status_message.emit(result.message)
+            else:
+                self.error_message.emit(result.message)
+        return result
+
+    def refresh_sequence_readiness(self, campaign_id: str) -> object:
+        if self._sequence_service is None:
+            result = None
+        else:
+            result = self._sequence_service.check_readiness(campaign_id)
+        if result is not None:
+            self.readiness_changed.emit(result)
+        return result
+
+    def prepare_sequence(
+        self,
+        campaign_id: str,
+        *,
+        live_enabled: bool,
+        confirmed: bool,
+    ) -> object:
+        if self._sequence_service is None:
+            result = None
+        else:
+            result = self._sequence_service.prepare_sequence(
+                campaign_id,
+                live_enabled=live_enabled,
+                confirmed=confirmed,
+                mode="LIVE" if live_enabled else "DRY_RUN",
+            )
+        if result is not None:
+            self.readiness_changed.emit(result)
+        return result
+
+    def sync_hosted_urls(
+        self,
+        *,
+        source_package_id: str,
+        campaign_id: str,
+        mode: str,
+        live_enabled: bool,
+        confirmed: bool,
+    ) -> object:
+        if self._publish_service is None:
+            result = None
+        else:
+            result = self._publish_service.sync_hosted_urls(
+                source_package_id=source_package_id,
+                campaign_id=campaign_id,
+                mode=mode,
+                live_enabled=live_enabled,
+                confirmed=confirmed,
+            )
+        if result is not None:
+            self.url_sync_changed.emit(result)
             if getattr(result, "success", False):
                 self.status_message.emit(result.message)
             else:

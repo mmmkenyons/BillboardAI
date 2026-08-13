@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -33,6 +35,7 @@ class SmartleadHandoffPage(QWidget):
         self._rows: list[dict] = []
         self._campaigns: list[object] = []
         self._handoff_directory: str = ""
+        self._package_directory: str = ""
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Smartlead Preflight", self))
@@ -84,6 +87,55 @@ class SmartleadHandoffPage(QWidget):
         self.detail.setReadOnly(True)
         layout.addWidget(self.detail)
 
+        # ------------------------------------------------------------------
+        # Hosted Mockups (Sprint 5R)
+        # ------------------------------------------------------------------
+        hosting_title = QLabel("Hosted Mockups", self)
+        hosting_title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(hosting_title)
+
+        hosting_row = QHBoxLayout()
+        self.hosting_status_label = QLabel("Hosting: Not configured", self)
+        self.test_hosting_connection_button = QPushButton("Test Hosting Connection", self)
+        self.hosting_dry_run_button = QPushButton("Hosting Dry Run", self)
+        self.hosting_live_checkbox = QCheckBox("Enable live hosting", self)
+        self.hosting_live_checkbox.setChecked(False)
+        self.host_mockups_button = QPushButton("Host Approved Mockups", self)
+        hosting_row.addWidget(self.hosting_status_label)
+        hosting_row.addStretch(1)
+        hosting_row.addWidget(self.test_hosting_connection_button)
+        hosting_row.addWidget(self.hosting_dry_run_button)
+        hosting_row.addWidget(self.hosting_live_checkbox)
+        hosting_row.addWidget(self.host_mockups_button)
+        layout.addLayout(hosting_row)
+        self.hosting_summary_label = QLabel("No hosting run yet.", self)
+        layout.addWidget(self.hosting_summary_label)
+
+        # ------------------------------------------------------------------
+        # Sequence Readiness (Sprint 5R)
+        # ------------------------------------------------------------------
+        sequence_title = QLabel("Sequence Readiness", self)
+        sequence_title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(sequence_title)
+
+        sequence_row = QHBoxLayout()
+        self.readiness_label = QLabel("No readiness audit yet.", self)
+        self.refresh_readiness_button = QPushButton("Refresh Readiness", self)
+        self.prepare_live_checkbox = QCheckBox("Enable live sequence write", self)
+        self.prepare_live_checkbox.setChecked(False)
+        self.prepare_sequence_button = QPushButton("Prepare Sequence", self)
+        self.sync_live_checkbox = QCheckBox("Sync URLs live", self)
+        self.sync_live_checkbox.setChecked(False)
+        self.sync_urls_button = QPushButton("Sync Hosted URLs to Leads", self)
+        sequence_row.addWidget(self.readiness_label)
+        sequence_row.addStretch(1)
+        sequence_row.addWidget(self.refresh_readiness_button)
+        sequence_row.addWidget(self.prepare_live_checkbox)
+        sequence_row.addWidget(self.prepare_sequence_button)
+        sequence_row.addWidget(self.sync_live_checkbox)
+        sequence_row.addWidget(self.sync_urls_button)
+        layout.addLayout(sequence_row)
+
     def set_controller(self, controller: object) -> None:
         if controller is self._controller:
             return
@@ -102,14 +154,31 @@ class SmartleadHandoffPage(QWidget):
             controller.campaigns_changed.connect(self.set_campaigns)
         if hasattr(controller, "publish_result_changed"):
             controller.publish_result_changed.connect(self.show_publish_result)
+        if hasattr(controller, "hosting_connection_changed"):
+            controller.hosting_connection_changed.connect(self.set_hosting_connection_status)
+        if hasattr(controller, "hosting_summary_changed"):
+            controller.hosting_summary_changed.connect(self.set_hosting_summary)
+        if hasattr(controller, "readiness_changed"):
+            controller.readiness_changed.connect(self.set_readiness)
+        if hasattr(controller, "url_sync_changed"):
+            controller.url_sync_changed.connect(self.set_url_sync)
         self.test_connection_button.clicked.connect(self._on_test_connection)
         self.refresh_campaigns_button.clicked.connect(self._on_refresh_campaigns)
         self.publish_button.clicked.connect(self._on_publish)
+        self.test_hosting_connection_button.clicked.connect(self._on_test_hosting_connection)
+        self.hosting_dry_run_button.clicked.connect(self._on_hosting_dry_run)
+        self.host_mockups_button.clicked.connect(self._on_host_mockups)
+        self.refresh_readiness_button.clicked.connect(self._on_refresh_readiness)
+        self.prepare_sequence_button.clicked.connect(self._on_prepare_sequence)
+        self.sync_urls_button.clicked.connect(self._on_sync_urls)
         self.target_mode_combo.currentTextChanged.connect(self._sync_target_mode)
         self._sync_target_mode(self.target_mode_combo.currentText())
 
     def set_summary(self, summary: object) -> None:
         self._handoff_directory = str(getattr(summary, "handoff_directory", "") or self._handoff_directory)
+        if self._handoff_directory:
+            candidate = os.path.dirname(self._handoff_directory)
+            self._package_directory = candidate if os.path.isfile(os.path.join(candidate, "manifest.json")) else self._handoff_directory
         self.summary_label.setText(
             f"Approved: {getattr(summary, 'total_approved_rows', 0)} | "
             f"Ready: {getattr(summary, 'ready', 0)} | "
@@ -154,6 +223,9 @@ class SmartleadHandoffPage(QWidget):
 
     def set_handoff_directory(self, path: str) -> None:
         self._handoff_directory = str(path or "")
+        if self._handoff_directory:
+            candidate = os.path.dirname(self._handoff_directory)
+            self._package_directory = candidate if os.path.isfile(os.path.join(candidate, "manifest.json")) else self._handoff_directory
 
     def _apply_filter(self, value: str) -> None:
         status = str(value or "All").strip().upper()
@@ -240,3 +312,125 @@ class SmartleadHandoffPage(QWidget):
             f"Blocked/Conflict rows excluded: {blocked}\n\n"
             "This uploads leads only. It does NOT start or launch the campaign."
         )
+
+    # ------------------------------------------------------------------
+    # Hosting (Sprint 5R)
+    # ------------------------------------------------------------------
+    def set_hosting_connection_status(self, result: object) -> None:
+        status = str(getattr(result, "status", "") or "")
+        self.hosting_status_label.setText(f"Hosting: {status}")
+        self.show_status(str(getattr(result, "message", "") or ""))
+
+    def set_hosting_summary(self, result: object) -> None:
+        lines = [str(getattr(result, "message", "") or "")]
+        lines.append(
+            f"Hosted: {getattr(result, 'hosted', 0)} | Reused: {getattr(result, 'reused', 0)} | "
+            f"Pending: {getattr(result, 'pending', 0)} | Failed: {getattr(result, 'failed', 0)} | Blocked: {getattr(result, 'blocked', 0)}"
+        )
+        self.hosting_summary_label.setText(" | ".join(lines))
+        self.show_status("\n".join(lines))
+
+    def _on_test_hosting_connection(self) -> None:
+        if self._controller is not None and hasattr(self._controller, "test_hosting_connection"):
+            self._controller.test_hosting_connection()
+
+    def _on_hosting_dry_run(self) -> None:
+        if self._controller is None:
+            return
+        if hasattr(self._controller, "hosting_dry_run"):
+            self._controller.hosting_dry_run(self._package_directory, self._handoff_directory)
+
+    def _on_host_mockups(self) -> None:
+        if self._controller is None:
+            return
+        live = self.hosting_live_checkbox.isChecked()
+        confirmed = True
+        if live:
+            confirmed = QMessageBox.question(self, "Confirm Hosting", "Upload approved mockups to the configured hosting provider?") == QMessageBox.StandardButton.Yes
+        if hasattr(self._controller, "host_mockups"):
+            self._controller.host_mockups(
+                self._package_directory,
+                self._handoff_directory,
+                mode="LIVE" if live else "DRY_RUN",
+                live_enabled=live,
+                confirmed=confirmed,
+            )
+
+    # ------------------------------------------------------------------
+    # Sequence readiness + URL sync (Sprint 5R)
+    # ------------------------------------------------------------------
+    def set_readiness(self, result: object) -> None:
+        lines = [
+            f"Campaign: {getattr(result, 'campaign_id', '')} | Status: {getattr(result, 'campaign_status', '')}",
+            f"Sequence exists: {getattr(result, 'sequence_exists', False)}",
+            f"bb_subject: {getattr(result, 'bb_subject_present', False)} | bb_body: {getattr(result, 'bb_body_present', False)} | bb_mockup_url: {getattr(result, 'bb_mockup_url_present', False)}",
+            f"Sender accounts: {getattr(result, 'sender_account_count', 0)}",
+        ]
+        blockers = list(getattr(result, "blockers", ()) or ())
+        if blockers:
+            lines.append("Blockers: " + "; ".join(blockers))
+        ready = bool(getattr(result, "ready_for_manual_activation", False))
+        lines.append("READY FOR MANUAL ACTIVATION" if ready else "NOT READY (see blockers)")
+        self.readiness_label.setText(" | ".join(lines[:3]))
+        self.show_status("\n".join(lines))
+
+    def set_url_sync(self, result: object) -> None:
+        lines = [str(getattr(result, "message", "") or "")]
+        lines.append(
+            f"Synced: {getattr(result, 'synced', 0)} | Skipped: {getattr(result, 'skipped', 0)} | "
+            f"Failed: {getattr(result, 'failed', 0)} | Not syncable: {getattr(result, 'not_syncable', 0)}"
+        )
+        self.show_status("\n".join(lines))
+
+    def _on_refresh_readiness(self) -> None:
+        if self._controller is None:
+            return
+        campaign_id = str(self.campaign_combo.currentData() or "")
+        if campaign_id and hasattr(self._controller, "refresh_sequence_readiness"):
+            self._controller.refresh_sequence_readiness(campaign_id)
+
+    def _on_prepare_sequence(self) -> None:
+        if self._controller is None:
+            return
+        campaign_id = str(self.campaign_combo.currentData() or "")
+        if not campaign_id:
+            return
+        live = self.prepare_live_checkbox.isChecked()
+        confirmed = True
+        if live:
+            confirmed = QMessageBox.question(self, "Confirm Sequence", "Prepare the BillboardAI draft sequence for this campaign? (No activation.)") == QMessageBox.StandardButton.Yes
+        if hasattr(self._controller, "prepare_sequence"):
+            self._controller.prepare_sequence(campaign_id, live_enabled=live, confirmed=confirmed)
+
+    def _on_sync_urls(self) -> None:
+        if self._controller is None:
+            return
+        source_package_id = self._package_id()
+        campaign_id = str(self.campaign_combo.currentData() or "")
+        if not source_package_id or not campaign_id:
+            self.show_status("Sync requires an approved package and a target campaign.")
+            return
+        live = self.sync_live_checkbox.isChecked()
+        confirmed = True
+        if live:
+            confirmed = QMessageBox.question(self, "Confirm URL Sync", "Update bb_mockup_url on existing Smartlead leads? (No activation.)") == QMessageBox.StandardButton.Yes
+        if hasattr(self._controller, "sync_hosted_urls"):
+            self._controller.sync_hosted_urls(
+                source_package_id=source_package_id,
+                campaign_id=campaign_id,
+                mode="LIVE" if live else "DRY_RUN",
+                live_enabled=live,
+                confirmed=confirmed,
+            )
+
+    def _package_id(self) -> str:
+        manifest_path = os.path.join(self._package_directory, "manifest.json") if self._package_directory else ""
+        if manifest_path and os.path.isfile(manifest_path):
+            import json
+
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as handle:
+                    return str(json.load(handle).get("package_id") or "")
+            except Exception:  # noqa: BLE001
+                return ""
+        return ""

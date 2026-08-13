@@ -8,8 +8,15 @@ import os
 from dataclasses import asdict
 from typing import Any
 
+from gui.models.hosted_asset import is_valid_public_url
+from gui.models.hosted_asset_store import HostedAssetStore
 from gui.models.smartlead_connection import SmartleadConnectionSettings
 from gui.models.smartlead_publication import (
+    SMARTLEAD_HOSTED_SYNC_FAILED,
+    SMARTLEAD_HOSTED_SYNC_NOT_SYNCABLE,
+    SMARTLEAD_HOSTED_SYNC_PENDING,
+    SMARTLEAD_HOSTED_SYNC_SKIPPED,
+    SMARTLEAD_HOSTED_SYNC_SYNCED,
     SMARTLEAD_PUBLISH_MODE_DRY_RUN,
     SMARTLEAD_PUBLISH_MODE_LIVE,
     SMARTLEAD_PUBLISH_STATUS_FAILED,
@@ -23,6 +30,8 @@ from gui.models.smartlead_publication import (
     SmartleadPublicationReceipt,
     SmartleadPublishResult,
     SmartleadPublishTarget,
+    SmartleadUrlSyncLeadResult,
+    SmartleadUrlSyncResult,
 )
 from gui.models.smartlead_publication_store import SmartleadPublicationStore
 from gui.services.smartlead_api import SmartleadApiClient, SmartleadApiError
@@ -37,6 +46,7 @@ SMARTLEAD_CUSTOM_FIELD_MAP: dict[str, str] = {
     "cta": "bb_cta",
     "mockup_path": "bb_local_mockup_path",
     "mockup_relative_path": "bb_local_mockup_path",
+    "mockup_url": "bb_mockup_url",
     "personalization_basis": "bb_personalization_basis",
 }
 
@@ -51,10 +61,12 @@ class SmartleadPublishService:
         api_client: SmartleadApiClient,
         receipt_store: SmartleadPublicationStore | None = None,
         settings: SmartleadConnectionSettings | None = None,
+        hosted_asset_store: HostedAssetStore | None = None,
     ) -> None:
         self._api_client = api_client
         self._receipt_store = receipt_store or SmartleadPublicationStore()
         self._settings = settings or api_client.settings
+        self._hosted_asset_store = hosted_asset_store or HostedAssetStore()
 
     def list_campaigns(self):
         return self._api_client.list_campaigns()
@@ -173,6 +185,169 @@ class SmartleadPublishService:
             return created.campaign_id, created.name
         return str(target.campaign_id or ""), str(target.campaign_name or "")
 
+    # ------------------------------------------------------------------
+    # Hosted-URL sync for already-published leads (Sprint 5R)
+    # ------------------------------------------------------------------
+    def sync_hosted_urls(
+        self,
+        *,
+        source_package_id: str,
+        campaign_id: str,
+        mode: str = SMARTLEAD_PUBLISH_MODE_DRY_RUN,
+        live_enabled: bool = False,
+        confirmed: bool = False,
+        asset_store: HostedAssetStore | None = None,
+    ) -> SmartleadUrlSyncResult:
+        resolved_mode = SMARTLEAD_PUBLISH_MODE_LIVE if mode == SMARTLEAD_PUBLISH_MODE_LIVE else SMARTLEAD_PUBLISH_MODE_DRY_RUN
+        if resolved_mode == SMARTLEAD_PUBLISH_MODE_LIVE and (not live_enabled or not confirmed):
+            return SmartleadUrlSyncResult(
+                success=False,
+                message="Live URL sync requires explicit enable and confirmation.",
+                mode=resolved_mode,
+                source_package_id=source_package_id,
+                campaign_id=campaign_id,
+            )
+        dry_run = resolved_mode != SMARTLEAD_PUBLISH_MODE_LIVE
+        store = asset_store or self._hosted_asset_store
+        receipts = [
+            receipt
+            for receipt in self._receipt_store.list()
+            if receipt.source_package_id == source_package_id and receipt.campaign_id == campaign_id
+        ]
+        overall_results: list[SmartleadUrlSyncLeadResult] = []
+        synced = 0
+        skipped = 0
+        failed = 0
+        not_syncable = 0
+
+        for receipt in receipts:
+            updated_leads: list[SmartleadPublishedLead] = []
+            changed = False
+            for lead in receipt.lead_results:
+                if lead.status != SMARTLEAD_PUBLISH_STATUS_SUCCEEDED or not lead.remote_lead_id:
+                    continue
+                expected_url = self._resolve_hosted_url(lead.prospect_id, store)
+                if not expected_url:
+                    not_syncable += 1
+                    overall_results.append(
+                        SmartleadUrlSyncLeadResult(
+                            publication_key=lead.publication_key,
+                            prospect_id=lead.prospect_id,
+                            email=lead.email,
+                            status=SMARTLEAD_HOSTED_SYNC_NOT_SYNCABLE,
+                            remote_lead_id=lead.remote_lead_id,
+                            reason="No valid hosted HTTPS mockup URL available for this prospect.",
+                        )
+                    )
+                    continue
+                if lead.hosted_sync_status == SMARTLEAD_HOSTED_SYNC_SYNCED and lead.hosted_mockup_url == expected_url:
+                    skipped += 1
+                    overall_results.append(
+                        SmartleadUrlSyncLeadResult(
+                            publication_key=lead.publication_key,
+                            prospect_id=lead.prospect_id,
+                            email=lead.email,
+                            status=SMARTLEAD_HOSTED_SYNC_SKIPPED,
+                            hosted_mockup_url=expected_url,
+                            remote_lead_id=lead.remote_lead_id,
+                            reason="Already synchronized to the expected hosted URL.",
+                        )
+                    )
+                    continue
+                if dry_run:
+                    overall_results.append(
+                        SmartleadUrlSyncLeadResult(
+                            publication_key=lead.publication_key,
+                            prospect_id=lead.prospect_id,
+                            email=lead.email,
+                            status=SMARTLEAD_HOSTED_SYNC_PENDING,
+                            hosted_mockup_url=expected_url,
+                            remote_lead_id=lead.remote_lead_id,
+                            reason="Would update bb_mockup_url.",
+                        )
+                    )
+                    continue
+                try:
+                    self._api_client.update_campaign_lead(campaign_id, lead.remote_lead_id, {"bb_mockup_url": expected_url})
+                except SmartleadApiError as exc:
+                    failed += 1
+                    overall_results.append(
+                        SmartleadUrlSyncLeadResult(
+                            publication_key=lead.publication_key,
+                            prospect_id=lead.prospect_id,
+                            email=lead.email,
+                            status=SMARTLEAD_HOSTED_SYNC_FAILED,
+                            hosted_mockup_url=expected_url,
+                            remote_lead_id=lead.remote_lead_id,
+                            reason=f"Update failed: {exc.message}",
+                        )
+                    )
+                    continue
+                synced += 1
+                overall_results.append(
+                    SmartleadUrlSyncLeadResult(
+                        publication_key=lead.publication_key,
+                        prospect_id=lead.prospect_id,
+                        email=lead.email,
+                        status=SMARTLEAD_HOSTED_SYNC_SYNCED,
+                        hosted_mockup_url=expected_url,
+                        remote_lead_id=lead.remote_lead_id,
+                        asset_id=next((a.identity_key() for a in store.find_by_prospect(lead.prospect_id) if a.has_valid_public_url), ""),
+                        reason="Updated bb_mockup_url on existing lead.",
+                    )
+                )
+                updated_leads.append(
+                    lead.replaced(
+                        hosted_mockup_url=expected_url,
+                        hosted_sync_status=SMARTLEAD_HOSTED_SYNC_SYNCED,
+                        last_synced_at=self._now(),
+                    )
+                )
+                changed = True
+
+            if not dry_run and changed:
+                from dataclasses import replace as _replace
+
+                updated_receipt = _replace(
+                    receipt,
+                    lead_results=tuple(_merge_lead_results(receipt.lead_results, updated_leads)),
+                )
+                self._receipt_store.replace(updated_receipt)
+                self._receipt_store.save()
+
+        if dry_run:
+            return SmartleadUrlSyncResult(
+                success=True,
+                message=f"URL sync dry run prepared for {len(receipts)} receipt(s). No live writes performed.",
+                mode=resolved_mode,
+                source_package_id=source_package_id,
+                campaign_id=campaign_id,
+                total=len(overall_results),
+                synced=0,
+                skipped=skipped,
+                failed=0,
+                not_syncable=not_syncable,
+                results=tuple(overall_results),
+            )
+        return SmartleadUrlSyncResult(
+            success=failed == 0,
+            message="URL sync completed." if failed == 0 else "URL sync completed with partial failure.",
+            mode=resolved_mode,
+            source_package_id=source_package_id,
+            campaign_id=campaign_id,
+            total=len(overall_results),
+            synced=synced,
+            skipped=skipped,
+            failed=failed,
+            not_syncable=not_syncable,
+            results=tuple(overall_results),
+        )
+
+    def _resolve_hosted_url(self, prospect_id: str, store: HostedAssetStore) -> str:
+        assets = [asset for asset in store.find_by_prospect(prospect_id) if is_valid_public_url(asset.public_url)]
+        assets.sort(key=lambda asset: asset.hosted_at)
+        return assets[-1].public_url if assets else ""
+
     def _load_handoff(self, handoff_directory: str):
         root = os.path.abspath(handoff_directory)
         preflight_path = os.path.join(root, "smartlead_preflight.csv")
@@ -277,3 +452,14 @@ class SmartleadPublishService:
         from gui.models.smartlead_publication import utc_now_iso
 
         return utc_now_iso()
+
+
+def _merge_lead_results(
+    existing_leads: tuple[SmartleadPublishedLead, ...],
+    updated_leads: list[SmartleadPublishedLead],
+) -> list[SmartleadPublishedLead]:
+    """Return existing leads with the updated ones overlaid by publication_key."""
+    by_key = {lead.publication_key: lead for lead in existing_leads}
+    for lead in updated_leads:
+        by_key[lead.publication_key] = lead
+    return [by_key[lead.publication_key] for lead in existing_leads]

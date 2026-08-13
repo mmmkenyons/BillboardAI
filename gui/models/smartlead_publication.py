@@ -19,6 +19,13 @@ SMARTLEAD_PUBLISH_STATUS_NOT_ATTEMPTED = "NOT_ATTEMPTED"
 SMARTLEAD_TARGET_MODE_EXISTING = "EXISTING_CAMPAIGN"
 SMARTLEAD_TARGET_MODE_CREATE_DRAFT = "CREATE_DRAFT_CAMPAIGN"
 
+# Hosted-mockup URL sync status on published leads (Sprint 5R).
+SMARTLEAD_HOSTED_SYNC_PENDING = "PENDING"
+SMARTLEAD_HOSTED_SYNC_SYNCED = "SYNCED"
+SMARTLEAD_HOSTED_SYNC_FAILED = "FAILED"
+SMARTLEAD_HOSTED_SYNC_SKIPPED = "SKIPPED"
+SMARTLEAD_HOSTED_SYNC_NOT_SYNCABLE = "NOT_SYNCABLE"
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -85,6 +92,11 @@ class SmartleadPublishedLead:
     error_code: str = ""
     reason: str = ""
     batch_index: int = 0
+    # Hosted-mockup URL sync state (Sprint 5R) -- backward compatible defaults.
+    hosted_asset_id: str = ""
+    hosted_mockup_url: str = ""
+    hosted_sync_status: str = ""
+    last_synced_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -103,7 +115,16 @@ class SmartleadPublishedLead:
             error_code=str(raw.get("error_code") or ""),
             reason=str(raw.get("reason") or ""),
             batch_index=int(raw.get("batch_index") or 0),
+            hosted_asset_id=str(raw.get("hosted_asset_id") or ""),
+            hosted_mockup_url=str(raw.get("hosted_mockup_url") or ""),
+            hosted_sync_status=str(raw.get("hosted_sync_status") or ""),
+            last_synced_at=str(raw.get("last_synced_at") or ""),
         )
+
+    def replaced(self, **changes: Any) -> "SmartleadPublishedLead":
+        from dataclasses import replace
+
+        return replace(self, **changes)
 
 
 @dataclass(frozen=True)
@@ -208,3 +229,37 @@ class SmartleadPublishResult:
     receipt: SmartleadPublicationReceipt | None = None
     payload_preview: tuple[dict[str, Any], ...] = ()
     lead_results: tuple[SmartleadPublishedLead, ...] = ()
+
+
+@dataclass(frozen=True)
+class SmartleadUrlSyncLeadResult:
+    """Per-lead outcome for bb_mockup_url sync on an already-published lead."""
+
+    publication_key: str
+    prospect_id: str
+    email: str
+    status: str
+    hosted_mockup_url: str = ""
+    remote_lead_id: str = ""
+    reason: str = ""
+    asset_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SmartleadUrlSyncResult:
+    """Aggregate outcome of a hosted-URL sync operation."""
+
+    success: bool
+    message: str
+    mode: str
+    source_package_id: str = ""
+    campaign_id: str = ""
+    total: int = 0
+    synced: int = 0
+    skipped: int = 0
+    failed: int = 0
+    not_syncable: int = 0
+    results: tuple[SmartleadUrlSyncLeadResult, ...] = ()

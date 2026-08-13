@@ -332,17 +332,36 @@ class CampaignReviewPage(QWidget):
         page = SmartleadHandoffPage(dialog)
         layout.addWidget(page)
         from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
+        from gui.models.hosted_asset_store import HostedAssetStore
         from gui.models.smartlead_connection import SmartleadConnectionSettings
         from gui.models.smartlead_publication_store import SmartleadPublicationStore
+        from gui.models.smartlead_sequence import SequenceChangeStore
+        from gui.services.asset_hosting import CloudinaryAssetProvider, HostingConnectionSettings
+        from gui.services.hosted_mockups import AssetHostingService
         from gui.services.smartlead_api import SmartleadApiClient
         from gui.services.smartlead_handoff import SmartleadHandoffService
         from gui.services.smartlead_publish import SmartleadPublishService
+        from gui.services.smartlead_sequence_readiness import SmartleadSequenceReadinessService
 
+        api_client = SmartleadApiClient(settings=SmartleadConnectionSettings())
         publish_service = SmartleadPublishService(
-            api_client=SmartleadApiClient(settings=SmartleadConnectionSettings()),
+            api_client=api_client,
             receipt_store=SmartleadPublicationStore(),
         )
-        controller = SmartleadHandoffController(service=SmartleadHandoffService(), publish_service=publish_service)
+        hosting_service = AssetHostingService(
+            provider=CloudinaryAssetProvider(settings=HostingConnectionSettings()),
+            asset_store=HostedAssetStore(),
+        )
+        sequence_service = SmartleadSequenceReadinessService(
+            api_client=api_client,
+            change_store=SequenceChangeStore(),
+        )
+        controller = SmartleadHandoffController(
+            service=SmartleadHandoffService(),
+            publish_service=publish_service,
+            hosting_service=hosting_service,
+            sequence_service=sequence_service,
+        )
         page.set_controller(controller)
         controller.summary_changed.emit(getattr(result, "summary", None))
         controller.rows_changed.emit([row.to_dict() for row in getattr(result, "rows", ())])
