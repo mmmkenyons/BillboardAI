@@ -9,6 +9,7 @@ from gui.models.smartlead_publication import SmartleadPublishTarget
 from gui.services.smartlead_activation import SmartleadActivationService
 from gui.services.smartlead_reconciliation import SmartleadReconciliationService
 from gui.services.smartlead_handoff import SmartleadHandoffService
+from gui.services.smartlead_pilot import SmartleadPilotService
 from gui.services.smartlead_publish import SmartleadPublishService
 
 
@@ -27,6 +28,11 @@ class SmartleadHandoffController(QObject):
     reconciliation_changed = Signal(object)
     launch_readiness_changed = Signal(object)
     activation_result_changed = Signal(object)
+    pilot_changed = Signal(object)
+    pilot_list_changed = Signal(object)
+    pilot_preflight_changed = Signal(object)
+    pilot_activation_changed = Signal(object)
+    pilot_pause_changed = Signal(object)
 
     def __init__(
         self,
@@ -37,6 +43,7 @@ class SmartleadHandoffController(QObject):
         sequence_service: object | None = None,
         reconciliation_service: SmartleadReconciliationService | None = None,
         activation_service: SmartleadActivationService | None = None,
+        pilot_service: SmartleadPilotService | None = None,
     ) -> None:
         super().__init__()
         self._service = service
@@ -45,6 +52,7 @@ class SmartleadHandoffController(QObject):
         self._sequence_service = sequence_service
         self._reconciliation_service = reconciliation_service
         self._activation_service = activation_service
+        self._pilot_service = pilot_service
         self._last_result = None
 
     def prepare(self, package_directory: str) -> object:
@@ -292,4 +300,98 @@ class SmartleadHandoffController(QObject):
                 self.status_message.emit(result.message)
             else:
                 self.error_message.emit(result.message)
+        return result
+
+    def refresh_pilots(self) -> list[object]:
+        pilots = self._pilot_service.list_pilots() if self._pilot_service is not None else []
+        self.pilot_list_changed.emit(pilots)
+        return pilots
+
+    def create_pilot(
+        self,
+        *,
+        campaign_id: str,
+        campaign_name: str,
+        source_package_id: str,
+        source_handoff_path: str,
+        selected_prospect_ids: list[str],
+        selected_emails: list[str],
+    ) -> object:
+        if self._pilot_service is None:
+            return None
+        result = self._pilot_service.create_pilot(
+            campaign_id=campaign_id,
+            campaign_name=campaign_name,
+            source_package_id=source_package_id,
+            source_handoff_path=source_handoff_path,
+            selected_prospect_ids=selected_prospect_ids,
+            selected_emails=selected_emails,
+        )
+        self.pilot_changed.emit(result)
+        self.refresh_pilots()
+        self.status_message.emit(f"Pilot created with {len(getattr(result, 'recipients', ())) } recipients.")
+        return result
+
+    def preflight_pilot(self, pilot_id: str) -> object:
+        if self._pilot_service is None:
+            return None
+        result = self._pilot_service.preflight_pilot(pilot_id)
+        self.pilot_preflight_changed.emit(result)
+        self.pilot_changed.emit(result.pilot)
+        if getattr(result, "success", False):
+            self.status_message.emit(result.message)
+        else:
+            self.error_message.emit(result.message)
+        self.refresh_pilots()
+        return result
+
+    def dry_run_pilot(self, pilot_id: str) -> object:
+        if self._pilot_service is None:
+            return None
+        result = self._pilot_service.dry_run_activation(pilot_id)
+        self.pilot_activation_changed.emit(result)
+        return result
+
+    def activate_pilot(self, pilot_id: str, *, confirmed: bool) -> object:
+        if self._pilot_service is None:
+            return None
+        result = self._pilot_service.activate_pilot(pilot_id, confirmed=confirmed)
+        self.pilot_activation_changed.emit(result)
+        self.pilot_changed.emit(result.pilot)
+        if getattr(result, "success", False):
+            self.status_message.emit(result.message)
+        else:
+            self.error_message.emit(result.message)
+        self.refresh_pilots()
+        return result
+
+    def refresh_pilot_status(self, pilot_id: str) -> object:
+        if self._pilot_service is None:
+            return None
+        result = self._pilot_service.refresh_pilot_status(pilot_id)
+        self.pilot_changed.emit(result)
+        self.refresh_pilots()
+        self.status_message.emit("Pilot status refreshed.")
+        return result
+
+    def pause_pilot(self, pilot_id: str, *, confirmed: bool) -> object:
+        if self._pilot_service is None:
+            return None
+        result = self._pilot_service.pause_pilot(pilot_id, confirmed=confirmed)
+        self.pilot_pause_changed.emit(result)
+        self.pilot_changed.emit(result.pilot)
+        if getattr(result, "success", False):
+            self.status_message.emit(result.message)
+        else:
+            self.error_message.emit(result.message)
+        self.refresh_pilots()
+        return result
+
+    def mark_pilot_review_complete(self, pilot_id: str) -> object:
+        if self._pilot_service is None:
+            return None
+        result = self._pilot_service.mark_review_complete(pilot_id)
+        self.pilot_changed.emit(result)
+        self.refresh_pilots()
+        self.status_message.emit("Pilot review marked complete.")
         return result

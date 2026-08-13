@@ -47,6 +47,11 @@ def test_controller_wiring_idempotency():
             self.reconciliation_changed = DummySignal()
             self.launch_readiness_changed = DummySignal()
             self.activation_result_changed = DummySignal()
+            self.pilot_changed = DummySignal()
+            self.pilot_list_changed = DummySignal()
+            self.pilot_preflight_changed = DummySignal()
+            self.pilot_activation_changed = DummySignal()
+            self.pilot_pause_changed = DummySignal()
 
     app = QApplication.instance() or QApplication([])
     page = SmartleadHandoffPage()
@@ -55,6 +60,17 @@ def test_controller_wiring_idempotency():
     page.set_controller(controller)
     assert len(controller.summary_changed.connections) == 1
     assert len(controller.launch_readiness_changed.connections) == 1
+    assert len(controller.pilot_changed.connections) == 1
+
+
+def test_page_exposes_pilot_controls():
+    from gui.views.smartlead_handoff_page import SmartleadHandoffPage
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    page = SmartleadHandoffPage()
+    assert page.create_pilot_button.text() == "Create Pilot"
+    assert page.pause_pilot_button.text() == "Pause Pilot Campaign"
 
 
 def _runtime(tmp_path):

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 from PySide6.QtWidgets import (
+    QListWidget,
+    QListWidgetItem,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
@@ -38,6 +40,8 @@ class SmartleadHandoffPage(QWidget):
         self._package_directory: str = ""
         self._last_launch_readiness = None
         self._last_activation_result = None
+        self._pilot_runs: list[object] = []
+        self._current_pilot_id: str = ""
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Smartlead Preflight", self))
@@ -163,6 +167,44 @@ class SmartleadHandoffPage(QWidget):
         self.reconciliation_label = QLabel("Reconciliation: Not checked", self)
         layout.addWidget(self.reconciliation_label)
 
+        pilot_title = QLabel("Pilot Launch Safety Harness", self)
+        pilot_title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(pilot_title)
+
+        pilot_info_row = QHBoxLayout()
+        self.pilot_status_label = QLabel("No pilot selected.", self)
+        self.pilot_notice_label = QLabel("Pilot size cap: 5 default / 10 maximum.", self)
+        pilot_info_row.addWidget(self.pilot_status_label)
+        pilot_info_row.addStretch(1)
+        pilot_info_row.addWidget(self.pilot_notice_label)
+        layout.addLayout(pilot_info_row)
+
+        self.pilot_recipient_list = QListWidget(self)
+        self.pilot_recipient_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        layout.addWidget(self.pilot_recipient_list)
+
+        pilot_actions = QHBoxLayout()
+        self.create_pilot_button = QPushButton("Create Pilot", self)
+        self.preflight_pilot_button = QPushButton("Run Pilot Preflight", self)
+        self.dry_run_pilot_button = QPushButton("Activation Dry Run", self)
+        self.activate_pilot_button = QPushButton("Activate Pilot", self)
+        self.refresh_pilot_button = QPushButton("Refresh Pilot Status", self)
+        self.pause_pilot_button = QPushButton("Pause Pilot Campaign", self)
+        self.complete_pilot_button = QPushButton("Mark Pilot Review Complete", self)
+        pilot_actions.addWidget(self.create_pilot_button)
+        pilot_actions.addWidget(self.preflight_pilot_button)
+        pilot_actions.addWidget(self.dry_run_pilot_button)
+        pilot_actions.addWidget(self.activate_pilot_button)
+        pilot_actions.addWidget(self.refresh_pilot_button)
+        pilot_actions.addWidget(self.pause_pilot_button)
+        pilot_actions.addWidget(self.complete_pilot_button)
+        layout.addLayout(pilot_actions)
+
+        self.pilot_metrics_label = QLabel("Pilot metrics: Not refreshed", self)
+        self.pilot_health_label = QLabel("Health: Unknown", self)
+        layout.addWidget(self.pilot_metrics_label)
+        layout.addWidget(self.pilot_health_label)
+
     def set_controller(self, controller: object) -> None:
         if controller is self._controller:
             return
@@ -195,6 +237,16 @@ class SmartleadHandoffPage(QWidget):
             controller.launch_readiness_changed.connect(self.set_launch_readiness)
         if hasattr(controller, "activation_result_changed"):
             controller.activation_result_changed.connect(self.set_activation_result)
+        if hasattr(controller, "pilot_changed"):
+            controller.pilot_changed.connect(self.set_pilot)
+        if hasattr(controller, "pilot_list_changed"):
+            controller.pilot_list_changed.connect(self.set_pilot_list)
+        if hasattr(controller, "pilot_preflight_changed"):
+            controller.pilot_preflight_changed.connect(self.show_pilot_preflight)
+        if hasattr(controller, "pilot_activation_changed"):
+            controller.pilot_activation_changed.connect(self.show_pilot_activation)
+        if hasattr(controller, "pilot_pause_changed"):
+            controller.pilot_pause_changed.connect(self.show_pilot_pause)
         self.test_connection_button.clicked.connect(self._on_test_connection)
         self.refresh_campaigns_button.clicked.connect(self._on_refresh_campaigns)
         self.publish_button.clicked.connect(self._on_publish)
@@ -208,6 +260,14 @@ class SmartleadHandoffPage(QWidget):
         self.activation_dry_run_button.clicked.connect(self._on_activation_dry_run)
         self.activate_campaign_button.clicked.connect(self._on_activate_campaign)
         self.resume_publication_button.clicked.connect(self._on_resume_publication)
+        self.create_pilot_button.clicked.connect(self._on_create_pilot)
+        self.preflight_pilot_button.clicked.connect(self._on_preflight_pilot)
+        self.dry_run_pilot_button.clicked.connect(self._on_dry_run_pilot)
+        self.activate_pilot_button.clicked.connect(self._on_activate_pilot)
+        self.refresh_pilot_button.clicked.connect(self._on_refresh_pilot)
+        self.pause_pilot_button.clicked.connect(self._on_pause_pilot)
+        self.complete_pilot_button.clicked.connect(self._on_complete_pilot)
+        self.pilot_recipient_list.itemSelectionChanged.connect(self._update_pilot_buttons)
         self.target_mode_combo.currentTextChanged.connect(self._sync_target_mode)
         self.campaign_combo.currentIndexChanged.connect(self._update_activation_button_state)
         self.live_checkbox.toggled.connect(self._update_activation_button_state)
@@ -315,6 +375,8 @@ class SmartleadHandoffPage(QWidget):
     def _on_refresh_campaigns(self) -> None:
         if self._controller is not None and hasattr(self._controller, "refresh_campaigns"):
             self._controller.refresh_campaigns()
+        if hasattr(controller, "refresh_pilots"):
+            controller.refresh_pilots()
 
     def _on_publish(self) -> None:
         if self._controller is None or not self._handoff_directory:
@@ -635,3 +697,186 @@ class SmartleadHandoffPage(QWidget):
         remote_active = str(getattr(self._last_activation_result, "resulting_remote_status", "") or "").upper() in {"ACTIVE", "STARTED", "RUNNING", "SENDING"}
         self.activate_campaign_button.setText(self._activation_button_text())
         self.activate_campaign_button.setEnabled(campaign_selected and live_enabled and readiness_ready and not remote_active)
+
+    def set_pilot_list(self, pilots: list[object]) -> None:
+        self._pilot_runs = list(pilots or [])
+        self._update_pilot_buttons()
+
+    def set_pilot(self, pilot: object) -> None:
+        definition = getattr(pilot, "definition", pilot)
+        if definition is None:
+            return
+        self._current_pilot_id = str(getattr(definition, "pilot_id", "") or "")
+        self.pilot_status_label.setText(
+            f"Pilot: {getattr(definition, 'campaign_name', '')} | Status: {getattr(definition, 'status', '')} | Recipients: {len(getattr(definition, 'recipients', ())) }"
+        )
+        self._apply_pilot_recipients(getattr(definition, "recipients", ()))
+        snapshot = getattr(pilot, "snapshot", None)
+        if snapshot is not None:
+            metrics = getattr(snapshot, "pilot_metrics", None)
+            self.pilot_metrics_label.setText(
+                f"Pilot metrics: sent={getattr(metrics, 'sent', 0)} | replies={getattr(metrics, 'replied', 0)} | bounces={getattr(metrics, 'bounced', 0)} | opened={getattr(metrics, 'opened', 0)} | clicked={getattr(metrics, 'clicked', 0)}"
+            )
+            self.pilot_health_label.setText(
+                f"Health: {getattr(snapshot, 'health', '')} | Remote campaign: {getattr(snapshot, 'remote_campaign_status', '')} | Last refresh: {getattr(snapshot, 'last_checked_at', '')}"
+            )
+        self._update_pilot_buttons()
+
+    def show_pilot_preflight(self, result: object) -> None:
+        checks = getattr(result, "checks", ()) or ()
+        text = "\n".join([f"[{'PASS' if item.passed else 'FAIL'}] {item.name} — {item.message}" for item in checks])
+        self.detail.setPlainText(text or getattr(result, "message", ""))
+
+    def show_pilot_activation(self, result: object) -> None:
+        self.detail.setPlainText(getattr(result, "message", ""))
+
+    def show_pilot_pause(self, result: object) -> None:
+        self.detail.setPlainText(getattr(result, "message", ""))
+
+    def _apply_pilot_recipients(self, recipients: object) -> None:
+        selected_ids = {item.data(0) for item in self.pilot_recipient_list.selectedItems()}
+        self.pilot_recipient_list.clear()
+        for recipient in recipients or ():
+            item = QListWidgetItem(f"{getattr(recipient, 'email', '')} ({getattr(recipient, 'prospect_id', '')})")
+            item.setData(0, getattr(recipient, "prospect_id", ""))
+            self.pilot_recipient_list.addItem(item)
+            if item.data(0) in selected_ids:
+                item.setSelected(True)
+
+    def _selected_pilot_prospect_ids(self) -> list[str]:
+        selected = [str(item.data(0) or "") for item in self.pilot_recipient_list.selectedItems()]
+        if selected:
+            return selected
+        rows = [row for row in self._rows if str(row.get("status") or "").strip().upper() in {"READY", "WARNING"}]
+        return [str(row.get("prospect_id") or "") for row in rows[:5] if str(row.get("prospect_id") or "").strip()]
+
+    def _selected_pilot_emails(self) -> list[str]:
+        selected = []
+        selected_ids = set(self._selected_pilot_prospect_ids())
+        for row in self._rows:
+            if str(row.get("prospect_id") or "") in selected_ids:
+                selected.append(str(row.get("email") or ""))
+        return selected
+
+    def _current_pilot_run(self):
+        for run in self._pilot_runs:
+            definition = getattr(run, "definition", None)
+            if definition is not None and str(getattr(definition, "pilot_id", "") or "") == self._current_pilot_id:
+                return run
+        return None
+
+    def _on_create_pilot(self) -> None:
+        if self._controller is None:
+            return
+        campaign_id = str(self.campaign_combo.currentData() or "")
+        campaign_name = self.campaign_combo.currentText().split(" (")[0].strip()
+        if not campaign_id:
+            self.show_status("Select a Smartlead campaign first.")
+            return
+        selected_ids = self._selected_pilot_prospect_ids()
+        selected_emails = self._selected_pilot_emails()
+        if hasattr(self._controller, "create_pilot"):
+            self._controller.create_pilot(
+                campaign_id=campaign_id,
+                campaign_name=campaign_name,
+                source_package_id=self._package_id(),
+                source_handoff_path=self._handoff_directory,
+                selected_prospect_ids=selected_ids,
+                selected_emails=selected_emails,
+            )
+
+    def _on_preflight_pilot(self) -> None:
+        if self._controller is None or not self._current_pilot_id:
+            return
+        if hasattr(self._controller, "preflight_pilot"):
+            self._controller.preflight_pilot(self._current_pilot_id)
+
+    def _on_dry_run_pilot(self) -> None:
+        if self._controller is None or not self._current_pilot_id:
+            return
+        if hasattr(self._controller, "dry_run_pilot"):
+            self._controller.dry_run_pilot(self._current_pilot_id)
+
+    def _on_activate_pilot(self) -> None:
+        if self._controller is None or not self._current_pilot_id:
+            return
+        run = self._current_pilot_run()
+        definition = getattr(run, "definition", None)
+        if definition is None:
+            return
+        campaign_name = getattr(definition, "campaign_name", "")
+        recipient_count = len(getattr(definition, "recipients", ()))
+        campaign_id = getattr(definition, "campaign_id", "")
+        message = "\n".join(
+            [
+                "PILOT CAMPAIGN",
+                "",
+                f"Campaign:\n{campaign_name}",
+                "",
+                f"Recipients:\n{recipient_count}",
+                "",
+                f"Remote Campaign:\n{campaign_id}",
+                "",
+                "Sequence:\nReady",
+                "",
+                "Assets:\nReady",
+                "",
+                "Reconciliation:\nMatched",
+                "",
+                "WARNING:",
+                "",
+                "Activating this campaign may cause Smartlead to begin sending according to its configured campaign schedule and settings.",
+                "",
+                "Emergency control:",
+                "Pause Campaign",
+            ]
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("Activate Pilot")
+        box.setText(message)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        activate = box.addButton("Activate Pilot", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if box.clickedButton() is activate and hasattr(self._controller, "activate_pilot"):
+            self._controller.activate_pilot(self._current_pilot_id, confirmed=True)
+
+    def _on_refresh_pilot(self) -> None:
+        if self._controller is None or not self._current_pilot_id:
+            return
+        if hasattr(self._controller, "refresh_pilot_status"):
+            self._controller.refresh_pilot_status(self._current_pilot_id)
+
+    def _on_pause_pilot(self) -> None:
+        if self._controller is None or not self._current_pilot_id:
+            return
+        run = self._current_pilot_run()
+        definition = getattr(run, "definition", None)
+        if definition is None:
+            return
+        campaign_name = getattr(definition, "campaign_name", "")
+        box = QMessageBox(self)
+        box.setWindowTitle("Pause Pilot Campaign")
+        box.setText(f'Pause Smartlead campaign "{campaign_name}"?\n\nThis temporarily stops sending according to Smartlead campaign behavior.')
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        pause = box.addButton("Pause Campaign", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if box.clickedButton() is pause and hasattr(self._controller, "pause_pilot"):
+            self._controller.pause_pilot(self._current_pilot_id, confirmed=True)
+
+    def _on_complete_pilot(self) -> None:
+        if self._controller is None or not self._current_pilot_id:
+            return
+        if hasattr(self._controller, "mark_pilot_review_complete"):
+            self._controller.mark_pilot_review_complete(self._current_pilot_id)
+
+    def _update_pilot_buttons(self) -> None:
+        has_pilot = bool(self._current_pilot_id)
+        run = self._current_pilot_run()
+        definition = getattr(run, "definition", None)
+        status = str(getattr(definition, "status", "") or "")
+        self.preflight_pilot_button.setEnabled(has_pilot)
+        self.dry_run_pilot_button.setEnabled(has_pilot)
+        self.activate_pilot_button.setEnabled(has_pilot and status == "READY")
+        self.refresh_pilot_button.setEnabled(has_pilot)
+        self.pause_pilot_button.setEnabled(has_pilot and status == "ACTIVE")
+        self.complete_pilot_button.setEnabled(has_pilot and status in {"ACTIVE", "PAUSED", "ATTENTION_REQUIRED"})

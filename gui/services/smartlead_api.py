@@ -153,7 +153,16 @@ class SmartleadApiClient:
         if isinstance(payload, dict):
             leads = payload.get("data") or payload.get("leads") or payload.get("campaign_leads") or []
             return [item for item in leads if isinstance(item, dict)]
-        raise SmartleadApiError("MALFORMED_RESPONSE", "Malformed Smartlead response.")
+        return []
+
+    def get_campaign_leads_page(self, campaign_id: str, *, page: int = 1, limit: int = 100) -> list[dict[str, Any]]:
+        payload = self._request_json("GET", f"/campaigns/{campaign_id}/leads", query_params={"page": int(page), "limit": int(limit)})
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            leads = payload.get("data") or payload.get("leads") or payload.get("campaign_leads") or []
+            return [item for item in leads if isinstance(item, dict)]
+        return []
 
     def get_campaign_sequences(self, campaign_id: str) -> list[dict[str, Any]]:
         payload = self._request_json("GET", f"/campaigns/{campaign_id}/sequences")
@@ -161,15 +170,6 @@ class SmartleadApiClient:
             return [item for item in payload if isinstance(item, dict)]
         if isinstance(payload, dict):
             data = payload.get("data") or payload.get("sequences") or []
-            return [item for item in data if isinstance(item, dict)]
-        return []
-
-    def get_campaign_email_accounts(self, campaign_id: str) -> list[dict[str, Any]]:
-        payload = self._request_json("GET", f"/campaigns/{campaign_id}/email-accounts")
-        if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-        if isinstance(payload, dict):
-            data = payload.get("data") or payload.get("email_accounts") or []
             return [item for item in data if isinstance(item, dict)]
         return []
 
@@ -204,6 +204,21 @@ class SmartleadApiClient:
             f"/campaigns/{campaign_id}/leads/{lead_id}",
             json_body={"custom_fields": dict(custom_fields or {})},
         )
+
+    def get_campaign_analytics(self, campaign_id: str) -> dict[str, Any]:
+        payload = self._request_json("GET", f"/campaigns/{campaign_id}/analytics")
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            return dict(payload.get("data") or {})
+        return dict(payload or {}) if isinstance(payload, dict) else {}
+
+    def get_campaign_lead_statistics(self, campaign_id: str) -> list[dict[str, Any]]:
+        payload = self._request_json("GET", f"/campaigns/{campaign_id}/leads/statistics")
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            rows = payload.get("data") or payload.get("leads") or payload.get("statistics") or []
+            return [item for item in rows if isinstance(item, dict)]
+        return []
 
     def add_sequence(self, campaign_id: str, payload: dict[str, Any]) -> Any:
         """Create a campaign sequence. Callers gate this behind explicit confirmation."""
@@ -240,17 +255,31 @@ class SmartleadApiClient:
             json_body={"status": "ACTIVE"},
         )
 
+    def pause_campaign(self, campaign_id: str) -> Any:
+        """Intent-based Smartlead pause seam.
+
+        Smartlead pilot safety uses PAUSE as the reversible emergency control.
+        STOP is intentionally not exposed here.
+        """
+        return self._request_json(
+            "PATCH",
+            f"/campaigns/{campaign_id}/status",
+            json_body={"status": "PAUSED"},
+        )
+
     def build_request_url(self, path: str) -> str:
         base = self._settings.base_url.rstrip("/")
         suffix = path if path.startswith("/") else f"/{path}"
         return f"{base}{suffix}"
 
-    def _request_json(self, method: str, path: str, json_body: Any = None) -> Any:
+    def _request_json(self, method: str, path: str, json_body: Any = None, query_params: dict[str, Any] | None = None) -> Any:
         api_key = self._settings.resolve_api_key()
         if not api_key:
             raise SmartleadApiError("NOT_CONFIGURED", "Smartlead API key is not configured.")
         url = self.build_request_url(path)
         params = {"api_key": api_key}
+        if query_params:
+            params.update({key: value for key, value in query_params.items() if value is not None})
         last_error: SmartleadApiError | None = None
         for attempt in range(self._settings.max_retries + 1):
             try:

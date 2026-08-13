@@ -173,3 +173,45 @@ def test_start_campaign_intent_is_exposed_not_raw_status_update(monkeypatch):
     assert hasattr(client, "start_campaign")
     assert not hasattr(client, "activate_campaign")
     assert not hasattr(client, "update_campaign_status")
+
+
+def test_pause_campaign_intent_endpoint(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"success": True})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    client.pause_campaign("10")
+    call = transport.calls[0]
+    assert call["method"].upper() == "PATCH"
+    assert call["url"].endswith("/campaigns/10/status")
+    assert call["json"] == {"status": "PAUSED"}
+
+
+def test_pause_campaign_exposes_intent_not_stop(monkeypatch):
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=FakeTransport([]), sleeper=lambda _: None)
+    assert hasattr(client, "pause_campaign")
+    assert not hasattr(client, "stop_campaign")
+
+
+def test_campaign_analytics_endpoint(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"data": {"sent": 2, "replied": 1}})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    data = client.get_campaign_analytics("10")
+    assert data["sent"] == 2
+    assert transport.calls[0]["method"].upper() == "GET"
+    assert transport.calls[0]["url"].endswith("/campaigns/10/analytics")
+
+
+def test_campaign_lead_statistics_endpoint(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"data": [{"lead_id": "id1", "email": "a@example.com", "replied": True}]})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    rows = client.get_campaign_lead_statistics("10")
+    assert rows[0]["lead_id"] == "id1"
+    assert transport.calls[0]["url"].endswith("/campaigns/10/leads/statistics")
+
+
+def test_campaign_leads_page_endpoint(monkeypatch):
+    transport = FakeTransport([FakeResponse(payload={"data": [{"id": "id1", "email": "a@example.com"}]})])
+    client = SmartleadApiClient(settings=_settings(monkeypatch), transport=transport, sleeper=lambda _: None)
+    rows = client.get_campaign_leads_page("10", page=2, limit=25)
+    assert rows[0]["id"] == "id1"
+    assert transport.calls[0]["params"]["page"] == 2
+    assert transport.calls[0]["params"]["limit"] == 25
