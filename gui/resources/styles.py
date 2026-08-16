@@ -287,6 +287,16 @@ QStatusBar QLabel {
     background: transparent;
 }
 
+#workflowBar {
+    background-color: #232338;
+    border: 1px solid #3a3a5c;
+    border-radius: 8px;
+}
+#workflowBar QPushButton {
+    text-align: left;
+    font-weight: 600;
+}
+
 /* Splitter */
 QSplitter::handle {
     background-color: #3a3a5c;
@@ -348,9 +358,6 @@ QSplitter::handle {
 #projectMeta, #conceptMeta, #artifactMeta, #historyRow {
     color: #a0a0b8;
     font-size: 12px;
-}
-#projectMeta {
-    word-wrap: true;
 }
 #conceptBadge {
     color: #7c5cfc;

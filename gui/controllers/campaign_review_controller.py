@@ -8,8 +8,10 @@ import sys
 
 from PySide6.QtCore import QObject, Signal
 
+from gui.models.campaign_package import CampaignPackageResult
 from gui.services.campaign_review import CampaignReviewService
 from gui.services.smartlead_handoff import SmartleadHandoffService
+from gui.services.workflow_presentation import package_matches_scope
 
 
 class CampaignReviewController(QObject):
@@ -28,9 +30,14 @@ class CampaignReviewController(QObject):
         self._selected_ids: list[str] = []
         self._scope_ids: list[str] | None = None
         self._filter = "ALL"
+        self._last_package_result: CampaignPackageResult | None = None
+        self._last_handoff_result = None
 
     def set_scope(self, prospect_ids: list[str] | None) -> None:
-        self._scope_ids = [prospect_id for prospect_id in (prospect_ids or []) if str(prospect_id or "").strip()] or None
+        next_scope = [prospect_id for prospect_id in (prospect_ids or []) if str(prospect_id or "").strip()] or None
+        if next_scope != self._scope_ids:
+            self._last_package_result = None
+        self._scope_ids = next_scope
         self.refresh()
 
     def set_filter(self, filter_name: str) -> None:
@@ -131,14 +138,26 @@ class CampaignReviewController(QObject):
     def build_approved_package(self, destination: str, campaign_name: str | None = None) -> object:
         result = self._service.build_approved_package(self._scope_ids, destination, campaign_name=campaign_name)
         if getattr(result, "success", False):
+            self._last_package_result = result
             self.status_message.emit(result.message)
         else:
+            self._last_package_result = None
             self.error_message.emit(result.message)
         self.refresh()
         return result
 
+    def resolve_preferred_package_directory(self) -> str:
+        result = self._last_package_result
+        if result is None or not getattr(result, "success", False):
+            return ""
+        package_directory = str(getattr(result, "package_directory", "") or "")
+        if not package_directory:
+            return ""
+        return package_directory if package_matches_scope(package_directory, self._scope_ids) else ""
+
     def prepare_smartlead_handoff(self, package_directory: str) -> object:
         result = self._handoff_service.prepare_handoff(package_directory)
+        self._last_handoff_result = result
         if getattr(result, "rows", ()):
             self.smartlead_handoff_ready.emit(result)
         if getattr(result, "success", False):
@@ -149,6 +168,10 @@ class CampaignReviewController(QObject):
             else:
                 self.error_message.emit(result.message)
         return result
+
+    @property
+    def last_handoff_result(self) -> object | None:
+        return self._last_handoff_result
 
     def _row_to_dict(self, row: object) -> dict:
         return {

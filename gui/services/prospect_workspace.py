@@ -195,6 +195,7 @@ class ProspectWorkspaceService:
             if prospect.is_ready_for_research()
             else "IMPORTED"
         )
+        self.save()
         return prospect
 
     def update_prospect(self, prospect_id: str, **fields) -> Prospect:

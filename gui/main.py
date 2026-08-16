@@ -18,13 +18,29 @@ from gui.controllers.campaign_review_controller import CampaignReviewController
 from gui.controllers.inventory_controller import InventoryController
 from gui.controllers.project_controller import ProjectWorkspaceController
 from gui.controllers.prospect_controller import ProspectController
+from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
 from gui.models.campaign_review_store import CampaignReviewStore
+from gui.models.hosted_asset_store import HostedAssetStore
 from gui.models.project_store import ProjectStore
 from gui.models.prospect_generation_store import ProspectGenerationStore
+from gui.models.smartlead_activation_store import SmartleadActivationStore
+from gui.models.smartlead_connection import SmartleadConnectionSettings
+from gui.models.smartlead_pilot_store import SmartleadPilotStore
+from gui.models.smartlead_publication_store import SmartleadPublicationStore
+from gui.models.smartlead_sequence import SequenceChangeStore
+from gui.services.asset_hosting import CloudinaryAssetProvider, HostingConnectionSettings
 from gui.services.campaign_export import CampaignExportService
 from gui.services.campaign_package import CampaignPackageService
 from gui.services.campaign_review import CampaignReviewService
+from gui.services.hosted_mockups import AssetHostingService
 from gui.services.prospect_generation import ProspectGenerationService
+from gui.services.smartlead_activation import SmartleadActivationService
+from gui.services.smartlead_api import SmartleadApiClient
+from gui.services.smartlead_handoff import SmartleadHandoffService
+from gui.services.smartlead_pilot import SmartleadPilotService
+from gui.services.smartlead_publish import SmartleadPublishService
+from gui.services.smartlead_reconciliation import SmartleadReconciliationService
+from gui.services.smartlead_sequence_readiness import SmartleadSequenceReadinessService
 from gui.main_window import MainWindow
 from gui.resources import APP_VERSION
 from gui.resources.styles import APP_STYLESHEET
@@ -87,10 +103,57 @@ def main() -> None:
         package_service=package_service,
     )
     review_controller = CampaignReviewController(service=review_service)
+    api_client = SmartleadApiClient(settings=SmartleadConnectionSettings())
+    publication_store = SmartleadPublicationStore()
+    hosted_asset_store = HostedAssetStore()
+    hosting_service = AssetHostingService(
+        provider=CloudinaryAssetProvider(settings=HostingConnectionSettings()),
+        asset_store=hosted_asset_store,
+    )
+    publish_service = SmartleadPublishService(
+        api_client=api_client,
+        receipt_store=publication_store,
+        hosted_asset_store=hosted_asset_store,
+    )
+    sequence_service = SmartleadSequenceReadinessService(
+        api_client=api_client,
+        change_store=SequenceChangeStore(),
+    )
+    reconciliation_service = SmartleadReconciliationService(
+        api_client=api_client,
+        publication_store=publication_store,
+        hosted_asset_store=hosted_asset_store,
+        sequence_service=sequence_service,
+    )
+    activation_service = SmartleadActivationService(
+        api_client=api_client,
+        reconciliation_service=reconciliation_service,
+        activation_store=SmartleadActivationStore(),
+        sequence_service=sequence_service,
+    )
+    pilot_service = SmartleadPilotService(
+        pilot_store=SmartleadPilotStore(),
+        review_service=review_service,
+        handoff_service=SmartleadHandoffService(),
+        reconciliation_service=reconciliation_service,
+        activation_service=activation_service,
+        api_client=api_client,
+        sequence_service=sequence_service,
+    )
+    smartlead_controller = SmartleadHandoffController(
+        service=SmartleadHandoffService(),
+        publish_service=publish_service,
+        hosting_service=hosting_service,
+        sequence_service=sequence_service,
+        reconciliation_service=reconciliation_service,
+        activation_service=activation_service,
+        pilot_service=pilot_service,
+    )
     window = MainWindow(
         controller,
         batch_controller,
         review_controller,
+        smartlead_controller,
         workspace_controller,
         inventory_controller,
         prospect_controller,

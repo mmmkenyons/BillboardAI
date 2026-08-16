@@ -9,10 +9,14 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QCheckBox,
     QComboBox,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -28,6 +32,7 @@ from gui.models.smartlead_publication import (
     SMARTLEAD_TARGET_MODE_EXISTING,
     SmartleadPublishTarget,
 )
+from gui.services.workflow_presentation import format_blocker, format_status
 
 
 class SmartleadHandoffPage(QWidget):
@@ -43,20 +48,39 @@ class SmartleadHandoffPage(QWidget):
         self._pilot_runs: list[object] = []
         self._current_pilot_id: str = ""
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Smartlead Preflight", self))
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(self.scroll_area)
+
+        content = QWidget(self.scroll_area)
+        self.scroll_area.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(14)
+
+        preflight_box = self._section_box("Smartlead Preflight", content)
+        preflight_layout = self._section_layout(preflight_box)
 
         connection_row = QHBoxLayout()
+        connection_row.setSpacing(8)
         self.api_status_label = QLabel("Smartlead API key: Not configured", self)
+        self.api_status_label.setWordWrap(True)
         self.test_connection_button = QPushButton("Test Connection", self)
         self.refresh_campaigns_button = QPushButton("Refresh Campaigns", self)
         connection_row.addWidget(self.api_status_label)
         connection_row.addStretch(1)
         connection_row.addWidget(self.test_connection_button)
         connection_row.addWidget(self.refresh_campaigns_button)
-        layout.addLayout(connection_row)
+        preflight_layout.addLayout(connection_row)
 
-        publish_row = QHBoxLayout()
+        publish_grid = QGridLayout()
+        publish_grid.setHorizontalSpacing(8)
+        publish_grid.setVerticalSpacing(8)
         self.target_mode_combo = QComboBox(self)
         self.target_mode_combo.addItems(["Existing Campaign", "Create Draft Campaign"])
         self.campaign_combo = QComboBox(self)
@@ -65,15 +89,16 @@ class SmartleadHandoffPage(QWidget):
         self.live_checkbox = QCheckBox("Enable live Smartlead writes", self)
         self.live_checkbox.setChecked(False)
         self.publish_button = QPushButton("Upload Approved Leads", self)
-        publish_row.addWidget(QLabel("Target:", self))
-        publish_row.addWidget(self.target_mode_combo)
-        publish_row.addWidget(self.campaign_combo)
-        publish_row.addWidget(self.create_name_edit)
-        publish_row.addWidget(self.live_checkbox)
-        publish_row.addWidget(self.publish_button)
-        layout.addLayout(publish_row)
+        publish_grid.addWidget(QLabel("Target:", self), 0, 0)
+        publish_grid.addWidget(self.target_mode_combo, 0, 1)
+        publish_grid.addWidget(self.campaign_combo, 0, 2)
+        publish_grid.addWidget(self.create_name_edit, 1, 1, 1, 2)
+        publish_grid.addWidget(self.live_checkbox, 2, 1)
+        publish_grid.addWidget(self.publish_button, 2, 2)
+        preflight_layout.addLayout(publish_grid)
 
         top = QHBoxLayout()
+        top.setSpacing(8)
         self.filter_combo = QComboBox(self)
         self.filter_combo.addItems(["All", "Ready", "Warning", "Blocked", "Conflict"])
         self.filter_combo.currentTextChanged.connect(self._apply_filter)
@@ -81,27 +106,27 @@ class SmartleadHandoffPage(QWidget):
         top.addWidget(self.filter_combo)
         top.addStretch(1)
         self.summary_label = QLabel("No preflight run yet.", self)
+        self.summary_label.setWordWrap(True)
         top.addWidget(self.summary_label)
-        layout.addLayout(top)
+        preflight_layout.addLayout(top)
 
         self.table = QTableWidget(0, 4, self)
         self.table.setHorizontalHeaderLabels(["Prospect", "Company", "Email", "Status"])
         self.table.itemSelectionChanged.connect(self._show_selected)
-        layout.addWidget(self.table)
+        preflight_layout.addWidget(self.table)
 
         self.detail = QPlainTextEdit(self)
         self.detail.setReadOnly(True)
-        layout.addWidget(self.detail)
+        preflight_layout.addWidget(self.detail)
+        layout.addWidget(preflight_box)
 
-        # ------------------------------------------------------------------
-        # Hosted Mockups (Sprint 5R)
-        # ------------------------------------------------------------------
-        hosting_title = QLabel("Hosted Mockups", self)
-        hosting_title.setStyleSheet("font-weight: bold;")
-        layout.addWidget(hosting_title)
+        hosting_box = self._section_box("Hosted Mockups", content)
+        hosting_layout = self._section_layout(hosting_box)
 
         hosting_row = QHBoxLayout()
+        hosting_row.setSpacing(8)
         self.hosting_status_label = QLabel("Hosting: Not configured", self)
+        self.hosting_status_label.setWordWrap(True)
         self.test_hosting_connection_button = QPushButton("Test Hosting Connection", self)
         self.hosting_dry_run_button = QPushButton("Hosting Dry Run", self)
         self.hosting_live_checkbox = QCheckBox("Enable live hosting", self)
@@ -113,19 +138,18 @@ class SmartleadHandoffPage(QWidget):
         hosting_row.addWidget(self.hosting_dry_run_button)
         hosting_row.addWidget(self.hosting_live_checkbox)
         hosting_row.addWidget(self.host_mockups_button)
-        layout.addLayout(hosting_row)
+        hosting_layout.addLayout(hosting_row)
         self.hosting_summary_label = QLabel("No hosting run yet.", self)
-        layout.addWidget(self.hosting_summary_label)
-
-        # ------------------------------------------------------------------
-        # Sequence Readiness (Sprint 5R)
-        # ------------------------------------------------------------------
-        sequence_title = QLabel("Sequence Readiness", self)
-        sequence_title.setStyleSheet("font-weight: bold;")
-        layout.addWidget(sequence_title)
-
-        sequence_row = QHBoxLayout()
+        self.hosting_summary_label.setWordWrap(True)
+        hosting_layout.addWidget(self.hosting_summary_label)
+        layout.addWidget(hosting_box)
+        sequence_box = self._section_box("Sequence Readiness", content)
+        sequence_layout = self._section_layout(sequence_box)
+        sequence_row = QGridLayout()
+        sequence_row.setHorizontalSpacing(8)
+        sequence_row.setVerticalSpacing(8)
         self.readiness_label = QLabel("No readiness audit yet.", self)
+        self.readiness_label.setWordWrap(True)
         self.refresh_readiness_button = QPushButton("Refresh Readiness", self)
         self.prepare_live_checkbox = QCheckBox("Enable live sequence write", self)
         self.prepare_live_checkbox.setChecked(False)
@@ -133,77 +157,94 @@ class SmartleadHandoffPage(QWidget):
         self.sync_live_checkbox = QCheckBox("Sync URLs live", self)
         self.sync_live_checkbox.setChecked(False)
         self.sync_urls_button = QPushButton("Sync Hosted URLs to Leads", self)
-        sequence_row.addWidget(self.readiness_label)
-        sequence_row.addStretch(1)
-        sequence_row.addWidget(self.refresh_readiness_button)
-        sequence_row.addWidget(self.prepare_live_checkbox)
-        sequence_row.addWidget(self.prepare_sequence_button)
-        sequence_row.addWidget(self.sync_live_checkbox)
-        sequence_row.addWidget(self.sync_urls_button)
-        layout.addLayout(sequence_row)
+        sequence_row.addWidget(self.readiness_label, 0, 0, 1, 3)
+        sequence_row.addWidget(self.refresh_readiness_button, 1, 0)
+        sequence_row.addWidget(self.prepare_live_checkbox, 1, 1)
+        sequence_row.addWidget(self.prepare_sequence_button, 1, 2)
+        sequence_row.addWidget(self.sync_live_checkbox, 2, 1)
+        sequence_row.addWidget(self.sync_urls_button, 2, 2)
+        sequence_layout.addLayout(sequence_row)
+        layout.addWidget(sequence_box)
 
-        # ------------------------------------------------------------------
-        # Launch Control / Publication Status (Sprint 5S)
-        # ------------------------------------------------------------------
-        launch_title = QLabel("Launch Control / Publication Status", self)
-        launch_title.setStyleSheet("font-weight: bold;")
-        layout.addWidget(launch_title)
-
-        launch_row = QHBoxLayout()
+        launch_box = self._section_box("Launch Control / Publication Status", content)
+        launch_layout = self._section_layout(launch_box)
+        launch_row = QGridLayout()
         self.launch_status_label = QLabel("No launch-control audit yet.", self)
+        self.launch_status_label.setWordWrap(True)
         self.refresh_status_button = QPushButton("Refresh Status", self)
         self.activation_dry_run_button = QPushButton("Activation Dry Run", self)
         self.activate_campaign_button = QPushButton("Activate Campaign", self)
         self.activate_campaign_button.setEnabled(False)
         self.resume_publication_button = QPushButton("Resume Publication", self)
-        launch_row.addWidget(self.launch_status_label)
-        launch_row.addStretch(1)
-        launch_row.addWidget(self.refresh_status_button)
-        launch_row.addWidget(self.activation_dry_run_button)
-        launch_row.addWidget(self.activate_campaign_button)
-        launch_row.addWidget(self.resume_publication_button)
-        layout.addLayout(launch_row)
+        launch_row.addWidget(self.launch_status_label, 0, 0, 1, 4)
+        launch_row.addWidget(self.refresh_status_button, 1, 0)
+        launch_row.addWidget(self.activation_dry_run_button, 1, 1)
+        launch_row.addWidget(self.activate_campaign_button, 1, 2)
+        launch_row.addWidget(self.resume_publication_button, 1, 3)
+        launch_layout.addLayout(launch_row)
 
         self.reconciliation_label = QLabel("Reconciliation: Not checked", self)
-        layout.addWidget(self.reconciliation_label)
+        self.reconciliation_label.setWordWrap(True)
+        launch_layout.addWidget(self.reconciliation_label)
+        layout.addWidget(launch_box)
 
-        pilot_title = QLabel("Pilot Launch Safety Harness", self)
-        pilot_title.setStyleSheet("font-weight: bold;")
-        layout.addWidget(pilot_title)
+        pilot_box = self._section_box("Pilot Launch Safety Harness", content)
+        pilot_layout = self._section_layout(pilot_box)
 
-        pilot_info_row = QHBoxLayout()
-        self.pilot_status_label = QLabel("No pilot selected.", self)
-        self.pilot_notice_label = QLabel("Pilot size cap: 5 default / 10 maximum.", self)
-        pilot_info_row.addWidget(self.pilot_status_label)
-        pilot_info_row.addStretch(1)
-        pilot_info_row.addWidget(self.pilot_notice_label)
-        layout.addLayout(pilot_info_row)
-
-        self.pilot_recipient_list = QListWidget(self)
-        self.pilot_recipient_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        layout.addWidget(self.pilot_recipient_list)
-
-        pilot_actions = QHBoxLayout()
+        pilot_row = QGridLayout()
+        pilot_row.setHorizontalSpacing(8)
+        pilot_row.setVerticalSpacing(8)
+        self.pilot_list = QComboBox(self)
+        self.refresh_pilots_button = QPushButton("Refresh Pilots", self)
         self.create_pilot_button = QPushButton("Create Pilot", self)
-        self.preflight_pilot_button = QPushButton("Run Pilot Preflight", self)
-        self.dry_run_pilot_button = QPushButton("Activation Dry Run", self)
+        self.preflight_pilot_button = QPushButton("Pilot Preflight", self)
+        self.dry_run_pilot_button = QPushButton("Pilot Activation Dry Run", self)
         self.activate_pilot_button = QPushButton("Activate Pilot", self)
         self.refresh_pilot_button = QPushButton("Refresh Pilot Status", self)
         self.pause_pilot_button = QPushButton("Pause Pilot Campaign", self)
         self.complete_pilot_button = QPushButton("Mark Pilot Review Complete", self)
-        pilot_actions.addWidget(self.create_pilot_button)
-        pilot_actions.addWidget(self.preflight_pilot_button)
-        pilot_actions.addWidget(self.dry_run_pilot_button)
-        pilot_actions.addWidget(self.activate_pilot_button)
-        pilot_actions.addWidget(self.refresh_pilot_button)
-        pilot_actions.addWidget(self.pause_pilot_button)
-        pilot_actions.addWidget(self.complete_pilot_button)
-        layout.addLayout(pilot_actions)
+        pilot_row.addWidget(QLabel("Pilot:", self), 0, 0)
+        pilot_row.addWidget(self.pilot_list, 0, 1, 1, 3)
+        pilot_row.addWidget(self.refresh_pilots_button, 0, 4)
+        pilot_row.addWidget(self.create_pilot_button, 1, 1)
+        pilot_row.addWidget(self.preflight_pilot_button, 1, 2)
+        pilot_row.addWidget(self.dry_run_pilot_button, 1, 3)
+        pilot_row.addWidget(self.activate_pilot_button, 1, 4)
+        pilot_row.addWidget(self.refresh_pilot_button, 2, 1)
+        pilot_row.addWidget(self.pause_pilot_button, 2, 2)
+        pilot_row.addWidget(self.complete_pilot_button, 2, 3, 1, 2)
+        pilot_layout.addLayout(pilot_row)
+
+        self.pilot_status_label = QLabel("No pilot selected.", self)
+        self.pilot_status_label.setWordWrap(True)
+        pilot_layout.addWidget(self.pilot_status_label)
+
+        self.pilot_summary = QPlainTextEdit(self)
+        self.pilot_summary.setReadOnly(True)
+        pilot_layout.addWidget(self.pilot_summary)
+
+        self.pilot_recipient_list = QListWidget(self)
+        pilot_layout.addWidget(self.pilot_recipient_list)
 
         self.pilot_metrics_label = QLabel("Pilot metrics: Not refreshed", self)
         self.pilot_health_label = QLabel("Health: Unknown", self)
-        layout.addWidget(self.pilot_metrics_label)
-        layout.addWidget(self.pilot_health_label)
+        self.pilot_metrics_label.setWordWrap(True)
+        self.pilot_health_label.setWordWrap(True)
+        pilot_layout.addWidget(self.pilot_metrics_label)
+        pilot_layout.addWidget(self.pilot_health_label)
+        layout.addWidget(pilot_box)
+        layout.addStretch(1)
+
+    def _section_box(self, title: str, parent: QWidget) -> QGroupBox:
+        box = QGroupBox(title, parent)
+        box.setObjectName("cardFrame")
+        return box
+
+    def _section_layout(self, box: QGroupBox) -> QVBoxLayout:
+        section = QVBoxLayout(box)
+        section.setContentsMargins(12, 12, 12, 12)
+        section.setSpacing(10)
+        return section
 
     def set_controller(self, controller: object) -> None:
         if controller is self._controller:
@@ -278,12 +319,14 @@ class SmartleadHandoffPage(QWidget):
         if self._handoff_directory:
             candidate = os.path.dirname(self._handoff_directory)
             self._package_directory = candidate if os.path.isfile(os.path.join(candidate, "manifest.json")) else self._handoff_directory
+        total = getattr(summary, "total_approved_rows", 0)
+        if not total:
+            self.summary_label.setText("No campaign package selected. Build an approved package from Campaign Review, or choose an existing package.")
+            return
         self.summary_label.setText(
-            f"Approved: {getattr(summary, 'total_approved_rows', 0)} | "
+            f"Campaign package: {total} approved rows | "
             f"Ready: {getattr(summary, 'ready', 0)} | "
-            f"Warning: {getattr(summary, 'warnings', 0)} | "
-            f"Blocked: {getattr(summary, 'blocked', 0)} | "
-            f"Conflict: {getattr(summary, 'conflicts', 0)}"
+            f"Needs attention: {getattr(summary, 'blocked', 0) + getattr(summary, 'conflicts', 0)}"
         )
 
     def set_rows(self, rows: list[dict]) -> None:
@@ -469,9 +512,9 @@ class SmartleadHandoffPage(QWidget):
         ]
         blockers = list(getattr(result, "blockers", ()) or ())
         if blockers:
-            lines.append("Blockers: " + "; ".join(blockers))
+            lines.append("Cannot continue: " + "; ".join(format_blocker(item) for item in blockers))
         ready = bool(getattr(result, "ready_for_manual_activation", False))
-        lines.append("READY FOR MANUAL ACTIVATION" if ready else "NOT READY (see blockers)")
+        lines.append("Ready for launch review" if ready else "Sequence readiness needs attention")
         self.readiness_label.setText(" | ".join(lines[:3]))
         self.show_status("\n".join(lines))
 
@@ -485,7 +528,7 @@ class SmartleadHandoffPage(QWidget):
 
     def set_reconciliation(self, result: object) -> None:
         text = (
-            f"Reconciliation: {'Matched' if not getattr(result, 'reconciliation_required', False) else 'Attention Required'} | "
+            f"Smartlead status: {'Ready' if not getattr(result, 'reconciliation_required', False) else 'Needs attention'} | "
             f"Matched: {getattr(result, 'matched', 0)} | Local Only: {getattr(result, 'local_only', 0)} | "
             f"Remote Only: {getattr(result, 'remote_only', 0)} | Mismatch: {getattr(result, 'mismatched', 0)} | "
             f"Duplicate Remote: {getattr(result, 'duplicate_remote', 0)}"
@@ -495,9 +538,9 @@ class SmartleadHandoffPage(QWidget):
         reasons = list(getattr(result, "reasons", ()) or ())
         warnings = list(getattr(result, "warnings", ()) or ())
         if reasons:
-            lines.append("Reasons: " + "; ".join(reasons))
+            lines.append("Details: " + "; ".join(format_blocker(reason) for reason in reasons))
         if warnings:
-            lines.append("Warnings: " + "; ".join(warnings))
+            lines.append("Warnings: " + "; ".join(format_status(warning) for warning in warnings))
         self.show_status("\n".join(lines))
 
     def set_launch_readiness(self, result: object) -> None:
@@ -505,17 +548,17 @@ class SmartleadHandoffPage(QWidget):
         text = (
             f"Campaign: {getattr(result, 'campaign_name', '') or getattr(result, 'campaign_id', '')} | "
             f"Publication: {getattr(result, 'published_count', 0)} published / {getattr(result, 'failed_count', 0)} failed / {getattr(result, 'pending_count', 0)} pending | "
-            f"Sequence: {'Ready' if getattr(result, 'sequence_ready', False) else 'Not Ready'} | "
-            f"Assets Missing: {getattr(result, 'missing_asset_count', 0)} | Overall: {getattr(result, 'status', 'NOT_READY')}"
+            f"Sequence: {'Ready' if getattr(result, 'sequence_ready', False) else 'Needs attention'} | "
+            f"Assets Missing: {getattr(result, 'missing_asset_count', 0)} | Overall: {format_status(getattr(result, 'status', 'NOT_READY'))}"
         )
         self.launch_status_label.setText(text)
         lines = [text]
         reasons = list(getattr(result, "reasons", ()) or ())
         warnings = list(getattr(result, "warnings", ()) or ())
         if reasons:
-            lines.append("Reasons: " + "; ".join(reasons))
+            lines.append("Cannot continue: " + "; ".join(format_blocker(reason) for reason in reasons))
         if warnings:
-            lines.append("Warnings: " + "; ".join(warnings))
+            lines.append("Warnings: " + "; ".join(format_status(warning) for warning in warnings))
         self.show_status("\n".join(lines))
         self._update_activation_button_state()
 

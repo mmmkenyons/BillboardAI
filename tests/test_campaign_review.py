@@ -23,6 +23,7 @@ from gui.services.campaign_review import (
     REVIEW_FILTER_NEEDS_REVIEW,
     CampaignReviewService,
 )
+from gui.services.workflow_presentation import format_blocker, format_status
 
 
 def _runtime(tmp_path):
@@ -259,3 +260,53 @@ def test_mockup_preview_safe_when_missing(tmp_path):
     row = service.list_rows([prospect.prospect_id])[0]
     assert row.mockup_path.endswith("mockup.png")
     assert row.technical_status == EXPORT_STATUS_BLOCKED
+
+
+def test_friendly_status_formatting_examples() -> None:
+    assert format_status("NEEDS_REVIEW") == "Needs review"
+    assert "email address" in format_blocker("Missing email").lower()
+
+
+def test_campaign_review_page_package_gating_messages() -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from gui.views.campaign_review_page import CampaignReviewPage
+
+    app = QApplication.instance() or QApplication([])
+    page = CampaignReviewPage()
+    page.set_controller(type("Controller", (), {"refresh": lambda self: None, "rows_changed": type("S", (), {"connect": lambda self, fn: None})(), "selection_changed": type("S", (), {"connect": lambda self, fn: None})(), "summary_changed": type("S", (), {"connect": lambda self, fn: None})(), "status_message": type("S", (), {"connect": lambda self, fn: None})(), "error_message": type("S", (), {"connect": lambda self, fn: None})(), "resolve_preferred_package_directory": lambda self: ""})())
+    summary = type("Summary", (), {"approved_packageable": 0, "total": 0, "approved": 0, "excluded": 0, "needs_review": 0, "technically_blocked": 0})()
+    page.set_summary(summary)
+    assert page.build_package_button.isEnabled() is False
+    assert "Approve at least one campaign-ready prospect" in page.build_package_button.toolTip()
+    page._build_approved_package()
+    assert "Approve at least one campaign-ready prospect" in page.message_label.text()
+    assert app is not None
+
+
+def test_campaign_review_right_pane_scrolls_and_actions_exist() -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from gui.views.campaign_review_page import CampaignReviewPage
+
+    app = QApplication.instance() or QApplication([])
+    page = CampaignReviewPage()
+    page.resize(1250, 800)
+    page.show()
+    app.processEvents()
+
+    assert page.detail_scroll_area.widgetResizable() is True
+    assert page.detail_scroll_area.widget() is page.detail_content
+    assert page.approve_button is not None
+    assert page.exclude_button is not None
+    assert page.needs_review_button is not None
+    assert page.save_note_button is not None
+    assert page.open_project_button is not None
+    assert page.open_mockup_button is not None
+    assert page.open_folder_button is not None
+    assert page.build_package_button is not None
+    assert page.smartlead_button is not None
+    assert page.open_existing_package_button is not None
+    assert page.email_body.minimumHeight() > 0
+    assert page.note_edit.minimumHeight() > 0
+    assert app is not None

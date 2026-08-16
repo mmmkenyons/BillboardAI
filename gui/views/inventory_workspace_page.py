@@ -107,7 +107,8 @@ class InventoryWorkspacePage(QWidget):
     def _build_sidebar(self) -> QFrame:
         side = QFrame(self)
         side.setObjectName("workspaceSidebar")
-        side.setFixedWidth(340)
+        side.setMinimumWidth(300)
+        side.setMaximumWidth(360)
         layout = QVBoxLayout(side)
         layout.setContentsMargins(14, 16, 14, 16)
         layout.setSpacing(10)
@@ -121,8 +122,12 @@ class InventoryWorkspacePage(QWidget):
         layout.addWidget(sub)
 
         # Create buttons.
-        create_row = QHBoxLayout()
+        create_row = QVBoxLayout()
         create_row.setSpacing(6)
+        create_row_top = QHBoxLayout()
+        create_row_top.setSpacing(6)
+        create_row_bottom = QHBoxLayout()
+        create_row_bottom.setSpacing(6)
         self.new_retailer_btn = QPushButton("New Retailer", side)
         self.new_market_btn = QPushButton("New Market", side)
         self.new_location_btn = QPushButton("New Location", side)
@@ -134,10 +139,12 @@ class InventoryWorkspacePage(QWidget):
             self.new_placement_btn,
         ):
             btn.setObjectName("secondaryButton")
-        create_row.addWidget(self.new_retailer_btn)
-        create_row.addWidget(self.new_market_btn)
-        create_row.addWidget(self.new_location_btn)
-        create_row.addWidget(self.new_placement_btn)
+        create_row_top.addWidget(self.new_retailer_btn)
+        create_row_top.addWidget(self.new_market_btn)
+        create_row_bottom.addWidget(self.new_location_btn)
+        create_row_bottom.addWidget(self.new_placement_btn)
+        create_row.addLayout(create_row_top)
+        create_row.addLayout(create_row_bottom)
         layout.addLayout(create_row)
 
         # Create button actions.

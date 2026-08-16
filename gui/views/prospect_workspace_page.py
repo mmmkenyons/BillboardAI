@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QPoint, QRect, QSize, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -34,9 +34,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
+    QScrollArea,
+    QSplitter,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -52,6 +57,7 @@ from gui.models.prospect import (
     WORKFLOW_STATUS_LABELS,
     Prospect,
 )
+from gui.services.workflow_presentation import format_status
 
 if TYPE_CHECKING:
     from gui.controllers.prospect_controller import ProspectController
@@ -83,6 +89,83 @@ _QUEUE_COLUMNS = (
     "project",
     "updated",
 )
+
+
+class _FlowLayout(QLayout):
+    """Minimal responsive flow layout: items wrap to additional lines when the
+    available width is insufficient (Qt does not ship QFlowLayout)."""
+
+    def __init__(self, parent: QWidget | None = None, hspacing: int = 8, vspacing: int = 8) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self._h_spacing = hspacing
+        self._v_spacing = vspacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item: QLayoutItem) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientations:
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        ml = self.contentsMargins().left() + self.contentsMargins().right()
+        mt = self.contentsMargins().top() + self.contentsMargins().bottom()
+        return size + QSize(ml, mt)
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective = rect.adjusted(
+            margins.left(), margins.top(), -margins.right(), -margins.bottom()
+        )
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        for item in self._items:
+            wid = item.widget()
+            if wid is not None and not wid.isVisible():
+                continue
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._h_spacing
+            if next_x - self._h_spacing > effective.right() and line_height > 0:
+                x = effective.x()
+                y = y + line_height + self._v_spacing
+                next_x = x + hint.width() + self._h_spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
 
 
 class _ProspectEditorDialog(QDialog):
@@ -329,8 +412,18 @@ class ProspectWorkspacePage(QWidget):
     def _build_sidebar(self) -> QFrame:
         side = QFrame(self)
         side.setObjectName("workspaceSidebar")
-        side.setFixedWidth(260)
-        layout = QVBoxLayout(side)
+        side.setMinimumWidth(240)
+        side.setMaximumWidth(320)
+        side.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        outer = QVBoxLayout(side)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(side)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
+        content = QWidget(scroll)
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(14, 16, 14, 16)
         layout.setSpacing(10)
 
@@ -440,10 +533,6 @@ class ProspectWorkspacePage(QWidget):
         self.workflow_save_btn.clicked.connect(self._on_save_workflow)
         layout.addWidget(self.workflow_save_btn)
 
-        layout.addSpacing(8)
-
-        layout.addStretch(1)
-
         count_lbl = QLabel("Overview", side)
         count_lbl.setObjectName("projectMeta")
         layout.addWidget(count_lbl)
@@ -452,41 +541,52 @@ class ProspectWorkspacePage(QWidget):
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
 
+        layout.addStretch(1)
+
         return side
 
     def _build_main_area(self) -> QWidget:
         main = QWidget(self)
         layout = QVBoxLayout(main)
         layout.setContentsMargins(8, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
+        main.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        toolbar = QHBoxLayout()
+        self.primary_actions_label = QLabel("Primary workflow", main)
+        self.primary_actions_label.setObjectName("previewHeading")
+        layout.addWidget(self.primary_actions_label)
+
+        toolbar = QVBoxLayout()
         toolbar.setSpacing(8)
+        primary_toolbar = QHBoxLayout()
+        primary_toolbar.setSpacing(8)
         self.search_input = QLineEdit(main)
         self.search_input.setPlaceholderText("Search company / domain...")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self.refresh)
-        toolbar.addWidget(self.search_input, 1)
+        self.search_input.setMinimumWidth(180)
+        primary_toolbar.addWidget(self.search_input, 1)
 
         self.import_button = QPushButton("Import CSV", main)
         self.import_button.setObjectName("primaryButton")
         self.import_button.clicked.connect(self._on_import)
-        toolbar.addWidget(self.import_button)
+        primary_toolbar.addWidget(self.import_button)
 
         self.add_button = QPushButton("Add Prospect", main)
         self.add_button.clicked.connect(self._on_add)
-        toolbar.addWidget(self.add_button)
+        primary_toolbar.addWidget(self.add_button)
 
         self.edit_button = QPushButton("Edit", main)
         self.edit_button.clicked.connect(self._on_edit)
-        toolbar.addWidget(self.edit_button)
+        primary_toolbar.addWidget(self.edit_button)
 
         self.archive_button = QPushButton("Archive", main)
         self.archive_button.clicked.connect(self._on_archive)
-        toolbar.addWidget(self.archive_button)
+        primary_toolbar.addWidget(self.archive_button)
 
+        primary_toolbar.addStretch(1)
+        toolbar.addLayout(primary_toolbar)
         layout.addLayout(toolbar)
-        layout.addLayout(self._build_research_actions(main))
 
         self.table = QTableWidget(main)
         self.table.setColumnCount(len(_COLUMNS))
@@ -504,62 +604,123 @@ class ProspectWorkspacePage(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.verticalHeader().setVisible(False)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        layout.addWidget(self.table, stretch=3)
+        self.table.setMinimumHeight(120)
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        layout.addWidget(self._build_research_panel(main), stretch=2)
-        layout.addWidget(self._build_recommendation_panel(main))
+        content_splitter = QSplitter(Qt.Orientation.Vertical, main)
+        content_splitter.setChildrenCollapsible(False)
+        content_splitter.setHandleWidth(6)
+        content_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        table_container = QWidget(content_splitter)
+        table_layout = QVBoxLayout(table_container)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(0)
+        table_layout.addWidget(self.table)
+
+        lower_splitter = QSplitter(Qt.Orientation.Vertical, content_splitter)
+        lower_splitter.setChildrenCollapsible(False)
+        lower_splitter.setHandleWidth(6)
+        research_panel = self._build_research_panel(main)
+        recommendation_panel = self._build_recommendation_panel(main)
+        lower_splitter.addWidget(research_panel)
+        lower_splitter.addWidget(recommendation_panel)
+        lower_splitter.setStretchFactor(0, 2)
+        lower_splitter.setStretchFactor(1, 1)
+        lower_splitter.setSizes([320, 240])
+
+        lower_container = QWidget(content_splitter)
+        lower_layout = QVBoxLayout(lower_container)
+        lower_layout.setContentsMargins(0, 0, 0, 0)
+        lower_layout.setSpacing(0)
+        self.lower_content_scroll = QScrollArea(lower_container)
+        self.lower_content_scroll.setWidgetResizable(True)
+        self.lower_content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.lower_content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lower_content_scroll.setWidget(lower_splitter)
+        lower_layout.addWidget(self.lower_content_scroll)
+
+        content_splitter.addWidget(table_container)
+        content_splitter.addWidget(lower_container)
+        content_splitter.setStretchFactor(0, 2)
+        content_splitter.setStretchFactor(1, 2)
+        content_splitter.setSizes([280, 400])
+
+        self.main_content_splitter = content_splitter
+        self.research_recommendation_splitter = lower_splitter
+        layout.addWidget(content_splitter, stretch=1)
         return main
 
-    def _build_research_actions(self, parent: QWidget) -> QHBoxLayout:
-        """Row of batch-research actions (queue / run / stop / open project)."""
-        row = QHBoxLayout()
+    def _build_research_actions(self, parent: QWidget) -> QWidget:
+        container = QWidget(parent)
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        row = QVBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
 
-        self.queue_button = QPushButton("Queue Selected", parent)
+        primary_group = QWidget(container)
+        primary = _FlowLayout(primary_group, hspacing=8, vspacing=8)
+
+        self.queue_button = QPushButton("Queue Selected", primary_group)
         self.queue_button.clicked.connect(self._on_queue_selected)
-        row.addWidget(self.queue_button)
+        primary.addWidget(self.queue_button)
 
-        self.queue_all_button = QPushButton("Queue All Ready", parent)
+        self.queue_all_button = QPushButton("Queue All Ready", primary_group)
         self.queue_all_button.clicked.connect(self._on_queue_all)
-        row.addWidget(self.queue_all_button)
+        primary.addWidget(self.queue_all_button)
 
-        row.addWidget(QLabel("Next", parent))
-        self.research_next_spin = QSpinBox(parent)
+        primary.addWidget(QLabel("Next", primary_group))
+        self.research_next_spin = QSpinBox(primary_group)
         self.research_next_spin.setRange(1, 25)
         self.research_next_spin.setValue(1)
-        row.addWidget(self.research_next_spin)
+        self.research_next_spin.setMinimumWidth(72)
+        primary.addWidget(self.research_next_spin)
 
-        self.run_button = QPushButton("Research Next N", parent)
+        self.run_button = QPushButton("Research Next N", primary_group)
         self.run_button.setObjectName("primaryButton")
         self.run_button.clicked.connect(self._on_research_next)
-        row.addWidget(self.run_button)
+        primary.addWidget(self.run_button)
 
-        self.retry_button = QPushButton("Retry Failed", parent)
+        self.review_button = QPushButton("Campaign Review", primary_group)
+        self.review_button.clicked.connect(self._on_open_campaign_review)
+        primary.addWidget(self.review_button)
+        row.addWidget(primary_group)
+
+        secondary_group = QWidget(container)
+        secondary = _FlowLayout(secondary_group, hspacing=8, vspacing=8)
+
+        self.advanced_actions_badge = QLabel("Advanced queue controls", secondary_group)
+        self.advanced_actions_badge.setObjectName("projectMeta")
+        secondary.addWidget(self.advanced_actions_badge)
+
+        self.retry_button = QPushButton("Retry Failed", secondary_group)
         self.retry_button.clicked.connect(self._on_retry_failed)
-        row.addWidget(self.retry_button)
+        secondary.addWidget(self.retry_button)
 
-        self.cancel_button = QPushButton("Cancel Selected", parent)
+        self.cancel_button = QPushButton("Cancel Selected", secondary_group)
         self.cancel_button.clicked.connect(self._on_cancel_selected)
-        row.addWidget(self.cancel_button)
+        secondary.addWidget(self.cancel_button)
 
-        self.stop_button = QPushButton("Stop After Current", parent)
+        self.stop_button = QPushButton("Stop After Current", secondary_group)
         self.stop_button.clicked.connect(self._on_stop_after_current)
-        row.addWidget(self.stop_button)
+        secondary.addWidget(self.stop_button)
 
-        self.open_project_button = QPushButton("Open Project", parent)
+        self.open_project_button = QPushButton("Open Project", secondary_group)
         self.open_project_button.clicked.connect(self._on_open_project)
-        row.addWidget(self.open_project_button)
+        secondary.addWidget(self.open_project_button)
+        row.addWidget(secondary_group)
 
-        return row
+        self.research_actions_container = container
+        return container
 
     def _build_research_panel(self, parent: QWidget) -> QWidget:
         """Research Queue panel: summary counts, active progress, queue table."""
         panel = QFrame(parent)
         panel.setObjectName("workspaceSidebar")
         root = QVBoxLayout(panel)
-        root.setContentsMargins(12, 10, 12, 10)
+        root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(8)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         head = QHBoxLayout()
         title = QLabel("Research Queue", panel)
@@ -582,6 +743,9 @@ class ProspectWorkspacePage(QWidget):
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
+        self.research_actions_container = self._build_research_actions(panel)
+        root.addWidget(self.research_actions_container)
+
         self.queue_table = QTableWidget(panel)
         self.queue_table.setColumnCount(len(_QUEUE_COLUMNS))
         self.queue_table.setHorizontalHeaderLabels(list(_QUEUE_COLUMNS))
@@ -598,9 +762,9 @@ class ProspectWorkspacePage(QWidget):
         self.queue_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
-        self.queue_table.itemSelectionChanged.connect(
-            self._on_queue_selection_changed
-        )
+        self.queue_table.setMinimumHeight(140)
+        self.queue_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.queue_table.itemSelectionChanged.connect(self._on_queue_selection_changed)
         root.addWidget(self.queue_table, stretch=1)
 
         return panel
@@ -611,6 +775,7 @@ class ProspectWorkspacePage(QWidget):
     def _build_recommendation_panel(self, parent: QWidget) -> QFrame:
         panel = QFrame(parent)
         panel.setObjectName("workspaceSidebar")
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
@@ -632,9 +797,11 @@ class ProspectWorkspacePage(QWidget):
         header.addWidget(self.rec_refresh_btn)
         layout.addLayout(header)
 
-        self.rec_content = QVBoxLayout()
+        self.rec_cards_container = QWidget(panel)
+        self.rec_content = QVBoxLayout(self.rec_cards_container)
         self.rec_content.setSpacing(8)
-        layout.addLayout(self.rec_content)
+        self.rec_content.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.rec_cards_container)
 
         self.rec_empty_label = QLabel(
             "Select a researched prospect to see store recommendations.", panel
@@ -642,7 +809,6 @@ class ProspectWorkspacePage(QWidget):
         self.rec_empty_label.setObjectName("emptyState")
         self.rec_empty_label.setWordWrap(True)
         self.rec_content.addWidget(self.rec_empty_label)
-        layout.addStretch(1)
         return panel
 
     def _on_rec_limit_changed(self, *_args) -> None:
@@ -873,8 +1039,8 @@ class ProspectWorkspacePage(QWidget):
                 p.domain or p.website,
                 p.category,
                 _location_text(p),
-                p.status,
-                _prospect_research_label(p),
+                format_status(p.status),
+                format_status(_prospect_research_label(p)),
                 contact_text,
                 "Yes" if p.is_ready_for_research() else "No",
             ]
@@ -887,9 +1053,12 @@ class ProspectWorkspacePage(QWidget):
     def _update_summary(self) -> None:
         total = len(self._controller.list_prospects()) if self._controller else 0
         readable = sum(1 for p in self._prospects if p.is_ready_for_research())
+        if total == 0:
+            self.summary_label.setText("No prospects yet.\nImport a CSV or add your first prospect.")
+            return
         self.summary_label.setText(
             f"{total} total prospects\n"
-            f"{readable} research-ready\n"
+            f"{readable} ready for research\n"
             f"{len(self._prospects)} shown"
         )
 
@@ -902,7 +1071,7 @@ class ProspectWorkspacePage(QWidget):
         self.category_filter.clear()
         self.status_filter.addItem("All Statuses", _STATUS_ALL)
         for status in self._controller.statuses():
-            self.status_filter.addItem(status, status)
+            self.status_filter.addItem(format_status(status), status)
         self.category_filter.addItem("All Categories", _CATEGORY_ALL)
         for category in self._controller.categories():
             self.category_filter.addItem(category, category)
@@ -963,6 +1132,11 @@ class ProspectWorkspacePage(QWidget):
         self.edit_button.setEnabled(has_selection)
         self.archive_button.setEnabled(has_selection)
         self.queue_button.setEnabled(has_selection)
+        self.open_project_button.setEnabled(has_selection)
+        self.review_button.setEnabled(True)
+
+    def _on_open_campaign_review(self) -> None:
+        self._show_status("Open Campaign Review from Generate once mockups are available.")
 
     def _show_error(self, message: str) -> None:
         QMessageBox.warning(self, "Prospects", str(message))

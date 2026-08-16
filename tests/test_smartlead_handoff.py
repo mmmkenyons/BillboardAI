@@ -73,6 +73,34 @@ def test_page_exposes_pilot_controls():
     assert page.pause_pilot_button.text() == "Pause Pilot Campaign"
 
 
+def test_page_has_scroll_area_and_named_sections():
+    from gui.views.smartlead_handoff_page import SmartleadHandoffPage
+    from PySide6.QtWidgets import QApplication, QGroupBox
+
+    app = QApplication.instance() or QApplication([])
+    page = SmartleadHandoffPage()
+    page.resize(1280, 800)
+    assert page.scroll_area is not None
+    boxes = page.findChildren(QGroupBox)
+    titles = {box.title() for box in boxes}
+    assert "Smartlead Preflight" in titles
+    assert "Hosted Mockups" in titles
+    assert "Sequence Readiness" in titles
+    assert "Launch Control / Publication Status" in titles
+    assert "Pilot Launch Safety Harness" in titles
+    assert app is not None
+
+
+def test_page_empty_state_and_friendly_summary():
+    from gui.views.smartlead_handoff_page import SmartleadHandoffPage
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    page = SmartleadHandoffPage()
+    page.set_summary(type("Summary", (), {"total_approved_rows": 0})())
+    assert "No campaign package selected" in page.summary_label.text()
+
+
 def _runtime(tmp_path):
     prospect_store = ProspectStore(path=os.path.join(str(tmp_path), "prospects.json"))
     job_store = ProspectGenerationStore(path=os.path.join(str(tmp_path), "jobs.json"))

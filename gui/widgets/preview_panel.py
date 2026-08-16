@@ -34,7 +34,7 @@ class PreviewPanel(QFrame):
         super().__init__(parent)
         self.setObjectName("previewPanel")
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setMinimumHeight(320)
+        self.setMinimumHeight(180)
 
         self._pixmap: QPixmap | None = None
         self._image_path: str = ""
@@ -53,7 +53,7 @@ class PreviewPanel(QFrame):
         self.preview_label = QLabel(_PLACEHOLDER_TEXT, self)
         self.preview_label.setObjectName("previewPlaceholder")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumHeight(260)
+        self.preview_label.setMinimumHeight(120)
         self.preview_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )

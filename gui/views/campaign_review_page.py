@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -13,15 +14,15 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
-    QDialog,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-
-from gui.views.smartlead_handoff_page import SmartleadHandoffPage
+from gui.services.workflow_presentation import format_blocker, format_status
 
 
 class CampaignReviewPage(QWidget):
@@ -36,6 +37,7 @@ class CampaignReviewPage(QWidget):
         self._controller = None
         self._bound_controller = None
         self._row_ids: list[str] = []
+        self._last_rows: list[dict] = []
 
         layout = QVBoxLayout(self)
         heading = QLabel("Campaign Review", self)
@@ -54,83 +56,167 @@ class CampaignReviewPage(QWidget):
         top.addWidget(self.summary_label, 2)
         layout.addLayout(top)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        layout.addWidget(splitter, 1)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(6)
+        layout.addWidget(self.splitter, 1)
 
-        left = QWidget(splitter)
+        left = QWidget(self.splitter)
+        left.setMinimumWidth(360)
         left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
         self.table = QTableWidget(0, 5, left)
-        self.table.setHorizontalHeaderLabels(["Select", "Company", "Email", "Technical", "Review"])
+        self.table.setHorizontalHeaderLabels(["Select", "Company", "Email", "Readiness", "Decision"])
         self.table.itemSelectionChanged.connect(self._on_row_selected)
         left_layout.addWidget(self.table)
 
-        bulk = QHBoxLayout()
+        bulk = QVBoxLayout()
+        bulk.setSpacing(8)
+        bulk_primary = QHBoxLayout()
+        bulk_primary.setSpacing(8)
         self.bulk_approve_button = QPushButton("Approve Selected", left)
+        self.bulk_approve_button.setObjectName("primaryButton")
         self.bulk_approve_button.clicked.connect(self._bulk_approve)
-        bulk.addWidget(self.bulk_approve_button)
+        bulk_primary.addWidget(self.bulk_approve_button)
         self.bulk_exclude_button = QPushButton("Exclude Selected", left)
         self.bulk_exclude_button.clicked.connect(self._bulk_exclude)
-        bulk.addWidget(self.bulk_exclude_button)
+        bulk_primary.addWidget(self.bulk_exclude_button)
+        bulk.addLayout(bulk_primary)
+
+        bulk_secondary = QHBoxLayout()
+        bulk_secondary.setSpacing(8)
         self.bulk_needs_review_button = QPushButton("Mark Selected Needs Review", left)
         self.bulk_needs_review_button.clicked.connect(self._bulk_needs_review)
-        bulk.addWidget(self.bulk_needs_review_button)
+        bulk_secondary.addWidget(self.bulk_needs_review_button)
+        bulk_secondary.addStretch(1)
+        bulk.addLayout(bulk_secondary)
         left_layout.addLayout(bulk)
 
-        right = QWidget(splitter)
+        right = QWidget(self.splitter)
+        right.setMinimumWidth(360)
         right_layout = QVBoxLayout(right)
-        self.identity_label = QLabel("Select a prospect to review.", right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+
+        self.detail_scroll_area = QScrollArea(right)
+        self.detail_scroll_area.setWidgetResizable(True)
+        self.detail_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.detail_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_layout.addWidget(self.detail_scroll_area)
+
+        self.detail_content = QWidget(self.detail_scroll_area)
+        self.detail_content.setMinimumWidth(360)
+        self.detail_scroll_area.setWidget(self.detail_content)
+
+        detail_layout = QVBoxLayout(self.detail_content)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(10)
+
+        self.identity_label = QLabel("No campaign prospects are ready for review yet.", self.detail_content)
         self.identity_label.setWordWrap(True)
-        right_layout.addWidget(self.identity_label)
-        self.opportunity_label = QLabel("", right)
+        detail_layout.addWidget(self.identity_label)
+        self.readiness_label = QLabel("Research prospects and generate mockups first.", self.detail_content)
+        self.readiness_label.setWordWrap(True)
+        detail_layout.addWidget(self.readiness_label)
+        self.opportunity_label = QLabel("", self.detail_content)
         self.opportunity_label.setWordWrap(True)
-        right_layout.addWidget(self.opportunity_label)
-        self.mockup_label = QLabel("No mockup preview available.", right)
+        detail_layout.addWidget(self.opportunity_label)
+        self.mockup_label = QLabel("No mockup preview available.", self.detail_content)
         self.mockup_label.setWordWrap(True)
-        right_layout.addWidget(self.mockup_label)
-        self.subject_label = QLabel("", right)
+        detail_layout.addWidget(self.mockup_label)
+        self.subject_label = QLabel("", self.detail_content)
         self.subject_label.setWordWrap(True)
-        right_layout.addWidget(self.subject_label)
-        self.email_body = QPlainTextEdit(right)
+        detail_layout.addWidget(self.subject_label)
+        self.email_body = QPlainTextEdit(self.detail_content)
         self.email_body.setReadOnly(True)
-        right_layout.addWidget(self.email_body, 1)
-        self.issues_list = QListWidget(right)
-        right_layout.addWidget(self.issues_list)
-        self.note_edit = QPlainTextEdit(right)
+        self.email_body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.email_body.setMinimumHeight(70)
+        detail_layout.addWidget(self.email_body, 1)
+        self.issues_list = QListWidget(self.detail_content)
+        self.issues_list.setMinimumHeight(60)
+        self.issues_list.setMaximumHeight(150)
+        detail_layout.addWidget(self.issues_list)
+        self.note_edit = QPlainTextEdit(self.detail_content)
         self.note_edit.setPlaceholderText("Review note")
-        right_layout.addWidget(self.note_edit)
+        self.note_edit.setMinimumHeight(60)
+        self.note_edit.setMaximumHeight(150)
+        detail_layout.addWidget(self.note_edit)
 
-        actions = QHBoxLayout()
-        self.approve_button = QPushButton("Approve", right)
+        decision_card = QFrame(self.detail_content)
+        decision_card.setObjectName("cardFrame")
+        decision_layout = QVBoxLayout(decision_card)
+        decision_layout.setContentsMargins(12, 12, 12, 12)
+        decision_layout.setSpacing(8)
+        decision_layout.addWidget(QLabel("Review Decisions", decision_card))
+
+        actions = QVBoxLayout()
+        actions.setSpacing(8)
+        actions_top = QHBoxLayout()
+        actions_top.setSpacing(8)
+        self.approve_button = QPushButton("Approve", decision_card)
         self.approve_button.clicked.connect(self._approve_current)
-        actions.addWidget(self.approve_button)
-        self.exclude_button = QPushButton("Exclude", right)
+        actions_top.addWidget(self.approve_button)
+        self.exclude_button = QPushButton("Exclude", decision_card)
         self.exclude_button.clicked.connect(self._exclude_current)
-        actions.addWidget(self.exclude_button)
-        self.needs_review_button = QPushButton("Needs Review", right)
+        actions_top.addWidget(self.exclude_button)
+        self.needs_review_button = QPushButton("Needs Review", decision_card)
         self.needs_review_button.clicked.connect(self._needs_review_current)
-        actions.addWidget(self.needs_review_button)
-        self.save_note_button = QPushButton("Save Note", right)
-        self.save_note_button.clicked.connect(self._save_note)
-        actions.addWidget(self.save_note_button)
-        right_layout.addLayout(actions)
+        actions_top.addWidget(self.needs_review_button)
+        actions_top.addStretch(1)
+        actions.addLayout(actions_top)
 
-        open_actions = QHBoxLayout()
-        self.open_project_button = QPushButton("Open Project", right)
+        actions_bottom = QHBoxLayout()
+        actions_bottom.setSpacing(8)
+        self.save_note_button = QPushButton("Save Note", decision_card)
+        self.save_note_button.clicked.connect(self._save_note)
+        actions_bottom.addWidget(self.save_note_button)
+        actions_bottom.addStretch(1)
+        actions.addLayout(actions_bottom)
+        decision_layout.addLayout(actions)
+        detail_layout.addWidget(decision_card)
+
+        open_card = QFrame(self.detail_content)
+        open_card.setObjectName("cardFrame")
+        open_layout = QVBoxLayout(open_card)
+        open_layout.setContentsMargins(12, 12, 12, 12)
+        open_layout.setSpacing(8)
+        open_layout.addWidget(QLabel("Package + Recovery Actions", open_card))
+
+        open_actions_primary = QHBoxLayout()
+        open_actions_primary.setSpacing(8)
+        self.open_project_button = QPushButton("Open Project", open_card)
         self.open_project_button.clicked.connect(self._open_project)
-        open_actions.addWidget(self.open_project_button)
-        self.open_mockup_button = QPushButton("Open Mockup", right)
+        open_actions_primary.addWidget(self.open_project_button)
+        self.open_mockup_button = QPushButton("Open Mockup", open_card)
         self.open_mockup_button.clicked.connect(self._open_mockup)
-        open_actions.addWidget(self.open_mockup_button)
-        self.open_folder_button = QPushButton("Open Folder", right)
+        open_actions_primary.addWidget(self.open_mockup_button)
+        self.open_folder_button = QPushButton("Open Folder", open_card)
         self.open_folder_button.clicked.connect(self._open_mockup_folder)
-        open_actions.addWidget(self.open_folder_button)
-        self.build_package_button = QPushButton("Build Approved Package", right)
+        open_actions_primary.addWidget(self.open_folder_button)
+        open_actions_primary.addStretch(1)
+        open_layout.addLayout(open_actions_primary)
+
+        open_actions_secondary = QHBoxLayout()
+        open_actions_secondary.setSpacing(8)
+        self.build_package_button = QPushButton("Build Campaign Package", open_card)
+        self.build_package_button.setObjectName("primaryButton")
         self.build_package_button.clicked.connect(self._build_approved_package)
-        open_actions.addWidget(self.build_package_button)
-        self.smartlead_button = QPushButton("Prepare Smartlead Handoff", right)
+        open_actions_secondary.addWidget(self.build_package_button)
+        self.smartlead_button = QPushButton("Prepare for Smartlead", open_card)
         self.smartlead_button.clicked.connect(self._prepare_smartlead_handoff)
-        open_actions.addWidget(self.smartlead_button)
-        right_layout.addLayout(open_actions)
+        open_actions_secondary.addWidget(self.smartlead_button)
+        self.open_existing_package_button = QPushButton("Open Existing Package", open_card)
+        self.open_existing_package_button.clicked.connect(self._open_existing_package)
+        open_actions_secondary.addWidget(self.open_existing_package_button)
+        open_actions_secondary.addStretch(1)
+        open_layout.addLayout(open_actions_secondary)
+        detail_layout.addWidget(open_card)
+        detail_layout.addStretch(1)
+
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 3)
+        self.splitter.setSizes([480, 680])
 
         self.message_label = QLabel("", self)
         self.message_label.setWordWrap(True)
@@ -151,15 +237,24 @@ class CampaignReviewPage(QWidget):
             controller.status_message.connect(self.show_status)
         if hasattr(controller, "error_message"):
             controller.error_message.connect(self.show_error)
-        if hasattr(controller, "smartlead_handoff_ready"):
-            controller.smartlead_handoff_ready.connect(self._show_smartlead_handoff)
         if hasattr(controller, "refresh"):
             controller.refresh()
 
     def set_rows(self, rows: list[dict]) -> None:
+        self._last_rows = list(rows or [])
         current = self.current_prospect_id()
         self.table.setRowCount(len(rows))
         self._row_ids = []
+        if not rows:
+            self.identity_label.setText("No campaign prospects are ready for review yet.")
+            self.readiness_label.setText("Research prospects and generate mockups first.")
+            self.opportunity_label.setText("")
+            self.mockup_label.setText("No mockup preview available.")
+            self.subject_label.setText("")
+            self.email_body.setPlainText("")
+            self.note_edit.setPlainText("")
+            self.issues_list.clear()
+            return
         for row_index, row in enumerate(rows):
             prospect_id = str(row.get("prospect_id") or "")
             self._row_ids.append(prospect_id)
@@ -170,8 +265,8 @@ class CampaignReviewPage(QWidget):
             self.table.setItem(row_index, self.COL_SELECT, select_item)
             self.table.setItem(row_index, self.COL_COMPANY, QTableWidgetItem(str(row.get("company") or "")))
             self.table.setItem(row_index, self.COL_EMAIL, QTableWidgetItem(str(row.get("email") or "")))
-            self.table.setItem(row_index, self.COL_TECHNICAL, QTableWidgetItem(str(row.get("technical_status") or "")))
-            self.table.setItem(row_index, self.COL_REVIEW, QTableWidgetItem(str(row.get("review_status") or "")))
+            self.table.setItem(row_index, self.COL_TECHNICAL, QTableWidgetItem(format_status(row.get("technical_status") or "")))
+            self.table.setItem(row_index, self.COL_REVIEW, QTableWidgetItem(format_status(row.get("review_status") or "")))
         if current and current in self._row_ids:
             self.select_prospect(current)
         elif rows:
@@ -183,7 +278,10 @@ class CampaignReviewPage(QWidget):
         email = str(detail.get("email") or "")
         technical = str(detail.get("technical_status") or "")
         review = str(detail.get("review_status") or "")
-        self.identity_label.setText(f"{company}\n{contact}\n{email}\nTechnical: {technical} | Review: {review}")
+        self.identity_label.setText(f"{company}\n{contact}\n{email}".strip())
+        self.readiness_label.setText(
+            f"Campaign readiness: {format_status(technical)}\nDecision: {format_status(review)}"
+        )
         self.opportunity_label.setText(f"Opportunity: {detail.get('opportunity_display', '')}\nCreative: {detail.get('creative_summary', '')}")
         mockup_path = str(detail.get("mockup_path") or "")
         self.mockup_label.setText(mockup_path if mockup_path else "No mockup preview available.")
@@ -196,9 +294,9 @@ class CampaignReviewPage(QWidget):
         if not reasons and not warnings:
             self.issues_list.addItem(QListWidgetItem("No warnings or blockers."))
         for reason in reasons:
-            self.issues_list.addItem(QListWidgetItem(f"BLOCKER: {reason}"))
+            self.issues_list.addItem(QListWidgetItem(f"Cannot continue: {format_blocker(reason)}"))
         for warning in warnings:
-            self.issues_list.addItem(QListWidgetItem(f"WARNING: {warning}"))
+            self.issues_list.addItem(QListWidgetItem(f"Warning: {format_status(warning)}"))
 
     def set_summary(self, summary: object) -> None:
         self.summary_label.setText(
@@ -212,6 +310,29 @@ class CampaignReviewPage(QWidget):
                     f"Approved+Packageable {getattr(summary, 'approved_packageable', 0)}",
                 ]
             )
+        )
+        self._apply_package_action_state(summary)
+
+    def _apply_package_action_state(self, summary: object) -> None:
+        packageable = int(getattr(summary, "approved_packageable", 0) or 0)
+        can_build = packageable > 0
+        self.build_package_button.setEnabled(can_build)
+        self.build_package_button.setToolTip(
+            "Build a canonical approved package for the currently approved, packageable prospects."
+            if can_build else
+            "Approve at least one campaign-ready prospect before building a package."
+        )
+        has_preferred_package = False
+        if self._controller is not None and hasattr(self._controller, "resolve_preferred_package_directory"):
+            has_preferred_package = bool(self._controller.resolve_preferred_package_directory())
+        self.smartlead_button.setEnabled(has_preferred_package)
+        self.smartlead_button.setToolTip(
+            "Prepare Smartlead files from the current canonical campaign package."
+            if has_preferred_package else
+            "No canonical package is available yet. Build a package first, or use Open Existing Package as a recovery action."
+        )
+        self.open_existing_package_button.setToolTip(
+            "Recovery / advanced: open a previously created canonical package when you need to resume from an existing folder."
         )
 
     def current_prospect_id(self) -> str:
@@ -307,6 +428,9 @@ class CampaignReviewPage(QWidget):
     def _build_approved_package(self) -> None:
         if self._controller is None:
             return
+        if not self.build_package_button.isEnabled():
+            self.show_status("Approve at least one campaign-ready prospect before building a package.")
+            return
         destination = QFileDialog.getExistingDirectory(self, "Choose Approved Campaign Package Destination")
         if not destination:
             self.show_status("Approved campaign package cancelled.")
@@ -318,60 +442,19 @@ class CampaignReviewPage(QWidget):
     def _prepare_smartlead_handoff(self) -> None:
         if self._controller is None:
             return
-        directory = QFileDialog.getExistingDirectory(self, "Choose Approved Campaign Package Directory")
+        directory = ""
+        if hasattr(self._controller, "resolve_preferred_package_directory"):
+            directory = self._controller.resolve_preferred_package_directory()
+        if directory:
+            self._controller.prepare_smartlead_handoff(directory)
+            return
+        self.show_status("No canonical package is available yet. Build a package first, or use Open Existing Package for recovery.")
+
+    def _open_existing_package(self) -> None:
+        if self._controller is None:
+            return
+        directory = QFileDialog.getExistingDirectory(self, "Open Existing Approved Campaign Package")
         if not directory:
-            self.show_status("Smartlead handoff cancelled.")
+            self.show_status("Open existing package cancelled.")
             return
         self._controller.prepare_smartlead_handoff(directory)
-
-    def _show_smartlead_handoff(self, result: object) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Smartlead Preflight")
-        dialog.resize(900, 600)
-        layout = QVBoxLayout(dialog)
-        page = SmartleadHandoffPage(dialog)
-        layout.addWidget(page)
-        from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
-        from gui.models.hosted_asset_store import HostedAssetStore
-        from gui.models.smartlead_connection import SmartleadConnectionSettings
-        from gui.models.smartlead_publication_store import SmartleadPublicationStore
-        from gui.models.smartlead_sequence import SequenceChangeStore
-        from gui.services.asset_hosting import CloudinaryAssetProvider, HostingConnectionSettings
-        from gui.services.hosted_mockups import AssetHostingService
-        from gui.services.smartlead_api import SmartleadApiClient
-        from gui.services.smartlead_handoff import SmartleadHandoffService
-        from gui.services.smartlead_publish import SmartleadPublishService
-        from gui.services.smartlead_reconciliation import SmartleadReconciliationService
-        from gui.services.smartlead_sequence_readiness import SmartleadSequenceReadinessService
-
-        api_client = SmartleadApiClient(settings=SmartleadConnectionSettings())
-        publish_service = SmartleadPublishService(
-            api_client=api_client,
-            receipt_store=SmartleadPublicationStore(),
-        )
-        hosting_service = AssetHostingService(
-            provider=CloudinaryAssetProvider(settings=HostingConnectionSettings()),
-            asset_store=HostedAssetStore(),
-        )
-        sequence_service = SmartleadSequenceReadinessService(
-            api_client=api_client,
-            change_store=SequenceChangeStore(),
-        )
-        reconciliation_service = SmartleadReconciliationService(
-            api_client=api_client,
-            publication_store=SmartleadPublicationStore(),
-            hosted_asset_store=HostedAssetStore(),
-            sequence_service=sequence_service,
-        )
-        controller = SmartleadHandoffController(
-            service=SmartleadHandoffService(),
-            publish_service=publish_service,
-            hosting_service=hosting_service,
-            sequence_service=sequence_service,
-            reconciliation_service=reconciliation_service,
-        )
-        page.set_controller(controller)
-        controller.summary_changed.emit(getattr(result, "summary", None))
-        controller.rows_changed.emit([row.to_dict() for row in getattr(result, "rows", ())])
-        page.set_handoff_directory(getattr(result, "handoff_directory", ""))
-        dialog.exec()

@@ -15,12 +15,14 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QLineEdit,
+    QVBoxLayout,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QStackedWidget,
     QToolBar,
+    QWidget,
 )
 
 from gui.resources import APP_VERSION
@@ -34,7 +36,10 @@ from gui.views.project_workspace_page import ProjectWorkspacePage
 from gui.views.prospect_follow_up_page import ProspectFollowUpPage
 from gui.views.prospect_pipeline_page import ProspectPipelinePage
 from gui.views.prospect_workspace_page import ProspectWorkspacePage
-from gui.views.settings_page import SettingsPage
+from gui.views.smartlead_handoff_page import SmartleadHandoffPage
+from gui.widgets.workflow_bar import WorkflowBar
+from gui.models.workflow_stage import WorkflowStageId
+from gui.services.workflow_presentation import WorkflowSnapshot, derive_review_snapshot, derive_stage_models
 
 if TYPE_CHECKING:
     from gui.controllers.app_controller import BillboardController
@@ -43,6 +48,7 @@ if TYPE_CHECKING:
     from gui.controllers.inventory_controller import InventoryController
     from gui.controllers.project_controller import ProjectWorkspaceController
     from gui.controllers.prospect_controller import ProspectController
+    from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,7 @@ class MainWindow(QMainWindow):
         controller: BillboardController | None = None,
         batch_controller: "BatchGenerationController | None" = None,
         review_controller: "CampaignReviewController | None" = None,
+        smartlead_controller: "SmartleadHandoffController | None" = None,
         workspace_controller: ProjectWorkspaceController | None = None,
         inventory_controller: "InventoryController | None" = None,
         prospect_controller: "ProspectController | None" = None,
@@ -67,8 +74,10 @@ class MainWindow(QMainWindow):
         self._batch_controller = batch_controller
         self._workspace_controller = workspace_controller
         self._review_controller = review_controller
+        self._smartlead_controller = smartlead_controller
         self._inventory_controller = inventory_controller
         self._prospect_controller = prospect_controller
+        self._current_stage = WorkflowStageId.PROSPECTS
 
         self._build_ui()
         self._build_menu()
@@ -93,15 +102,25 @@ class MainWindow(QMainWindow):
             self._wire_batch_controller()
         if self._review_controller is not None:
             self._wire_review_controller()
+        if self._smartlead_controller is not None:
+            self._wire_smartlead_controller()
+        self._refresh_workflow_bar()
 
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
+        central = QWidget(self)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+        self.workflow_bar = WorkflowBar(central)
+        self.workflow_bar.stage_requested.connect(self._on_workflow_stage_requested)
+        root.addWidget(self.workflow_bar)
+
         self._stack = QStackedWidget(self)
 
         self.home_page = HomePage(self._stack)
-        self.settings_page = SettingsPage(self._stack)
         self.batch_page = BatchPage(self._stack)
         self.campaign_review_page = CampaignReviewPage(self._stack)
         self.history_page = HistoryPage(self._stack)
@@ -111,9 +130,12 @@ class MainWindow(QMainWindow):
         self.prospects_workspace = ProspectWorkspacePage(self._stack)
         self.follow_up_page = ProspectFollowUpPage(self._stack)
         self.pipeline_page = ProspectPipelinePage(self._stack)
+        self.smartlead_page = SmartleadHandoffPage(self._stack)
 
         self._stack.addWidget(self.home_page)
-        self._stack.addWidget(self.settings_page)
+        self._stack.addWidget(self.smartlead_page)
+        root.addWidget(self._stack, 1)
+        self.setCentralWidget(central)
         self._stack.addWidget(self.batch_page)
         self._stack.addWidget(self.campaign_review_page)
         self._stack.addWidget(self.history_page)
@@ -125,8 +147,6 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self.pipeline_page)
 
         self._stack.setCurrentWidget(self.home_page)
-
-        self.setCentralWidget(self._stack)
 
     def _build_menu(self) -> None:
         menubar = self.menuBar()
@@ -183,23 +203,17 @@ class MainWindow(QMainWindow):
         review_action.triggered.connect(lambda: self.show_page("campaign_review"))
         view_menu.addAction(review_action)
 
-        history_action = QAction("&History", self)
-        history_action.setEnabled(False)
-        view_menu.addAction(history_action)
-
         batch_action = QAction("&Batch", self)
-        batch_action.setEnabled(False)
+        batch_action.triggered.connect(lambda: self.show_page("batch"))
         view_menu.addAction(batch_action)
+
+        smartlead_action = QAction("&Smartlead", self)
+        smartlead_action.triggered.connect(lambda: self.show_page("smartlead"))
+        view_menu.addAction(smartlead_action)
 
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
-        settings_action = QAction("&Settings", self)
-        settings_action.setEnabled(False)
-        tools_menu.addAction(settings_action)
-
-        batch_mode_action = QAction("&Batch Mode", self)
-        batch_mode_action.setEnabled(False)
-        tools_menu.addAction(batch_mode_action)
+        # Keep Tools menu conservative for advanced items only.
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -237,9 +251,6 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.toolbar_open_folder)
 
         toolbar.addSeparator()
-        settings_action = QAction("Settings", self)
-        settings_action.setEnabled(False)
-        toolbar.addAction(settings_action)
 
     def _build_status_bar(self) -> None:
         self.status_bar = self.statusBar()
@@ -275,7 +286,6 @@ class MainWindow(QMainWindow):
         'projects', 'workspace', 'inventory', 'prospects')."""
         pages = {
             "home": self.home_page,
-            "settings": self.settings_page,
             "batch": self.batch_page,
             "campaign_review": self.campaign_review_page,
             "history": self.history_page,
@@ -285,10 +295,19 @@ class MainWindow(QMainWindow):
             "prospects": self.prospects_workspace,
             "follow_up": self.follow_up_page,
             "pipeline": self.pipeline_page,
+            "smartlead": self.smartlead_page,
         }
         widget = pages.get(page)
         if widget is not None:
             self._stack.setCurrentWidget(widget)
+            self._current_stage = {
+                "prospects": WorkflowStageId.PROSPECTS,
+                "follow_up": WorkflowStageId.RESEARCH,
+                "pipeline": WorkflowStageId.OPPORTUNITIES,
+                "batch": WorkflowStageId.GENERATE,
+                "campaign_review": WorkflowStageId.REVIEW,
+                "smartlead": WorkflowStageId.SMARTLEAD,
+            }.get(page, self._current_stage)
             if page == "projects":
                 self.refresh_project_browser()
             if page == "prospects":
@@ -299,6 +318,7 @@ class MainWindow(QMainWindow):
                 self.pipeline_page.refresh()
             if page == "campaign_review":
                 self.campaign_review_page.show_status("")
+            self._refresh_workflow_bar()
 
     # ------------------------------------------------------------------
     # Prospect workspace wiring (Sprint 5A)
@@ -334,6 +354,70 @@ class MainWindow(QMainWindow):
         ctrl = self._review_controller
         self.campaign_review_page.set_controller(ctrl)
         ctrl.open_project_requested.connect(self._on_prospect_open_project)
+        if hasattr(ctrl, "smartlead_handoff_ready"):
+            ctrl.smartlead_handoff_ready.connect(self._on_smartlead_handoff_ready)
+
+    def _wire_smartlead_controller(self) -> None:
+        if self._smartlead_controller is None:
+            return
+        self.smartlead_page.set_controller(self._smartlead_controller)
+
+    def _on_smartlead_handoff_ready(self, result: object) -> None:
+        if self._smartlead_controller is None:
+            return
+        self.show_page("smartlead")
+        self._smartlead_controller.summary_changed.emit(getattr(result, "summary", None))
+        self._smartlead_controller.rows_changed.emit([row.to_dict() for row in getattr(result, "rows", ())])
+        self.smartlead_page.set_handoff_directory(getattr(result, "handoff_directory", ""))
+
+    def _on_workflow_stage_requested(self, stage_id: str) -> None:
+        mapping = {
+            WorkflowStageId.PROSPECTS.value: "prospects",
+            WorkflowStageId.RESEARCH.value: "prospects",
+            WorkflowStageId.OPPORTUNITIES.value: "pipeline",
+            WorkflowStageId.GENERATE.value: "batch",
+            WorkflowStageId.REVIEW.value: "campaign_review",
+            WorkflowStageId.SMARTLEAD.value: "smartlead",
+            WorkflowStageId.LAUNCH.value: "smartlead",
+        }
+        self.show_page(mapping.get(stage_id, "prospects"))
+
+    def _refresh_workflow_bar(self) -> None:
+        snapshot = WorkflowSnapshot()
+        if self._prospect_controller is not None:
+            prospects = self._prospect_controller.list_prospects()
+            research = getattr(self._prospect_controller, "research", None)
+            running = 0
+            queued = 0
+            if research is not None:
+                for job in research.list_jobs():
+                    status = str(getattr(job, "status", "") or "")
+                    if status == "RUNNING":
+                        running += 1
+                    elif status in {"PENDING", "RETRY_PENDING"}:
+                        queued += 1
+            snapshot = WorkflowSnapshot(
+                prospect_count=len(prospects),
+                ready_for_research_count=sum(1 for item in prospects if getattr(item, "status", "") == "READY_FOR_RESEARCH"),
+                researched_count=sum(1 for item in prospects if getattr(item, "status", "") == "RESEARCHED"),
+                research_in_progress_count=running or queued,
+                opportunity_count=sum(1 for item in prospects if str(getattr(item, "research_status", "") or "") == "SUCCEEDED"),
+            )
+        if self._batch_controller is not None:
+            generated = 0
+            for job in self._batch_controller._service.list_jobs():
+                if str(getattr(job, "status", "") or "") == "SUCCEEDED":
+                    generated += 1
+            snapshot = WorkflowSnapshot(**{**snapshot.__dict__, "generated_count": generated})
+        if self._review_controller is not None:
+            rows = [self._review_controller._row_to_dict(row) for row in self._review_controller._service.list_rows(self._review_controller._scope_ids)]
+            review_snapshot = derive_review_snapshot(
+                rows,
+                handoff_result=getattr(self._review_controller, "last_handoff_result", None),
+            )
+            snapshot = WorkflowSnapshot(**{**snapshot.__dict__, **review_snapshot.__dict__})
+        stages = derive_stage_models(snapshot, self._current_stage)
+        self.workflow_bar.set_stages(stages)
 
     def _on_open_campaign_review(self, prospect_ids: object) -> None:
         if self._review_controller is not None:

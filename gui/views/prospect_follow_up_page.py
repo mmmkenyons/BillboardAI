@@ -87,6 +87,7 @@ class ProspectFollowUpPage(QWidget):
         self.search_input.setPlaceholderText("Search company, domain, next action...")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_filter_changed)
+        self.search_input.setMinimumWidth(220)
         toolbar.addWidget(self.search_input)
 
         self.status_combo = QComboBox(self)

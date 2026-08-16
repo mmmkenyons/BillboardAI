@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -53,7 +54,9 @@ class BatchPage(QWidget):
 
         self.prospect_table = QTableWidget(0, 7, self)
         self.prospect_table.setHorizontalHeaderLabels(["Select", "Company", "Website", "Template", "Opportunity", "Eligibility", "Export"])
-        layout.addWidget(self.prospect_table)
+        self.prospect_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.prospect_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.prospect_table, 2)
 
         actions = QHBoxLayout()
         self.queue_button = QPushButton("Queue Selected", self)
@@ -77,15 +80,23 @@ class BatchPage(QWidget):
 
         self.jobs_table = QTableWidget(0, 5, self)
         self.jobs_table.setHorizontalHeaderLabels(["Company", "Template", "Opportunity", "Status", "Result"])
-        layout.addWidget(self.jobs_table)
+        self.jobs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.jobs_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.jobs_table, 3)
 
         self.run_button = QPushButton("Run Queue", self)
         self.run_button.clicked.connect(self._emit_run)
-        layout.addWidget(self.run_button)
+        run_row = QHBoxLayout()
+        run_row.addWidget(self.run_button)
+        run_row.addStretch(1)
+        layout.addLayout(run_row)
 
         self.open_project_button = QPushButton("Open Selected Project", self)
         self.open_project_button.clicked.connect(self._emit_open_project)
-        layout.addWidget(self.open_project_button)
+        open_row = QHBoxLayout()
+        open_row.addWidget(self.open_project_button)
+        open_row.addStretch(1)
+        layout.addLayout(open_row)
 
         self.message_label = QLabel("", self)
         self.message_label.setWordWrap(True)
@@ -146,11 +157,16 @@ class BatchPage(QWidget):
 
             combo = QComboBox(self.prospect_table)
             combo.addItem("Choose template", "")
-            for template in row_data.get("template_options", []):
+            template_options = list(row_data.get("template_options", []))
+            for template in template_options:
                 combo.addItem(template.title(), template)
             resolved = str(row_data.get("resolved_template") or "")
             if resolved:
                 idx = combo.findData(resolved)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            elif len(template_options) == 1:
+                idx = combo.findData(template_options[0])
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
             self.prospect_table.setCellWidget(row, self.COL_TEMPLATE, combo)

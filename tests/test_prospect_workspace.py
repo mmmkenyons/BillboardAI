@@ -14,6 +14,7 @@ import os
 
 import pytest
 from PySide6.QtCore import QDate
+from PySide6.QtWidgets import QApplication
 
 from gui.models.prospect import (
     STATUS_ARCHIVED,
@@ -401,8 +402,109 @@ class TestProspectPage:
         h.page.search_input.setText("zeta")
         assert h.page.table.rowCount() == 1
 
+    def test_primary_and_advanced_actions_visible(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        assert h.page.primary_actions_label.text() == "Primary workflow"
+        assert h.page.advanced_actions_badge.text() == "Advanced queue controls"
+
+    def test_queue_table_constructed_before_controller_refresh(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=False)
+        assert hasattr(h.page, "queue_table")
+        assert h.page.queue_table.columnCount() == 7
+        h.page.refresh()
+        h.page.refresh()
+        assert h.page.queue_table is not None
+
+    def test_responsive_splitters_construct_at_normal_and_large_sizes(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        h.page.resize(1280, 800)
+        assert h.page.main_content_splitter is not None
+        assert h.page.research_recommendation_splitter is not None
+        assert h.page.queue_table is not None
+        h.page.resize(1700, 900)
+        h.page.refresh()
+        assert h.page.queue_table.columnCount() == 7
+
+    def test_research_queue_actions_do_not_overlap_queue_table_at_normal_size(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        h.page.resize(1250, 800)
+        h.page.show()
+        app = QApplication.instance()
+        assert app is not None
+        app.processEvents()
+        h.page.refresh()
+        app.processEvents()
+
+        actions_rect = h.page.research_actions_container.geometry()
+        table_rect = h.page.queue_table.geometry()
+        rec_rect = h.page.rec_cards_container.parentWidget().geometry() if h.page.rec_cards_container.parentWidget() is not None else h.page.rec_cards_container.geometry()
+
+        assert actions_rect.height() > 0
+        assert table_rect.height() >= 120
+        assert actions_rect.bottom() < table_rect.top()
+        assert rec_rect.top() >= h.page.research_recommendation_splitter.handleWidth()
+
+        h.page.refresh()
+        app.processEvents()
+        actions_rect_2 = h.page.research_actions_container.geometry()
+        table_rect_2 = h.page.queue_table.geometry()
+        assert actions_rect_2.bottom() < table_rect_2.top()
+
+    def test_primary_action_row_fits_across_common_widths(self, tmp_path) -> None:
+        # The Research Queue primary action row must reflow so primary buttons are
+        # never half-clipped off the right edge (responsive flow layout).
+        for width in (1280, 1000, 900):
+            h = _ProspectHarness(tmp_path, seed=True)
+            h.page.resize(width, 800)
+            h.page.show()
+            app = QApplication.instance()
+            assert app is not None
+            app.processEvents()
+            container = h.page.research_actions_container
+            right = h.page.review_button.mapTo(container, h.page.review_button.rect().topRight()).x()
+            # The button may either fit on the current line or wrap to a new line,
+            # but its geometry must never extend past the container's right edge.
+            assert right <= container.width() + 1
+            assert h.page.review_button.width() > 0
+            assert h.page.run_button.width() > 0
+            h.page.close()
+
+    def test_friendly_status_presentation(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        status_text = h.page.table.item(0, 4).text()
+        assert "READY_FOR_RESEARCH" not in status_text
+        assert "Ready for research" in status_text
+
+    def test_empty_state_message_is_friendly(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=False)
+        assert "No prospects yet" in h.page.summary_label.text()
+
     def test_add_prospect_persists(self, tmp_path) -> None:
         h = _ProspectHarness(tmp_path, seed=False)
+        created = h.controller.create_prospect(company_name="T2 Roofing", website="t2roofing.com", email="test@example.com", city="Denver", state="CO", category="Roofing", contact_name="Test Contact", notes="5V manual workflow test", tags="test")
+        assert created is not None
+        assert any(p.company_name == "T2 Roofing" for p in h.controller.list_prospects())
+        from gui.controllers.prospect_controller import ProspectController
+        reloaded = ProspectController(path=h.controller.store.path)
+        reloaded.load()
+        loaded = reloaded.list_prospects()
+        assert any(p.company_name == "T2 Roofing" for p in loaded)
+
+    def test_add_prospect_via_dialog_refreshes_visible_table_without_duplicates(self, tmp_path) -> None:
+        h = _ProspectHarness(tmp_path, seed=True)
+        before = h.page.table.rowCount()
+        h.controller.create_prospect(
+            company_name="Visible Co",
+            website="visibleco.com",
+            city="Denver",
+            state="CO",
+            category="Roofing",
+        )
+        h.page.refresh()
+        rows = [h.page.table.item(row, 0).text() for row in range(h.page.table.rowCount())]
+        assert "Visible Co" in rows
+        assert rows.count("Visible Co") == 1
+        assert h.page.table.rowCount() == before + 1
         h.controller.create_prospect(company_name="New Co", website="new.com")
         h.controller.store.save()
         svc2 = ProspectWorkspaceService(
