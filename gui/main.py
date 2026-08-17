@@ -15,11 +15,13 @@ from PySide6.QtWidgets import QApplication
 from gui.controllers.app_controller import BillboardController
 from gui.controllers.batch_generation_controller import BatchGenerationController
 from gui.controllers.campaign_review_controller import CampaignReviewController
+from gui.controllers.campaign_run_controller import CampaignRunController
 from gui.controllers.inventory_controller import InventoryController
 from gui.controllers.project_controller import ProjectWorkspaceController
 from gui.controllers.prospect_controller import ProspectController
 from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
 from gui.models.campaign_review_store import CampaignReviewStore
+from gui.models.campaign_run import CampaignRunStore
 from gui.models.hosted_asset_store import HostedAssetStore
 from gui.models.project_store import ProjectStore
 from gui.models.prospect_generation_store import ProspectGenerationStore
@@ -32,6 +34,7 @@ from gui.services.asset_hosting import CloudinaryAssetProvider, HostingConnectio
 from gui.services.campaign_export import CampaignExportService
 from gui.services.campaign_package import CampaignPackageService
 from gui.services.campaign_review import CampaignReviewService
+from gui.services.campaign_run import CampaignRunService
 from gui.services.hosted_mockups import AssetHostingService
 from gui.services.prospect_generation import ProspectGenerationService
 from gui.services.smartlead_activation import SmartleadActivationService
@@ -96,13 +99,25 @@ def main() -> None:
         project_store=generation_service.project_store,
     )
     package_service = CampaignPackageService(export_service=export_service)
+    review_store = CampaignReviewStore()
     review_service = CampaignReviewService(
         prospect_store=generation_service.prospect_store,
         export_service=export_service,
-        review_store=CampaignReviewStore(),
+        review_store=review_store,
         package_service=package_service,
     )
     review_controller = CampaignReviewController(service=review_service)
+    campaign_run_service = CampaignRunService(
+        run_store=CampaignRunStore(),
+        prospect_store=generation_service.prospect_store,
+        job_store=generation_service.job_store,
+        project_store=generation_service.project_store,
+        review_store=review_store,
+        generation_service=generation_service,
+        export_service=export_service,
+        review_service=review_service,
+    )
+    campaign_run_controller = CampaignRunController(service=campaign_run_service)
     api_client = SmartleadApiClient(settings=SmartleadConnectionSettings())
     publication_store = SmartleadPublicationStore()
     hosted_asset_store = HostedAssetStore()
@@ -157,6 +172,7 @@ def main() -> None:
         workspace_controller,
         inventory_controller,
         prospect_controller,
+        campaign_run_controller,
     )
     window.show()
 

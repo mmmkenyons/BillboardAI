@@ -669,14 +669,14 @@ class ProspectWorkspacePage(QWidget):
         self.queue_all_button.clicked.connect(self._on_queue_all)
         primary.addWidget(self.queue_all_button)
 
-        primary.addWidget(QLabel("Next", primary_group))
+        primary.addWidget(QLabel("Next:", primary_group))
         self.research_next_spin = QSpinBox(primary_group)
         self.research_next_spin.setRange(1, 25)
         self.research_next_spin.setValue(1)
         self.research_next_spin.setMinimumWidth(72)
         primary.addWidget(self.research_next_spin)
 
-        self.run_button = QPushButton("Research Next N", primary_group)
+        self.run_button = QPushButton("Research Next", primary_group)
         self.run_button.setObjectName("primaryButton")
         self.run_button.clicked.connect(self._on_research_next)
         primary.addWidget(self.run_button)

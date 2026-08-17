@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from gui.resources import APP_VERSION
 from gui.views.batch_page import BatchPage
 from gui.views.campaign_review_page import CampaignReviewPage
+from gui.views.campaign_run_page import CampaignRunPage
 from gui.views.history_page import HistoryPage
 from gui.views.home_page import HomePage
 from gui.views.inventory_workspace_page import InventoryWorkspacePage
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from gui.controllers.app_controller import BillboardController
     from gui.controllers.batch_generation_controller import BatchGenerationController
     from gui.controllers.campaign_review_controller import CampaignReviewController
+    from gui.controllers.campaign_run_controller import CampaignRunController
     from gui.controllers.inventory_controller import InventoryController
     from gui.controllers.project_controller import ProjectWorkspaceController
     from gui.controllers.prospect_controller import ProspectController
@@ -65,6 +67,7 @@ class MainWindow(QMainWindow):
         workspace_controller: ProjectWorkspaceController | None = None,
         inventory_controller: "InventoryController | None" = None,
         prospect_controller: "ProspectController | None" = None,
+        campaign_run_controller: "CampaignRunController | None" = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle(f"BillboardAI v{APP_VERSION}")
@@ -77,6 +80,7 @@ class MainWindow(QMainWindow):
         self._smartlead_controller = smartlead_controller
         self._inventory_controller = inventory_controller
         self._prospect_controller = prospect_controller
+        self._campaign_run_controller = campaign_run_controller
         self._current_stage = WorkflowStageId.PROSPECTS
 
         self._build_ui()
@@ -104,6 +108,8 @@ class MainWindow(QMainWindow):
             self._wire_review_controller()
         if self._smartlead_controller is not None:
             self._wire_smartlead_controller()
+        if self._campaign_run_controller is not None:
+            self._wire_campaign_run_controller()
         self._refresh_workflow_bar()
 
     # ------------------------------------------------------------------
@@ -131,6 +137,7 @@ class MainWindow(QMainWindow):
         self.follow_up_page = ProspectFollowUpPage(self._stack)
         self.pipeline_page = ProspectPipelinePage(self._stack)
         self.smartlead_page = SmartleadHandoffPage(self._stack)
+        self.campaign_run_page = CampaignRunPage(self._stack)
 
         self._stack.addWidget(self.home_page)
         self._stack.addWidget(self.smartlead_page)
@@ -145,6 +152,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self.prospects_workspace)
         self._stack.addWidget(self.follow_up_page)
         self._stack.addWidget(self.pipeline_page)
+        self._stack.addWidget(self.campaign_run_page)
 
         self._stack.setCurrentWidget(self.home_page)
 
@@ -210,6 +218,10 @@ class MainWindow(QMainWindow):
         smartlead_action = QAction("&Smartlead", self)
         smartlead_action.triggered.connect(lambda: self.show_page("smartlead"))
         view_menu.addAction(smartlead_action)
+
+        campaign_run_action = QAction("Campaign &Run", self)
+        campaign_run_action.triggered.connect(lambda: self.show_page("campaign_run"))
+        view_menu.addAction(campaign_run_action)
 
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
@@ -296,6 +308,7 @@ class MainWindow(QMainWindow):
             "follow_up": self.follow_up_page,
             "pipeline": self.pipeline_page,
             "smartlead": self.smartlead_page,
+            "campaign_run": self.campaign_run_page,
         }
         widget = pages.get(page)
         if widget is not None:
@@ -318,6 +331,16 @@ class MainWindow(QMainWindow):
                 self.pipeline_page.refresh()
             if page == "campaign_review":
                 self.campaign_review_page.show_status("")
+            if page == "campaign_run" and self._campaign_run_controller is not None:
+                # Re-resolve the canonical built package (read-only) so package /
+                # Smartlead stage status reflects the latest package, then refresh.
+                directory = ""
+                if self._review_controller is not None and hasattr(self._review_controller, "resolve_preferred_package_directory"):
+                    directory = self._review_controller.resolve_preferred_package_directory()
+                if directory:
+                    self._campaign_run_controller.set_package_directory(directory)
+                else:
+                    self._campaign_run_controller.refresh()
             self._refresh_workflow_bar()
 
     # ------------------------------------------------------------------
@@ -362,6 +385,29 @@ class MainWindow(QMainWindow):
             return
         self.smartlead_page.set_controller(self._smartlead_controller)
 
+    def _wire_campaign_run_controller(self) -> None:
+        """Wire the read-only Campaign Run controller (Sprint 5W).
+
+        All connections are read-only navigation: opening a run never mutates
+        canonical prospect/research/opportunity/generation/review/package/
+        Smartlead state. "Continue Campaign" derives a target page and shows it.
+        """
+        if self._campaign_run_controller is None:
+            return
+        ctrl = self._campaign_run_controller
+        self.campaign_run_page.set_controller(ctrl)
+        ctrl.continue_requested.connect(self._on_continue_campaign)
+        ctrl.open_prospect_requested.connect(self._on_open_prospect_in_workspace)
+        ctrl.open_project_requested.connect(self._on_prospect_open_project)
+        ctrl.open_review_requested.connect(self._on_open_campaign_review)
+        ctrl.open_smartlead_requested.connect(lambda: self.show_page("smartlead"))
+        # Keep the run's package-directory hint in sync with the review
+        # controller's resolved package (read-only) so package/Smartlead stage
+        # status reflects the canonical built package when one exists.
+        if self._review_controller is not None and hasattr(self._review_controller, "resolve_preferred_package_directory"):
+            ctrl.set_package_directory(self._review_controller.resolve_preferred_package_directory())
+
+
     def _on_smartlead_handoff_ready(self, result: object) -> None:
         if self._smartlead_controller is None:
             return
@@ -386,6 +432,13 @@ class MainWindow(QMainWindow):
         snapshot = WorkflowSnapshot()
         if self._prospect_controller is not None:
             prospects = self._prospect_controller.list_prospects()
+            # Sprint 5W: when a campaign run is active, scope the workflow bar
+            # counts to that run's prospect ids (read-only). When no run is
+            # active, preserve the accepted global/canonical behavior.
+            if self._campaign_run_controller is not None:
+                run_ids = set(self._campaign_run_controller.active_prospect_ids())
+                if run_ids:
+                    prospects = [p for p in prospects if p.prospect_id in run_ids]
             research = getattr(self._prospect_controller, "research", None)
             running = 0
             queued = 0
@@ -424,6 +477,14 @@ class MainWindow(QMainWindow):
             ids = list(prospect_ids) if isinstance(prospect_ids, list) else []
             self._review_controller.set_scope(ids)
         self.show_page("campaign_review")
+
+    def _on_continue_campaign(self, target: str) -> None:
+        """Sprint 5W: show the next workspace derived from canonical state.
+
+        Pure read-only navigation — the target is computed by the campaign run
+        service from canonical stores; this slot only switches the page.
+        """
+        self.show_page(str(target or "campaign_run"))
 
     def _on_open_prospect_in_workspace(self, prospect_id: str) -> None:
         """Sprint 5H: open a queue-selected prospect in the Prospect Workspace."""
