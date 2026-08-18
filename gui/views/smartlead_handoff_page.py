@@ -47,6 +47,9 @@ class SmartleadHandoffPage(QWidget):
         self._last_activation_result = None
         self._pilot_runs: list[object] = []
         self._current_pilot_id: str = ""
+        self._run_context = None
+        self._controller_signals_connected = False
+        self._action_signals_connected = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -65,6 +68,13 @@ class SmartleadHandoffPage(QWidget):
 
         preflight_box = self._section_box("Smartlead Preflight", content)
         preflight_layout = self._section_layout(preflight_box)
+
+        self.run_context_label = QLabel("No active Campaign Run.", self)
+        self.run_context_label.setWordWrap(True)
+        preflight_layout.addWidget(self.run_context_label)
+
+        self.prepare_run_package_button = QPushButton("Prepare Smartlead Package", self)
+        preflight_layout.addWidget(self.prepare_run_package_button)
 
         connection_row = QHBoxLayout()
         connection_row.setSpacing(8)
@@ -254,6 +264,8 @@ class SmartleadHandoffPage(QWidget):
             controller.summary_changed.connect(self.set_summary)
         if hasattr(controller, "rows_changed"):
             controller.rows_changed.connect(self.set_rows)
+        if hasattr(controller, "run_context_changed"):
+            controller.run_context_changed.connect(self.set_run_context)
         if hasattr(controller, "status_message"):
             controller.status_message.connect(self.show_status)
         if hasattr(controller, "error_message"):
@@ -288,33 +300,43 @@ class SmartleadHandoffPage(QWidget):
             controller.pilot_activation_changed.connect(self.show_pilot_activation)
         if hasattr(controller, "pilot_pause_changed"):
             controller.pilot_pause_changed.connect(self.show_pilot_pause)
-        self.test_connection_button.clicked.connect(self._on_test_connection)
-        self.refresh_campaigns_button.clicked.connect(self._on_refresh_campaigns)
-        self.publish_button.clicked.connect(self._on_publish)
-        self.test_hosting_connection_button.clicked.connect(self._on_test_hosting_connection)
-        self.hosting_dry_run_button.clicked.connect(self._on_hosting_dry_run)
-        self.host_mockups_button.clicked.connect(self._on_host_mockups)
-        self.refresh_readiness_button.clicked.connect(self._on_refresh_readiness)
-        self.prepare_sequence_button.clicked.connect(self._on_prepare_sequence)
-        self.sync_urls_button.clicked.connect(self._on_sync_urls)
-        self.refresh_status_button.clicked.connect(self._on_refresh_status)
-        self.activation_dry_run_button.clicked.connect(self._on_activation_dry_run)
-        self.activate_campaign_button.clicked.connect(self._on_activate_campaign)
-        self.resume_publication_button.clicked.connect(self._on_resume_publication)
-        self.create_pilot_button.clicked.connect(self._on_create_pilot)
-        self.preflight_pilot_button.clicked.connect(self._on_preflight_pilot)
-        self.dry_run_pilot_button.clicked.connect(self._on_dry_run_pilot)
-        self.activate_pilot_button.clicked.connect(self._on_activate_pilot)
-        self.refresh_pilot_button.clicked.connect(self._on_refresh_pilot)
-        self.pause_pilot_button.clicked.connect(self._on_pause_pilot)
-        self.complete_pilot_button.clicked.connect(self._on_complete_pilot)
-        self.pilot_recipient_list.itemSelectionChanged.connect(self._update_pilot_buttons)
-        self.target_mode_combo.currentTextChanged.connect(self._sync_target_mode)
-        self.campaign_combo.currentIndexChanged.connect(self._update_activation_button_state)
-        self.live_checkbox.toggled.connect(self._update_activation_button_state)
+        if not self._action_signals_connected:
+            self.test_connection_button.clicked.connect(self._on_test_connection)
+            self.refresh_campaigns_button.clicked.connect(self._on_refresh_campaigns)
+            self.publish_button.clicked.connect(self._on_publish)
+            self.test_hosting_connection_button.clicked.connect(self._on_test_hosting_connection)
+            self.hosting_dry_run_button.clicked.connect(self._on_hosting_dry_run)
+            self.host_mockups_button.clicked.connect(self._on_host_mockups)
+            self.refresh_readiness_button.clicked.connect(self._on_refresh_readiness)
+            self.prepare_sequence_button.clicked.connect(self._on_prepare_sequence)
+            self.sync_urls_button.clicked.connect(self._on_sync_urls)
+            self.refresh_status_button.clicked.connect(self._on_refresh_status)
+            self.activation_dry_run_button.clicked.connect(self._on_activation_dry_run)
+            self.activate_campaign_button.clicked.connect(self._on_activate_campaign)
+            self.resume_publication_button.clicked.connect(self._on_resume_publication)
+            self.create_pilot_button.clicked.connect(self._on_create_pilot)
+            self.preflight_pilot_button.clicked.connect(self._on_preflight_pilot)
+            self.dry_run_pilot_button.clicked.connect(self._on_dry_run_pilot)
+            self.activate_pilot_button.clicked.connect(self._on_activate_pilot)
+            self.refresh_pilot_button.clicked.connect(self._on_refresh_pilot)
+            self.pause_pilot_button.clicked.connect(self._on_pause_pilot)
+            self.complete_pilot_button.clicked.connect(self._on_complete_pilot)
+            self.prepare_run_package_button.clicked.connect(self._on_prepare_run_package)
+            self.pilot_recipient_list.itemSelectionChanged.connect(self._update_pilot_buttons)
+            self.target_mode_combo.currentTextChanged.connect(self._sync_target_mode)
+            self.campaign_combo.currentIndexChanged.connect(self._update_activation_button_state)
+            self.live_checkbox.toggled.connect(self._update_activation_button_state)
+            self._action_signals_connected = True
         self._sync_target_mode(self.target_mode_combo.currentText())
 
     def set_summary(self, summary: object) -> None:
+        if isinstance(summary, dict) and "total_members" in summary:
+            self.run_context_label.setText(
+                f"Campaign: {summary.get('campaign_name', '') or 'Unknown'}\n"
+                f"{summary.get('total_members', 0)} prospects • Ready {summary.get('ready', 0)} • "
+                f"Blocked {summary.get('blocked', 0)} • Packaged {summary.get('packaged', 0)}"
+            )
+            return
         self._handoff_directory = str(getattr(summary, "handoff_directory", "") or self._handoff_directory)
         if self._handoff_directory:
             candidate = os.path.dirname(self._handoff_directory)
@@ -332,6 +354,20 @@ class SmartleadHandoffPage(QWidget):
     def set_rows(self, rows: list[dict]) -> None:
         self._rows = list(rows or [])
         self._render_rows(self._rows)
+
+    def set_run_context(self, context: object) -> None:
+        self._run_context = context
+        if context is None:
+            self.run_context_label.setText("No active Campaign Run.")
+            return
+        summary = getattr(context, "summary", None)
+        self.run_context_label.setText(
+            f"Campaign: {getattr(context, 'campaign_name', '') or 'Unknown'}\n"
+            f"{getattr(summary, 'total_members', 0) if summary is not None else 0} prospects • "
+            f"Ready {getattr(summary, 'ready', 0) if summary is not None else 0} • "
+            f"Blocked {getattr(summary, 'blocked', 0) if summary is not None else 0} • "
+            f"Packaged {getattr(summary, 'packaged', 0) if summary is not None else 0}"
+        )
 
     def set_connection_status(self, result: object) -> None:
         configured = "Configured" if getattr(result, "status", "") != "NOT_CONFIGURED" else "Not configured"
@@ -418,8 +454,12 @@ class SmartleadHandoffPage(QWidget):
     def _on_refresh_campaigns(self) -> None:
         if self._controller is not None and hasattr(self._controller, "refresh_campaigns"):
             self._controller.refresh_campaigns()
-        if hasattr(controller, "refresh_pilots"):
-            controller.refresh_pilots()
+
+    def _on_prepare_run_package(self) -> None:
+        if self._controller is not None and hasattr(self._controller, "prepare_run_package"):
+            self._controller.prepare_run_package()
+        if self._controller is not None and hasattr(self._controller, "refresh_pilots"):
+            self._controller.refresh_pilots()
 
     def _on_publish(self) -> None:
         if self._controller is None or not self._handoff_directory:

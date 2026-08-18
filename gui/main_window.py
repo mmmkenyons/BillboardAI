@@ -398,9 +398,10 @@ class MainWindow(QMainWindow):
         self.campaign_run_page.set_controller(ctrl)
         ctrl.continue_requested.connect(self._on_continue_campaign)
         ctrl.open_prospect_requested.connect(self._on_open_prospect_in_workspace)
+        ctrl.open_pipeline_requested.connect(self._on_open_pipeline_for_prospect)
         ctrl.open_project_requested.connect(self._on_prospect_open_project)
         ctrl.open_review_requested.connect(self._on_open_campaign_review)
-        ctrl.open_smartlead_requested.connect(lambda: self.show_page("smartlead"))
+        ctrl.open_smartlead_requested.connect(lambda: self._open_run_scoped_smartlead())
         # Keep the run's package-directory hint in sync with the review
         # controller's resolved package (read-only) so package/Smartlead stage
         # status reflects the canonical built package when one exists.
@@ -415,6 +416,14 @@ class MainWindow(QMainWindow):
         self._smartlead_controller.summary_changed.emit(getattr(result, "summary", None))
         self._smartlead_controller.rows_changed.emit([row.to_dict() for row in getattr(result, "rows", ())])
         self.smartlead_page.set_handoff_directory(getattr(result, "handoff_directory", ""))
+
+    def _open_run_scoped_smartlead(self) -> None:
+        self.show_page("smartlead")
+        if self._smartlead_controller is None or self._campaign_run_controller is None:
+            return
+        run_id = self._campaign_run_controller.active_run_id()
+        if run_id:
+            self._smartlead_controller.open_run_context(run_id)
 
     def _on_workflow_stage_requested(self, stage_id: str) -> None:
         mapping = {
@@ -490,6 +499,12 @@ class MainWindow(QMainWindow):
         """Sprint 5H: open a queue-selected prospect in the Prospect Workspace."""
         self.prospects_workspace.select_prospect(prospect_id)
         self.show_page("prospects")
+
+    def _on_open_pipeline_for_prospect(self, prospect_id: str) -> None:
+        """Open the existing opportunity workflow while preserving selected prospect context."""
+        if self._prospect_controller is not None and prospect_id:
+            self._prospect_controller.select(prospect_id)
+        self.show_page("pipeline")
 
     def _on_prospect_open_project(self, project_id: str) -> None:
         """Open a researched prospect's Project in the Project Workspace."""

@@ -73,6 +73,109 @@ def test_page_exposes_pilot_controls():
     assert page.pause_pilot_button.text() == "Pause Pilot Campaign"
 
 
+def test_prepare_run_package_click_path_uses_stored_controller_without_nameerror():
+    from gui.views.smartlead_handoff_page import SmartleadHandoffPage
+    from PySide6.QtWidgets import QApplication
+
+    class DummySignal:
+        def connect(self, fn):
+            self.fn = fn
+
+    class DummyController:
+        def __init__(self):
+            self.summary_changed = DummySignal()
+            self.rows_changed = DummySignal()
+            self.run_context_changed = DummySignal()
+            self.status_message = DummySignal()
+            self.error_message = DummySignal()
+            self.connection_changed = DummySignal()
+            self.campaigns_changed = DummySignal()
+            self.publish_result_changed = DummySignal()
+            self.hosting_connection_changed = DummySignal()
+            self.hosting_summary_changed = DummySignal()
+            self.readiness_changed = DummySignal()
+            self.url_sync_changed = DummySignal()
+            self.reconciliation_changed = DummySignal()
+            self.launch_readiness_changed = DummySignal()
+            self.activation_result_changed = DummySignal()
+            self.pilot_changed = DummySignal()
+            self.pilot_list_changed = DummySignal()
+            self.pilot_preflight_changed = DummySignal()
+            self.pilot_activation_changed = DummySignal()
+            self.pilot_pause_changed = DummySignal()
+            self.prepare_calls = 0
+            self.refresh_pilot_calls = 0
+
+        def prepare_run_package(self):
+            self.prepare_calls += 1
+
+        def refresh_pilots(self):
+            self.refresh_pilot_calls += 1
+
+    app = QApplication.instance() or QApplication([])
+    page = SmartleadHandoffPage()
+    controller = DummyController()
+    page.set_controller(controller)
+
+    page.prepare_run_package_button.click()
+    app.processEvents()
+
+    assert controller.prepare_calls == 1
+    assert controller.refresh_pilot_calls == 1
+
+
+def test_rebinding_controller_does_not_multiply_prepare_button_invocations():
+    from gui.views.smartlead_handoff_page import SmartleadHandoffPage
+    from PySide6.QtWidgets import QApplication
+
+    class DummySignal:
+        def __init__(self):
+            self.connections = []
+
+        def connect(self, fn):
+            self.connections.append(fn)
+
+    class DummyController:
+        def __init__(self):
+            self.summary_changed = DummySignal()
+            self.rows_changed = DummySignal()
+            self.run_context_changed = DummySignal()
+            self.status_message = DummySignal()
+            self.error_message = DummySignal()
+            self.connection_changed = DummySignal()
+            self.campaigns_changed = DummySignal()
+            self.publish_result_changed = DummySignal()
+            self.hosting_connection_changed = DummySignal()
+            self.hosting_summary_changed = DummySignal()
+            self.readiness_changed = DummySignal()
+            self.url_sync_changed = DummySignal()
+            self.reconciliation_changed = DummySignal()
+            self.launch_readiness_changed = DummySignal()
+            self.activation_result_changed = DummySignal()
+            self.pilot_changed = DummySignal()
+            self.pilot_list_changed = DummySignal()
+            self.pilot_preflight_changed = DummySignal()
+            self.pilot_activation_changed = DummySignal()
+            self.pilot_pause_changed = DummySignal()
+            self.prepare_calls = 0
+
+        def prepare_run_package(self):
+            self.prepare_calls += 1
+
+    app = QApplication.instance() or QApplication([])
+    page = SmartleadHandoffPage()
+    first = DummyController()
+    second = DummyController()
+
+    page.set_controller(first)
+    page.set_controller(second)
+    page.prepare_run_package_button.click()
+    app.processEvents()
+
+    assert first.prepare_calls == 0
+    assert second.prepare_calls == 1
+
+
 def test_page_has_scroll_area_and_named_sections():
     from gui.views.smartlead_handoff_page import SmartleadHandoffPage
     from PySide6.QtWidgets import QApplication, QGroupBox

@@ -142,3 +142,34 @@ class TestPipelinePage:
         window = MainWindow(prospect_controller=controller)
         window.show_page("pipeline")
         assert window.pipeline_page.summary_cards["total"].text() == "1"
+
+    def test_manual_pipeline_selection_syncs_authoritative_and_is_not_sticky(self, tmp_path) -> None:
+        """Sprint 5X.8: manual selection updates the authoritative prospect and a
+        later refresh must not force a previously selected campaign prospect back."""
+        _ensure_qapp()
+        path = os.path.join(str(tmp_path), "prospects.json")
+        service = ProspectWorkspaceService(store=ProspectStore(path=path))
+        service.load()
+        t2 = service.create_prospect(company_name="T2 Roofing", website="t2.com")
+        bobs = service.create_prospect(company_name="Bobs burgers", website="bobs.com")
+        controller = ProspectController(service=service)
+        # Simulate Continue Campaign routing: authoritative selection set to t2.
+        controller.select(t2.prospect_id)
+        window = MainWindow(prospect_controller=controller)
+        window.show_page("pipeline")
+        page = window.pipeline_page
+        # Both prospects default to NEW so both are visible in the default stage.
+        assert page.selected_prospect_id() == t2.prospect_id
+        # User manually selects Bobs burgers.
+        bobs_row = next(
+            row for row in range(page.prospect_table.rowCount())
+            if page.prospect_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == bobs.prospect_id
+        )
+        page.prospect_table.selectRow(bobs_row)
+        assert page.selected_prospect_id() == bobs.prospect_id
+        assert page.open_button.isEnabled() is True
+        assert controller.selected_id == bobs.prospect_id
+        # A later refresh must not unexpectedly force T2 Roofing back.
+        page.refresh()
+        assert page.selected_prospect_id() == bobs.prospect_id
+        assert controller.selected_id == bobs.prospect_id

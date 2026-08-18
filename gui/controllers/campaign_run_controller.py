@@ -33,6 +33,7 @@ class CampaignRunController(QObject):
     open_project_requested = Signal(str)
     open_review_requested = Signal(object)
     open_smartlead_requested = Signal()
+    open_pipeline_requested = Signal(str)
     continue_requested = Signal(str)
 
     def __init__(self, *, service: CampaignRunService) -> None:
@@ -208,9 +209,19 @@ class CampaignRunController(QObject):
 
         Pure read-only navigation: never researches/generates/publishes/activates.
         """
+        snapshot = self.refresh()
         target = self._service.continue_target(
             self.active_prospect_ids(), package_directory=self._package_directory
         )
+        if target == "pipeline":
+            for row in snapshot.rows:
+                if str(getattr(row, "next_action", "") or "") == "Resolve Opportunity":
+                    self._selected_prospect_id = row.prospect_id or None
+                    if row.prospect_id:
+                        self.open_pipeline_requested.emit(row.prospect_id)
+                        self.continue_requested.emit(target)
+                        self.status_message.emit("Continue campaign: Resolve Opportunity")
+                        return target
         # When targeting review, carry the run scope so the review table is
         # scoped to this run's prospect ids.
         if target == "campaign_review":

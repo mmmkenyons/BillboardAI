@@ -29,6 +29,7 @@ from gui.models.smartlead_activation_store import SmartleadActivationStore
 from gui.models.smartlead_connection import SmartleadConnectionSettings
 from gui.models.smartlead_pilot_store import SmartleadPilotStore
 from gui.models.smartlead_publication_store import SmartleadPublicationStore
+from gui.models.smartlead_run_package import SmartleadRunPackageStore
 from gui.models.smartlead_sequence import SequenceChangeStore
 from gui.services.asset_hosting import CloudinaryAssetProvider, HostingConnectionSettings
 from gui.services.campaign_export import CampaignExportService
@@ -43,6 +44,7 @@ from gui.services.smartlead_handoff import SmartleadHandoffService
 from gui.services.smartlead_pilot import SmartleadPilotService
 from gui.services.smartlead_publish import SmartleadPublishService
 from gui.services.smartlead_reconciliation import SmartleadReconciliationService
+from gui.services.smartlead_run_handoff import SmartleadRunHandoffService
 from gui.services.smartlead_sequence_readiness import SmartleadSequenceReadinessService
 from gui.main_window import MainWindow
 from gui.resources import APP_VERSION
@@ -118,6 +120,10 @@ def main() -> None:
         review_service=review_service,
     )
     campaign_run_controller = CampaignRunController(service=campaign_run_service)
+    smartlead_run_service = SmartleadRunHandoffService(
+        run_service=campaign_run_service,
+        package_store=SmartleadRunPackageStore(),
+    )
     api_client = SmartleadApiClient(settings=SmartleadConnectionSettings())
     publication_store = SmartleadPublicationStore()
     hosted_asset_store = HostedAssetStore()
@@ -163,6 +169,7 @@ def main() -> None:
         reconciliation_service=reconciliation_service,
         activation_service=activation_service,
         pilot_service=pilot_service,
+        run_handoff_service=smartlead_run_service,
     )
     window = MainWindow(
         controller,

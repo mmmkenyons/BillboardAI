@@ -11,6 +11,7 @@ from gui.services.smartlead_reconciliation import SmartleadReconciliationService
 from gui.services.smartlead_handoff import SmartleadHandoffService
 from gui.services.smartlead_pilot import SmartleadPilotService
 from gui.services.smartlead_publish import SmartleadPublishService
+from gui.services.smartlead_run_handoff import SmartleadRunHandoffService
 
 
 class SmartleadHandoffController(QObject):
@@ -33,6 +34,7 @@ class SmartleadHandoffController(QObject):
     pilot_preflight_changed = Signal(object)
     pilot_activation_changed = Signal(object)
     pilot_pause_changed = Signal(object)
+    run_context_changed = Signal(object)
 
     def __init__(
         self,
@@ -44,6 +46,7 @@ class SmartleadHandoffController(QObject):
         reconciliation_service: SmartleadReconciliationService | None = None,
         activation_service: SmartleadActivationService | None = None,
         pilot_service: SmartleadPilotService | None = None,
+        run_handoff_service: SmartleadRunHandoffService | None = None,
     ) -> None:
         super().__init__()
         self._service = service
@@ -53,7 +56,9 @@ class SmartleadHandoffController(QObject):
         self._reconciliation_service = reconciliation_service
         self._activation_service = activation_service
         self._pilot_service = pilot_service
+        self._run_handoff_service = run_handoff_service
         self._last_result = None
+        self._active_run_id = ""
 
     def prepare(self, package_directory: str) -> object:
         result = self._service.prepare_handoff(package_directory)
@@ -72,6 +77,27 @@ class SmartleadHandoffController(QObject):
 
     def set_handoff_directory(self, path: str) -> None:
         self.status_message.emit(f"Smartlead handoff directory ready: {path}")
+
+    def open_run_context(self, campaign_run_id: str) -> object:
+        self._active_run_id = str(campaign_run_id or "").strip()
+        if self._run_handoff_service is None or not self._active_run_id:
+            return None
+        context = self._run_handoff_service.context_for_run(self._active_run_id)
+        self.run_context_changed.emit(context)
+        self.summary_changed.emit(context.summary.to_dict())
+        self.rows_changed.emit([row.to_dict() for row in context.rows])
+        return context
+
+    def prepare_run_package(self) -> object:
+        if self._run_handoff_service is None or not self._active_run_id:
+            return None
+        context = self._run_handoff_service.prepare_package_for_run(self._active_run_id)
+        self.run_context_changed.emit(context)
+        self.summary_changed.emit(context.summary.to_dict())
+        self.rows_changed.emit([row.to_dict() for row in context.rows])
+        if getattr(context.summary, "handoff_directory", ""):
+            self.status_message.emit("Smartlead package prepared.")
+        return context
 
     def test_connection(self) -> object:
         if self._publish_service is None:

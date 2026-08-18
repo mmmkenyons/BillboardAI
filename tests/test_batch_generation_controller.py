@@ -458,20 +458,151 @@ def test_package_button_signal_flow_and_idempotent_controller(tmp_path, monkeypa
     batch_controller.queue_selected(page.selected_prospect_ids(), page.selected_templates())
     batch_controller.run_queue()
     _wait_until(lambda: batch_controller.is_running is False)
+    _wait_until(lambda: batch_controller._export_service.check_eligibility("a").status != EXPORT_STATUS_BLOCKED)
+
+    counts = {"controller": 0, "service": 0}
+    original_controller_build = batch_controller.build_campaign_package
+    original_service_build = batch_controller._package_service.build_package
+
+    def counted_controller_build(prospect_ids, destination_path, campaign_name=None):
+        counts["controller"] += 1
+        return original_controller_build(prospect_ids, destination_path, campaign_name)
+
+    def counted_service_build(prospect_ids, destination_path, campaign_name=None):
+        counts["service"] += 1
+        return original_service_build(prospect_ids, destination_path, campaign_name)
+
+    monkeypatch.setattr(batch_controller, "build_campaign_package", counted_controller_build)
+    monkeypatch.setattr(batch_controller._package_service, "build_package", counted_service_build)
 
     destination = os.path.join(str(tmp_path), "packages")
     monkeypatch.setattr(
         "gui.views.batch_page.QFileDialog.getExistingDirectory",
         lambda *args, **kwargs: destination,
     )
-    direct_result = batch_controller.build_campaign_package(["a"], destination, "A Co")
-    assert direct_result.success is True
-    assert os.path.isdir(direct_result.package_directory)
+
     page.package_button.click()
     _qapplication().processEvents()
 
     assert page.selected_prospect_ids() == ["a"]
     assert os.path.isdir(destination)
     created = [entry for entry in os.listdir(destination) if os.path.isdir(os.path.join(destination, entry))]
-    assert len(created) == 1
+    assert sorted(created) == ["A_Co"]
     assert "Campaign package created" in page.message_label.text()
+    assert counts == {"controller": 1, "service": 1}
+
+
+def test_direct_package_build_succeeds_after_exportability_ready(tmp_path) -> None:
+    _qapplication()
+
+    def fake_generate(request):
+        os.makedirs(os.path.dirname(request.output_path), exist_ok=True)
+        with open(request.output_path, "w", encoding="utf-8") as handle:
+            handle.write("synthetic")
+        return MockupResult(
+            success=True,
+            website=request.url,
+            output_path=request.output_path,
+            preview_path=request.output_path,
+            company_name="A Co",
+            headline="Headline",
+            cta="CTA",
+            quality_score=90,
+        )
+
+    _, prospect_controller, batch_controller = _setup(tmp_path, fake_generate=fake_generate)
+    exportable = batch_controller._service.prospect_store.get("a")
+    assert exportable is not None
+    exportable.email = "owner@a.com"
+    batch_controller._service.prospect_store.save()
+
+    page = BatchPage()
+    page.set_controller(batch_controller)
+    prospect_controller.load()
+    batch_controller.refresh()
+    page.prospect_table.item(0, BatchPage.COL_SELECT).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
+    combo = page.prospect_table.cellWidget(0, BatchPage.COL_TEMPLATE)
+    assert combo is not None
+    combo.setCurrentIndex(combo.findData("contractor"))
+    batch_controller.queue_selected(page.selected_prospect_ids(), page.selected_templates())
+    batch_controller.run_queue()
+    _wait_until(lambda: batch_controller.is_running is False)
+    _wait_until(lambda: batch_controller._export_service.check_eligibility("a").status != EXPORT_STATUS_BLOCKED)
+
+    destination = os.path.join(str(tmp_path), "packages")
+    result = batch_controller.build_campaign_package(["a"], destination, "A Co")
+
+    assert result.success is True
+    assert os.path.isdir(result.package_directory)
+    assert os.path.basename(result.package_directory) == "A_Co"
+    assert os.path.isfile(result.campaign_csv_path)
+    assert os.path.isfile(result.manifest_path)
+    assert result.included_count == 1
+    assert result.blocked_count == 0
+
+
+def test_package_button_one_click_invokes_single_build(tmp_path, monkeypatch) -> None:
+    _qapplication()
+
+    def fake_generate(request):
+        os.makedirs(os.path.dirname(request.output_path), exist_ok=True)
+        with open(request.output_path, "w", encoding="utf-8") as handle:
+            handle.write("synthetic")
+        return MockupResult(
+            success=True,
+            website=request.url,
+            output_path=request.output_path,
+            preview_path=request.output_path,
+            company_name="A Co",
+            headline="Headline",
+            cta="CTA",
+            quality_score=90,
+        )
+
+    _, prospect_controller, batch_controller = _setup(tmp_path, fake_generate=fake_generate)
+    exportable = batch_controller._service.prospect_store.get("a")
+    assert exportable is not None
+    exportable.email = "owner@a.com"
+    batch_controller._service.prospect_store.save()
+
+    page = BatchPage()
+    page.set_controller(batch_controller)
+    page.set_controller(batch_controller)
+    prospect_controller.load()
+    batch_controller.refresh()
+    page.prospect_table.item(0, BatchPage.COL_SELECT).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Checked)
+    combo = page.prospect_table.cellWidget(0, BatchPage.COL_TEMPLATE)
+    assert combo is not None
+    combo.setCurrentIndex(combo.findData("contractor"))
+    batch_controller.queue_selected(page.selected_prospect_ids(), page.selected_templates())
+    batch_controller.run_queue()
+    _wait_until(lambda: batch_controller.is_running is False)
+    _wait_until(lambda: batch_controller._export_service.check_eligibility("a").status != EXPORT_STATUS_BLOCKED)
+
+    destination = os.path.join(str(tmp_path), "packages")
+    monkeypatch.setattr(
+        "gui.views.batch_page.QFileDialog.getExistingDirectory",
+        lambda *args, **kwargs: destination,
+    )
+
+    counts = {"controller": 0, "service": 0}
+    original_controller_build = batch_controller.build_campaign_package
+    original_service_build = batch_controller._package_service.build_package
+
+    def counted_controller_build(prospect_ids, destination_path, campaign_name=None):
+        counts["controller"] += 1
+        return original_controller_build(prospect_ids, destination_path, campaign_name)
+
+    def counted_service_build(prospect_ids, destination_path, campaign_name=None):
+        counts["service"] += 1
+        return original_service_build(prospect_ids, destination_path, campaign_name)
+
+    monkeypatch.setattr(batch_controller, "build_campaign_package", counted_controller_build)
+    monkeypatch.setattr(batch_controller._package_service, "build_package", counted_service_build)
+
+    page.package_button.click()
+    _qapplication().processEvents()
+
+    created = [entry for entry in os.listdir(destination) if os.path.isdir(os.path.join(destination, entry))]
+    assert sorted(created) == ["A_Co"]
+    assert counts == {"controller": 1, "service": 1}

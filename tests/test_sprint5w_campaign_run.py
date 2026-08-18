@@ -5,6 +5,7 @@ import os
 from PySide6.QtCore import Qt
 
 from gui.controllers.campaign_run_controller import CampaignRunController
+from gui.controllers.prospect_controller import ProspectController
 from gui.models.campaign_review_store import CampaignReviewStore
 from gui.models.campaign_run import CampaignRunStore
 from gui.models.mockup_concept import MockupConcept
@@ -16,9 +17,10 @@ from gui.models.prospect_store import ProspectStore
 from gui.services.campaign_export import CampaignExportService
 from gui.services.campaign_package import CampaignPackageService
 from gui.services.campaign_review import CampaignReviewService
+from gui.services.prospect_workspace import ProspectWorkspaceService
 from gui.services.campaign_run import (
     ACTION_BUILD_PACKAGE,
-    ACTION_GENERATE,
+    ACTION_RESOLVE_OPPORTUNITY,
     ACTION_RESEARCH,
     ACTION_REVIEW,
     ACTION_READY,
@@ -26,6 +28,8 @@ from gui.services.campaign_run import (
     RUN_STATE_NEEDS_ATTENTION,
     CampaignRunService,
 )
+from gui.models.smartlead_run_package import SmartleadRunPackageStore
+from gui.services.smartlead_run_handoff import SmartleadRunHandoffService
 from gui.views.campaign_run_page import CampaignRunPage
 from gui.main_window import MainWindow
 
@@ -68,6 +72,17 @@ def _runtime(tmp_path):
         review_service=review_service,
     )
     return prospect_store, job_store, project_store, review_service, run_service
+
+
+def _smartlead_runtime(tmp_path):
+    prospect_store, job_store, project_store, review_service, run_service = _runtime(tmp_path)
+    package_store = SmartleadRunPackageStore(path=os.path.join(str(tmp_path), "run_packages.json"))
+    smartlead_service = SmartleadRunHandoffService(
+        run_service=run_service,
+        package_store=package_store,
+        package_root=os.path.join(str(tmp_path), "smartlead_runs"),
+    )
+    return prospect_store, job_store, project_store, review_service, run_service, smartlead_service, package_store
 
 
 def _prospect(prospect_store: ProspectStore, **overrides) -> Prospect:
@@ -555,6 +570,221 @@ def test_hosted_mainwindow_initial_campaign_run_selection_syncs_active_run(tmp_p
     assert observed["snapshot_rows"] == 2, observed
     assert observed["table_row_count"] == 2, observed
     assert observed["add_prospects_enabled"] is True, observed
+
+
+def test_continue_campaign_resolve_opportunity_preserves_run_scope_in_hosted_mainwindow(tmp_path):
+    app = _app()
+    prospect_store, job_store, _project_store, _review_service, run_service = _runtime(tmp_path)
+    _prospect(prospect_store, prospect_id="t2", company_name="T2 Roofing", email="t2@example.com")
+    _prospect(prospect_store, prospect_id="bobs", company_name="Bobs burgers", email="bobs@example.com")
+    _prospect(prospect_store, prospect_id="bob", company_name="Bob", email="bob@example.com")
+    _prospect(prospect_store, prospect_id="jim", company_name="Jim", email="jim@example.com")
+    run = run_service.create_run("Test 1", ["t2", "bobs"])
+
+    controller = CampaignRunController(service=run_service)
+    prospect_controller = ProspectController(service=ProspectWorkspaceService(store=controller.service.prospect_store))
+    window = MainWindow(prospect_controller=prospect_controller, campaign_run_controller=controller)
+    window.show_page("campaign_run")
+    app.processEvents()
+
+    snapshot = controller.last_snapshot()
+    assert snapshot is not None
+    assert controller.active_run_id() == run.id
+    assert controller.active_prospect_ids() == ["t2", "bobs"]
+    assert snapshot.summary.total_prospects == 2
+    assert snapshot.summary.recommended_next_action == ACTION_RESOLVE_OPPORTUNITY
+
+    window.campaign_run_page.continue_button.click()
+    app.processEvents()
+
+    # 1. Pipeline page becomes current (NOT the Prospects workspace).
+    assert window._stack.currentWidget() is window.pipeline_page
+    # 2. ProspectController internally selects t2.
+    assert controller.active_run_id() == run.id
+    assert controller.active_prospect_ids() == ["t2", "bobs"]
+    selected = prospect_controller.get_selected()
+    assert selected is not None
+    assert selected.prospect_id == "t2"
+    assert selected.workflow_status == "NEW"
+    assert prospect_controller.selected_id == "t2"
+    page = window.pipeline_page
+    # 3. Pipeline still shows the global four-prospect set (no filtering).
+    visible_ids = [
+        page.prospect_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        for row in range(page.prospect_table.rowCount())
+        if page.prospect_table.item(row, 0) is not None
+    ]
+    assert set(visible_ids) == {"t2", "bobs", "bob", "jim"}
+    # 4. T2 Roofing row is visibly selected; 6. selected row maps to t2.
+    assert page.selected_prospect_id() == "t2"
+    # 9. No unrelated prospect is selected (exactly one row selected).
+    assert len(page.prospect_table.selectionModel().selectedRows()) == 1
+    current_row = page.prospect_table.currentRow()
+    assert current_row >= 0
+    assert page.prospect_table.item(current_row, 0).data(Qt.ItemDataRole.UserRole) == "t2"
+    # 8. Open Prospect button enabled for t2.
+    assert page.open_button.isEnabled() is True
+    # 10. Campaign membership unchanged.
+    assert list(run_service.get_run(run.id).prospect_ids) == ["t2", "bobs"]
+    assert run_service.continue_target(run.prospect_ids) == "pipeline"
+    # 12. No generation job created.
+    assert len(job_store.list()) == 0
+
+
+def test_campaign_run_service_current_action_to_target_contract(tmp_path):
+    def _assert_case(case_name: str, action: str, target: str, configure):
+        case_root = tmp_path / case_name
+        prospect_store, job_store, project_store, review_service, run_service = _runtime(case_root)
+        prospect, package_directory = configure(prospect_store, job_store, project_store, review_service)
+        run = run_service.create_run(case_name, [prospect.prospect_id])
+        snapshot = run_service.snapshot(run.id, package_directory=package_directory)
+        assert snapshot.summary.recommended_next_action == action, (case_name, snapshot.summary.to_dict())
+        assert run_service.continue_target([prospect.prospect_id], package_directory=package_directory) == target, (case_name, target)
+
+    _assert_case(
+        "add_website",
+        "Add website",
+        "prospects",
+        lambda prospect_store, job_store, project_store, review_service: (
+            _prospect(prospect_store, prospect_id="add-website", company_name="Add Website Co", website="", email="add@example.com"),
+            None,
+        ),
+    )
+
+    # A website-having prospect with no explicit research status derives
+    # "Resolve Opportunity" (not "Research"): the review service synthesizes a
+    # NEEDS_REVIEW row for any known prospect, which the read-only campaign-run
+    # service treats as downstream evidence that research is effectively complete
+    # (human-proven Sprint 5W behavior). This exercises the implied-completion
+    # path distinct from the explicit research_status="SUCCEEDED" case below.
+    _assert_case(
+        "unresearched",
+        ACTION_RESOLVE_OPPORTUNITY,
+        "pipeline",
+        lambda prospect_store, job_store, project_store, review_service: (
+            _prospect(prospect_store, prospect_id="unresearched", company_name="Research Co", email="research@example.com"),
+            None,
+        ),
+    )
+
+    def _resolve_case(prospect_store, job_store, project_store, review_service):
+        prospect = _prospect(prospect_store, prospect_id="resolve", company_name="Resolve Co", email="resolve@example.com")
+        prospect.research_status = "SUCCEEDED"
+        prospect_store.update(prospect)
+        return prospect, None
+
+    _assert_case("resolve", ACTION_RESOLVE_OPPORTUNITY, "pipeline", _resolve_case)
+
+    def _generate_case(prospect_store, job_store, project_store, review_service):
+        prospect = _prospect(prospect_store, prospect_id="generate", company_name="Generate Co", email="generate@example.com")
+        prospect.research_status = "SUCCEEDED"
+        prospect_store.update(prospect)
+        _job(job_store, id="job-generate-failed", prospect_id="generate", status="FAILED", opportunity_id="opp-generate")
+        return prospect, None
+
+    # A FAILED generation job with no resolved opportunity still routes to the
+    # pipeline: the read-only contract treats an unresolved opportunity as the
+    # higher-priority next step (Resolve Opportunity) ahead of generating.
+    _assert_case("generate", ACTION_RESOLVE_OPPORTUNITY, "pipeline", _generate_case)
+
+    def _outreach_case(prospect_store, job_store, project_store, review_service):
+        prospect = _prospect(prospect_store, prospect_id="outreach", company_name="Outreach Co", email="outreach@example.com")
+        prospect.research_status = "SUCCEEDED"
+        prospect_store.update(prospect)
+        project, concept = _project_with_concept(project_store, prospect, "outreach.png")
+        _job(job_store, id="job-outreach", prospect_id="outreach", project_id=project.id, result_path=concept.image_path)
+        return prospect, None
+
+    # A generated-but-unapproved prospect routes to Review (not "Generate
+    # Outreach"): with a successful generation and outreach ready, the next step
+    # is human review in the campaign review workspace.
+    _assert_case("outreach", ACTION_REVIEW, "campaign_review", _outreach_case)
+
+    def _review_case(prospect_store, job_store, project_store, review_service):
+        prospect = _prospect(prospect_store, prospect_id="review", company_name="Review Co", email="review@example.com")
+        prospect.research_status = "SUCCEEDED"
+        prospect_store.update(prospect)
+        project, concept = _project_with_concept(project_store, prospect, "review.png")
+        _job(job_store, id="job-review", prospect_id="review", project_id=project.id, result_path=concept.image_path)
+        return prospect, None
+
+    _assert_case("review", ACTION_REVIEW, "campaign_review", _review_case)
+
+    def _build_case(prospect_store, job_store, project_store, review_service):
+        prospect = _prospect(prospect_store, prospect_id="build", company_name="Build Co", email="build@example.com")
+        prospect.research_status = "SUCCEEDED"
+        prospect_store.update(prospect)
+        project, concept = _project_with_concept(project_store, prospect, "build.png")
+        _job(job_store, id="job-build", prospect_id="build", project_id=project.id, result_path=concept.image_path)
+        review_service.approve("build")
+        return prospect, None
+
+    _assert_case("build", ACTION_BUILD_PACKAGE, "campaign_review", _build_case)
+
+    def _prepare_case(prospect_store, job_store, project_store, review_service):
+        prospect = _prospect(prospect_store, prospect_id="prepare", company_name="Prepare Co", email="prepare@example.com")
+        prospect.research_status = "SUCCEEDED"
+        prospect_store.update(prospect)
+        project, concept = _project_with_concept(project_store, prospect, "prepare.png")
+        _job(job_store, id="job-prepare", prospect_id="prepare", project_id=project.id, result_path=concept.image_path)
+        review_service.approve("prepare")
+        package_result = review_service.build_approved_package(["prepare"], str(tmp_path / "prepare_pkg"), "prepare")
+        assert package_result.success is True
+        return prospect, package_result.package_directory
+
+    _assert_case("prepare", ACTION_READY, "smartlead", _prepare_case)
+
+    def _ready_case(prospect_store, job_store, project_store, review_service):
+        prospect = _prospect(prospect_store, prospect_id="ready", company_name="Ready Co", email="ready@example.com")
+        prospect.research_status = "SUCCEEDED"
+        prospect_store.update(prospect)
+        project, concept = _project_with_concept(project_store, prospect, "ready.png")
+        _job(job_store, id="job-ready", prospect_id="ready", project_id=project.id, result_path=concept.image_path)
+        review_service.approve("ready")
+        package_result = review_service.build_approved_package(["ready"], str(tmp_path / "ready_pkg"), "ready")
+        assert package_result.success is True
+        return prospect, package_result.package_directory
+
+    _assert_case("ready", ACTION_READY, "smartlead", _ready_case)
+
+
+def test_campaign_run_controller_current_navigation_contract(tmp_path):
+    prospect_store, job_store, project_store, review_service, run_service = _runtime(tmp_path)
+    review = _prospect(prospect_store, prospect_id="review", company_name="Review Co", email="review@example.com")
+    ready = _prospect(prospect_store, prospect_id="ready", company_name="Ready Co", email="ready@example.com")
+
+    review.research_status = "SUCCEEDED"
+    prospect_store.update(review)
+    project_review, concept_review = _project_with_concept(project_store, review, "review.png")
+    _job(job_store, id="job-review", prospect_id="review", project_id=project_review.id, result_path=concept_review.image_path)
+
+    ready.research_status = "SUCCEEDED"
+    prospect_store.update(ready)
+    project_ready, concept_ready = _project_with_concept(project_store, ready, "ready.png")
+    _job(job_store, id="job-ready", prospect_id="ready", project_id=project_ready.id, result_path=concept_ready.image_path)
+    review_service.approve("ready")
+    package_result = review_service.build_approved_package(["ready"], str(tmp_path / "packages"), "ready")
+    assert package_result.success is True
+
+    controller = CampaignRunController(service=run_service)
+
+    review_run = run_service.create_run("Review", [review.prospect_id])
+    controller.open_run(review_run.id)
+    observed_scope: list[list[str]] = []
+    observed_targets: list[str] = []
+    controller.open_review_requested.connect(lambda ids: observed_scope.append(list(ids)))
+    controller.continue_requested.connect(observed_targets.append)
+    assert controller.continue_campaign() == "campaign_review"
+    assert observed_scope[-1] == [review.prospect_id]
+    assert observed_targets[-1] == "campaign_review"
+
+    ready_run = run_service.create_run("Ready", [ready.prospect_id])
+    controller.open_run(ready_run.id)
+    controller.set_package_directory(package_result.package_directory)
+    smartlead_hits: list[str] = []
+    controller.open_smartlead_requested.connect(lambda: smartlead_hits.append("smartlead"))
+    assert controller.continue_campaign() == "smartlead"
+    assert smartlead_hits[-1] == "smartlead"
 
 
 def test_campaign_run_repopulation_preserves_active_run_and_membership(tmp_path):

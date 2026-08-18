@@ -48,6 +48,10 @@ class ProspectPipelinePage(QWidget):
         self._summary = None
         self._stage_items: list = []
         self._selected_stage: Optional[str] = None
+        # Sprint 5X.8: guards the programmatic repopulation of the prospect table
+        # so that internal itemSelectionChanged churn is not mistaken for a user
+        # selection and does not overwrite the authoritative prospect selection.
+        self._populating = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -195,18 +199,43 @@ class ProspectPipelinePage(QWidget):
         self._render_prospect_table()
 
     def _render_prospect_table(self) -> None:
-        self.prospect_table.clearContents()
-        self.prospect_table.setRowCount(len(self._stage_items))
-        for row, item in enumerate(self._stage_items):
-            company = self._text_item(item.company_name)
-            company.setData(Qt.ItemDataRole.UserRole, item.prospect_id)
-            self.prospect_table.setItem(row, 0, company)
-            self.prospect_table.setItem(row, 1, self._text_item(PRIORITY_LABELS.get(item.priority, item.priority)))
-            self.prospect_table.setItem(row, 2, self._text_item(item.next_action))
-            self.prospect_table.setItem(row, 3, self._text_item(item.next_action_date or ""))
-            self.prospect_table.setItem(row, 4, self._text_item(_TIMING_LABELS.get(item.timing_state, item.timing_state)))
+        self._populating = True
+        try:
+            self.prospect_table.clearContents()
+            self.prospect_table.setRowCount(len(self._stage_items))
+            for row, item in enumerate(self._stage_items):
+                company = self._text_item(item.company_name)
+                company.setData(Qt.ItemDataRole.UserRole, item.prospect_id)
+                self.prospect_table.setItem(row, 0, company)
+                self.prospect_table.setItem(row, 1, self._text_item(PRIORITY_LABELS.get(item.priority, item.priority)))
+                self.prospect_table.setItem(row, 2, self._text_item(item.next_action))
+                self.prospect_table.setItem(row, 3, self._text_item(item.next_action_date or ""))
+                self.prospect_table.setItem(row, 4, self._text_item(_TIMING_LABELS.get(item.timing_state, item.timing_state)))
+        finally:
+            self._populating = False
         self.status_label.setText(f"Showing {len(self._stage_items)} prospect{'s' if len(self._stage_items) != 1 else ''}.")
+        self._restore_selection_from_controller()
         self.open_button.setEnabled(self.selected_prospect_id() is not None)
+
+    def _restore_selection_from_controller(self) -> None:
+        """Restore the visible table selection from the authoritative prospect selection.
+
+        The ProspectController owns the single source of truth for the selected
+        prospect. Repopulating the pipeline table would otherwise wipe any visible
+        selection (for example after Continue Campaign routes a run member with a
+        Resolve Opportunity next action). Reflect the authoritative selection when
+        the matching row is present in the currently displayed stage, and otherwise
+        leave the visible table untouched.
+        """
+        if self._controller is None:
+            return
+        desired = self._controller.selected_id
+        if not desired:
+            return
+        for row, item in enumerate(self._stage_items):
+            if item.prospect_id == desired:
+                self.prospect_table.selectRow(row)
+                return
 
     def _on_stage_selection_changed(self) -> None:
         row = self.stage_table.currentRow()
@@ -220,7 +249,14 @@ class ProspectPipelinePage(QWidget):
         self._refresh_stage_detail()
 
     def _on_prospect_selection_changed(self) -> None:
-        self.open_button.setEnabled(self.selected_prospect_id() is not None)
+        prospect_id = self.selected_prospect_id()
+        self.open_button.setEnabled(prospect_id is not None)
+        # Sprint 5X.8: keep the authoritative selected-prospect identity in sync
+        # with the visible pipeline selection (single source of truth). Ignore the
+        # selection churn caused by programmatic repopulation so a refresh does not
+        # overwrite the authoritative selection with a stale row.
+        if self._controller is not None and prospect_id and not self._populating:
+            self._controller.select(prospect_id)
 
     def _open_selected_prospect(self) -> None:
         prospect_id = self.selected_prospect_id()
