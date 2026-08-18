@@ -59,8 +59,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 COLUMN_ALIASES: Dict[str, tuple] = {
-    "company_name": ("company", "company_name", "business", "business_name"),
-    "website": ("website", "url", "domain", "website_url"),
+    "company_name": ("company", "company_name", "business", "business_name", "brokerage_name"),
+    "website": (
+        "website", "url", "domain", "website_url",
+        "parent_website", "brokerage_website", "company_website",
+    ),
     "phone": ("phone", "phone_number", "telephone"),
     "email": ("email", "email_address"),
     "address": ("address", "street", "street_address"),
@@ -69,7 +72,10 @@ COLUMN_ALIASES: Dict[str, tuple] = {
     "postal_code": ("postal_code", "zip", "zip_code", "postcode"),
     "category": ("category", "industry", "business_type"),
     "subcategory": ("subcategory", "niche"),
-    "contact_name": ("contact", "contact_name", "name", "primary_contact"),
+    "contact_name": (
+        "contact", "contact_name", "name", "primary_contact",
+        "agent_name", "person_name",
+    ),
     "contact_title": ("title", "contact_title", "job_title"),
     "source": ("source", "lead_source"),
     "source_id": ("source_id", "external_id", "id"),

@@ -1,0 +1,454 @@
+"""Sprint 5Z profile resolution test suite (Qt-free, offline).
+
+Exercises :mod:`gui.services.profile_resolver` end-to-end with a deterministic
+``FakeSite`` fetcher so every scenario (robots, sitemaps, homepage, directory
+pages, candidate verification) runs without touching the live web.
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from gui.models.prospect import (
+    CONFIDENCE_HIGH,
+    CONFIDENCE_MEDIUM,
+    RESOLUTION_AMBIGUOUS,
+    RESOLUTION_ERROR,
+    RESOLUTION_NOT_ATTEMPTED,
+    RESOLUTION_NOT_FOUND,
+    RESOLUTION_RESOLVED,
+    Prospect,
+)
+from gui.models.prospect_store import ProspectStore
+from gui.services.profile_resolver import (
+    ProfileResolverService,
+    FetchError,
+    effective_scrape_url,
+    full_name_in_text,
+    is_safe_url,
+    is_within_parent,
+    name_in_url_slug,
+    normalize_person_name,
+    parse_robots_sitemaps,
+    person_name_tokens,
+    persons_match,
+    same_registered_domain,
+)
+
+PARENT = "https://pinnaclerealtyia.com"
+
+
+class _Pages:
+    """Serves deterministic HTML/XML keyed by URL path."""
+
+    def __init__(self, *, dup_strong: bool = False) -> None:
+        self.dup_strong = dup_strong
+        self.requests: list[str] = []
+
+    def fetch(self, url: str) -> str:
+        self.requests.append(url)
+        path = url.split("//", 1)[-1]
+        path = path.split("/", 1)[1] if "/" in path else "/"
+        path = "/" + path.strip("/")
+        return self._body(path)
+
+    def _body(self, path: str) -> str:
+        if path == "/robots.txt":
+            return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap.xml\n"
+        if path == "/sitemap.xml" or path == "/sitemap_index.xml":
+            return (
+                '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<sitemap><loc>https://pinnaclerealtyia.com/sitemap-agents.xml</loc></sitemap>"
+                "<sitemap><loc>https://pinnaclerealtyia.com/sitemap-pages.xml</loc></sitemap>"
+                "</sitemapindex>"
+            )
+        if path == "/sitemap-agents.xml":
+            return (
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url>"
+                "<url><loc>https://pinnaclerealtyia.com/agent/john-doe</loc></url>"
+                "</urlset>"
+            )
+        if path == "/sitemap-pages.xml":
+            return (
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<url><loc>https://pinnaclerealtyia.com/contact</loc></url>"
+                "</urlset>"
+            )
+        if path == "/":
+            return (
+                "<html><head><title>Pinnacle Realty | Des Moines</title></head><body>"
+                '<a href="/agents">Our Team</a>'
+                '<a href="/agent/meridith-hoffman">Meridith Hoffman</a>'
+                "</body></html>"
+            )
+        if path.startswith("/agents"):
+            return (
+                "<html><body>"
+                "<h1>Our Agents</h1>"
+                '<a href="/agent/meridith-hoffman">Meridith Hoffman</a>'
+                '<a href="/agent/john-doe">John Doe</a>'
+                "</body></html>"
+            )
+        if path == "/agent/meridith-hoffman":
+            bowie_note = (
+                "Meridith Hoffman is also featured in our training department."
+                if self.dup_strong
+                else "John Doe handles the south corridor."
+            )
+            return (
+                "<html><head><title>Meridith Hoffman | Pinnacle Realty</title></head><body>"
+                "<h1>Meridith Hoffman</h1>"
+                "<p>Meridith Hoffman is a realtor in Des Moines."
+                " Bio: licensed 12 years. Experience with farm sales.</p>"
+                f"<p>{bowie_note}</p>"
+                "<p>Email: meridith@pinnaclerealtyia.com | Phone</p>"
+                '<img src="/img/mh.jpg" />'
+                '<script type="application/ld+json">'
+                '{"@type":"Person","name":"Meridith Hoffman"}'
+                "</script>"
+                "</body></html>"
+            )
+        if path == "/agent/john-doe":
+            meridith_note = (
+                "Meridith Hoffman works here too."
+                if self.dup_strong
+                else "John Doe is our new agent."
+            )
+            return (
+                "<html><head><title>John Doe | Pinnacle Realty</title></head><body>"
+                "<h1>John Doe</h1>"
+                f"<p>{meridith_note} John Doe covers rural listings.</p>"
+                "</body></html>"
+            )
+        raise FetchError(f"HTTP 404 for {path}")
+
+
+def _service(dup_strong: bool = False) -> tuple[ProfileResolverService, _Pages]:
+    site = _Pages(dup_strong=dup_strong)
+    return ProfileResolverService(fetcher=site.fetch), site
+
+
+def _prospect(
+    *, name: str = "Meridith Hoffman", website: str = PARENT, prospect_id: str = "p1"
+) -> Prospect:
+    return Prospect(
+        prospect_id=prospect_id,
+        company_name="Pinnacle Realty IA",
+        contact_name=name,
+        website=website,
+    )
+
+
+# ---------------------------------------------------------------------------
+# URL safety + domain boundary
+# ---------------------------------------------------------------------------
+
+
+class TestUrlSafety:
+    def test_safe_https_and_http(self) -> None:
+        assert is_safe_url("https://pinnaclerealtyia.com/agents")
+        assert is_safe_url("http://pinnaclerealtyia.com")
+
+    def test_rejects_bad_schemes(self) -> None:
+        assert not is_safe_url("ftp://pinnaclerealtyia.com")
+        assert not is_safe_url("file:///etc/passwd")
+
+    def test_rejects_localhost_and_private(self) -> None:
+        assert not is_safe_url("http://localhost")
+        assert not is_safe_url("http://127.0.0.1/x")
+        assert not is_safe_url("http://10.0.0.1")
+        assert not is_safe_url("http://192.168.1.1")
+
+    def test_rejects_non_host_and_blank(self) -> None:
+        assert not is_safe_url("")
+        assert not is_safe_url(None)
+
+    def test_same_registered_domain(self) -> None:
+        assert same_registered_domain(
+            "https://www.pinnaclerealtyia.com/x", "https://pinnaclerealtyia.com"
+        )
+        assert not same_registered_domain(
+            "https://evil.com", "https://pinnaclerealtyia.com"
+        )
+
+    def test_is_within_parent_boundary(self) -> None:
+        assert is_within_parent(
+            "https://pinnaclerealtyia.com/agent/john-doe", PARENT
+        )
+        assert not is_within_parent("https://evil.com/agent/john-doe", PARENT)
+
+
+# ---------------------------------------------------------------------------
+# Name normalization (conservative, exact)
+# ---------------------------------------------------------------------------
+
+
+class TestNameNormalization:
+    def test_normalize_person_name(self) -> None:
+        assert normalize_person_name("Meridith A. Hoffman") == "meridith a hoffman"
+        # Hyphens in surnames are intentionally preserved.
+        assert normalize_person_name("MERIDITH-HOFFMAN") == "meridith-hoffman"
+        assert normalize_person_name("  ") == ""
+
+    def test_person_tokens(self) -> None:
+        assert person_name_tokens("Meridith A Hoffman") == ("meridith", "a", "hoffman")
+
+    def test_persons_match_middle_initial_tolerance(self) -> None:
+        assert persons_match("Meridith Hoffman", "MERIDITH A. HOFFMAN")
+        assert persons_match("John Doe Jr.", "john doe")
+        assert not persons_match("Meridith Hoffman", "Meridith Smith")
+        # First/last-only matching is structurally impossible.
+        assert not persons_match("Meridith", "Meridith")
+
+    def test_full_name_in_text(self) -> None:
+        assert full_name_in_text("Meridith Hoffman", "Meet Meridith Hoffman realtor")
+        assert full_name_in_text("Meridith Hoffman", "Meridith A Hoffman")
+        assert not full_name_in_text("Meridith Hoffman", "Meridith only")
+
+    def test_name_in_url_slug(self) -> None:
+        assert name_in_url_slug(
+            "Meridith Hoffman", "https://x.com/agents/meridith-hoffman"
+        )
+        assert not name_in_url_slug("Meridith Hoffman", "https://x.com/john-doe")
+
+    def test_parse_robots_sitemaps(self) -> None:
+        robots = (
+            "User-agent: *\n"
+            "Sitemap: https://x.com/s1.xml\n"
+            "Sitemap: https://x.com/s2.xml\n"
+        )
+        assert parse_robots_sitemaps(robots) == [
+            "https://x.com/s1.xml",
+            "https://x.com/s2.xml",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end resolution (deterministic FakeSite)
+# ---------------------------------------------------------------------------
+
+
+class TestResolution:
+    def test_resolves_unique_realtor_profile_high_confidence(self) -> None:
+        service, _ = _service()
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.resolved_url == "https://pinnaclerealtyia.com/agent/meridith-hoffman"
+        assert result.confidence == CONFIDENCE_HIGH
+        assert result.url == result.resolved_url
+
+    def test_resolves_from_directory_when_not_in_direct_sitemap(self) -> None:
+        class LocalFetcher:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return ""
+                if path in ("/", ""):
+                    return '<a href="/agents">Team</a>'
+                if path == "/agents":
+                    return (
+                        '<a href="/agent/meridith-hoffman">Meridith Hoffman</a>'
+                    )
+                if path.startswith("/agent/meridith"):
+                    return (
+                        "<html><head><title>Meridith Hoffman - Pinnacle</title></head>"
+                        "<body><h1>Meridith Hoffman</h1>"
+                        "<p>Bio and contact: meridith@pinnaclerealtyia.com</p>"
+                        "</body></html>"
+                    )
+                raise FetchError(f"missing {path}")
+
+        service = ProfileResolverService(fetcher=LocalFetcher())
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.resolved_url == "https://pinnaclerealtyia.com/agent/meridith-hoffman"
+        assert result.confidence == CONFIDENCE_HIGH
+
+    def test_resolves_when_medium_confidence_slug_only(self) -> None:
+        # Candidate page has the name slug + image/contact corroboration but no
+        # full-name text, yielding at least MEDIUM.
+        class SlugFetcher:
+            def __call__(self, url: str) -> str:
+                host = url.split("//", 1)[-1]
+                path = host.split("/", 1)[1] if "/" in host else "/"
+                path = "/" + path.strip("/")
+                if path in ("/robots.txt", "/sitemap.xml", "/sitemap_index.xml"):
+                    return ""
+                if path in ("/", ""):
+                    return '<a href="/team">Team</a><a href="/agent/alex-kahn">Alex</a>'
+                if path == "/team":
+                    return '<a href="/agent/alex-kahn">Alex Kahn</a>'
+                if path.startswith("/agent/alex-kahn"):
+                    return (
+                        "<html><head><title>Realtor in Des Moines</title></head>"
+                        "<body><p>Call today</p>"
+                        '<img src="/a.jpg"><a href="mailto:a@pinnaclerealtyia.com">'
+                        "</body></html>"
+                    )
+                raise FetchError(f"missing {path}")
+
+        service = ProfileResolverService(fetcher=SlugFetcher())
+        result = service.resolve("Alex Kahn", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.resolved_url == "https://pinnaclerealtyia.com/agent/alex-kahn"
+        assert result.confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM)
+
+    def test_ambiguous_when_multiple_strong_candidates(self) -> None:
+        service, _ = _service(dup_strong=True)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_AMBIGUOUS
+        assert result.resolved_url == ""
+
+    def test_not_found_when_no_matching_profile(self) -> None:
+        service, _ = _service()
+        result = service.resolve("Nobody Else", PARENT)
+        assert result.status == RESOLUTION_NOT_FOUND
+        assert result.resolved_url == ""
+
+    def test_error_for_unsafe_parent(self) -> None:
+        service, _ = _service()
+        result = service.resolve("Meridith Hoffman", "http://localhost")
+        assert result.status == RESOLUTION_ERROR
+
+    def test_error_when_name_missing(self) -> None:
+        service, _ = _service()
+        result = service.resolve("  ", PARENT)
+        assert result.status == RESOLUTION_ERROR
+
+    def test_error_when_first_last_only(self) -> None:
+        service, _ = _service()
+        result = service.resolve("Meridith", PARENT)
+        assert result.status == RESOLUTION_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Application layer + effective URL selection
+# ---------------------------------------------------------------------------
+
+
+class TestApplyAndEffectiveUrl:
+    def test_apply_result_preserves_website_and_sets_fields(self) -> None:
+        service, _ = _service()
+        prospect = _prospect(website="https://broker.other.com")
+        result = service.resolve("Meridith Hoffman", PARENT)
+        returned = service.apply_result(prospect, result)
+        assert returned is prospect
+        assert prospect.website == "https://broker.other.com"  # never replaced
+        assert prospect.resolution_status == RESOLUTION_RESOLVED
+        assert prospect.resolution_confidence == CONFIDENCE_HIGH
+        assert (
+            prospect.resolved_profile_url
+            == "https://pinnaclerealtyia.com/agent/meridith-hoffman"
+        )
+        assert "profile_resolution" in prospect.metadata
+
+    def test_apply_result_preserves_manual_override(self) -> None:
+        service, _ = _service()
+        prospect = _prospect()
+        service.set_manual_profile_url(
+            prospect, "https://pinnaclerealtyia.com/agent/manual-jane"
+        )
+        result = service.resolve("Meridith Hoffman", PARENT)
+        service.apply_result(prospect, result)
+        # Applying auto-resolution must never clobber a manual override.
+        assert (
+            prospect.manual_profile_url
+            == "https://pinnaclerealtyia.com/agent/manual-jane"
+        )
+
+    def test_effective_manual_wins(self) -> None:
+        prospect = _prospect()
+        prospect.manual_profile_url = "https://pinnaclerealtyia.com/agent/manual"
+        prospect.resolution_status = RESOLUTION_RESOLVED
+        prospect.resolved_profile_url = "https://pinnaclerealtyia.com/agent/auto"
+        prospect.resolution_confidence = CONFIDENCE_HIGH
+        assert effective_scrape_url(prospect) == "https://pinnaclerealtyia.com/agent/manual"
+
+    def test_effective_resolved_high_confidence(self) -> None:
+        prospect = _prospect()
+        prospect.resolution_status = RESOLUTION_RESOLVED
+        prospect.resolved_profile_url = "https://pinnaclerealtyia.com/agent/auto"
+        prospect.resolution_confidence = CONFIDENCE_HIGH
+        assert effective_scrape_url(prospect) == "https://pinnaclerealtyia.com/agent/auto"
+
+    def test_effective_low_confidence_falls_back_to_website(self) -> None:
+        prospect = _prospect()
+        prospect.resolution_status = RESOLUTION_RESOLVED
+        prospect.resolved_profile_url = "https://pinnaclerealtyia.com/agent/auto"
+        prospect.resolution_confidence = "LOW"
+        assert effective_scrape_url(prospect) == PARENT
+
+    def test_effective_unsafe_manual_ignored(self) -> None:
+        prospect = _prospect()
+        prospect.manual_profile_url = "http://localhost/x"
+        assert effective_scrape_url(prospect) == PARENT
+
+    def test_effective_none(self) -> None:
+        assert effective_scrape_url(None) == ""
+
+    def test_set_manual_rejects_unsafe(self) -> None:
+        service, _ = _service()
+        with pytest.raises(ValueError):
+            service.set_manual_profile_url(_prospect(), "http://localhost/x")
+
+    def test_clear_manual(self) -> None:
+        service, _ = _service()
+        prospect = _prospect()
+        service.set_manual_profile_url(
+            prospect, "https://pinnaclerealtyia.com/agent/manual"
+        )
+        assert prospect.manual_profile_url
+        service.clear_manual_profile_url(prospect)
+        assert prospect.manual_profile_url == ""
+
+
+# ---------------------------------------------------------------------------
+# Batch resolution + persistence round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestBatchAndPersistence:
+    def test_resolve_prospects_applies_in_place(self) -> None:
+        service, _ = _service()
+        prospects = [
+            _prospect(prospect_id="ok", name="Meridith Hoffman"),
+            _prospect(prospect_id="bad-site", website="http://localhost"),
+        ]
+        results = service.resolve_prospects(prospects, apply=True)
+        assert len(results) == 2
+        assert results[0].status == RESOLUTION_RESOLVED
+        assert results[1].status == RESOLUTION_ERROR
+        # One failure never aborts the rest. The safe site was applied; the
+        # pre-validation error is reported but not written onto the prospect.
+        assert prospects[0].resolution_status == RESOLUTION_RESOLVED
+        assert prospects[1].resolution_status == RESOLUTION_NOT_ATTEMPTED
+
+    def test_resolve_prospects_apply_false_only_reports(self) -> None:
+        service, _ = _service()
+        prospects = [_prospect(prospect_id="ok", name="Meridith Hoffman")]
+        results = service.resolve_prospects(prospects, apply=False)
+        assert results[0].status == RESOLUTION_RESOLVED
+        assert prospects[0].resolution_status == RESOLUTION_NOT_ATTEMPTED
+
+    def test_persistence_round_trip(self, tmp_path) -> None:
+        store = ProspectStore(path=os.path.join(str(tmp_path), "prospects.json"))
+        prospect = _prospect(prospect_id="p-round", name="Meridith Hoffman")
+        store.create(prospect)
+        service, _ = _service()
+        result = service.resolve("Meridith Hoffman", PARENT)
+        service.apply_result(prospect, result)
+        store.update(prospect)
+
+        reloaded = store.get("p-round")
+        assert reloaded is not None
+        assert reloaded.resolution_status == RESOLUTION_RESOLVED
+        assert reloaded.resolution_confidence == CONFIDENCE_HIGH
+        assert (
+            reloaded.resolved_profile_url
+            == "https://pinnaclerealtyia.com/agent/meridith-hoffman"
+        )

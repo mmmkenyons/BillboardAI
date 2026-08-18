@@ -144,6 +144,33 @@ PRIORITY_LABELS: Dict[str, str] = {
 _DEFAULT_PRIORITY = PRIORITY_NORMAL
 
 # ---------------------------------------------------------------------------
+# Profile resolution (Sprint 5Z) — individual profile scrape-target enrichment.
+# These fields never replace ``website`` (the authoritative parent/business
+# website); they are additive scrape-target metadata for person/agent profiles.
+# ---------------------------------------------------------------------------
+RESOLUTION_NOT_ATTEMPTED = "NOT_ATTEMPTED"
+RESOLUTION_RESOLVED = "RESOLVED"
+RESOLUTION_AMBIGUOUS = "AMBIGUOUS"
+RESOLUTION_NOT_FOUND = "NOT_FOUND"
+RESOLUTION_ERROR = "ERROR"
+
+RESOLUTION_STATUSES: tuple = (
+    RESOLUTION_NOT_ATTEMPTED,
+    RESOLUTION_RESOLVED,
+    RESOLUTION_AMBIGUOUS,
+    RESOLUTION_NOT_FOUND,
+    RESOLUTION_ERROR,
+)
+
+_DEFAULT_RESOLUTION_STATUS = RESOLUTION_NOT_ATTEMPTED
+
+CONFIDENCE_HIGH = "HIGH"
+CONFIDENCE_MEDIUM = "MEDIUM"
+CONFIDENCE_LOW = "LOW"
+CONFIDENCE_LEVELS: tuple = (CONFIDENCE_LOW, CONFIDENCE_MEDIUM, CONFIDENCE_HIGH)
+_DEFAULT_CONFIDENCE = ""
+
+# ---------------------------------------------------------------------------
 # ID helpers
 # ---------------------------------------------------------------------------
 
@@ -522,6 +549,13 @@ class Prospect:
     next_action_date: Optional[str] = None
     workflow_notes: str = ""
 
+    # Sprint 5Z: optional individual profile scrape-target enrichment. These are
+    # strictly additive and never replace ``website`` (parent/business identity).
+    resolved_profile_url: str = ""
+    manual_profile_url: str = ""
+    resolution_status: str = _DEFAULT_RESOLUTION_STATUS
+    resolution_confidence: str = _DEFAULT_CONFIDENCE
+
     # For MVP, a prospect carries zero-or-more contacts (usually one primary).
     contacts: List[Contact] = field(default_factory=list)
 
@@ -584,6 +618,10 @@ class Prospect:
             "next_action": self.next_action,
             "next_action_date": self.next_action_date,
             "workflow_notes": self.workflow_notes,
+            "resolved_profile_url": self.resolved_profile_url,
+            "manual_profile_url": self.manual_profile_url,
+            "resolution_status": self.resolution_status,
+            "resolution_confidence": self.resolution_confidence,
             "contacts": [c.to_dict() for c in self.contacts],
         }
 
@@ -641,6 +679,12 @@ class Prospect:
             next_action=_clean(data.get("next_action")),
             next_action_date=next_action_date,
             workflow_notes=_clean(data.get("workflow_notes")),
+            # Sprint 5Z: additive, forward-compatible profile-resolution fields.
+            resolved_profile_url=_clean(data.get("resolved_profile_url")),
+            manual_profile_url=_clean(data.get("manual_profile_url")),
+            resolution_status=_clean(data.get("resolution_status"))
+            or _DEFAULT_RESOLUTION_STATUS,
+            resolution_confidence=_clean(data.get("resolution_confidence")),
             contacts=contacts,
         )
 # ---------------------------------------------------------------------------

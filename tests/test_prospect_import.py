@@ -73,6 +73,25 @@ class TestCsvImport:
         assert p.category == "roofing"
         assert p.postal_code == "57104"
 
+    def test_contact_name_agent_person_aliases(self, tmp_path) -> None:
+        # Sprint 5Z: real-estate / person-oriented headers map to contact_name.
+        imp = _importer(tmp_path)
+        mapping = detect_mapping(["business_name", "agent_name"])
+        assert mapping.get("contact_name") == "agent_name"
+        mapping2 = detect_mapping(["business_name", "person_name"])
+        assert mapping2.get("contact_name") == "person_name"
+
+        text = _csv(
+            "company,agent_name",
+            "Pinnacle Realty,Meridith Hoffman",
+        )
+        result = imp.import_text(text)
+        assert result.imported == 1
+        p = imp._store.list()[0]
+        assert p.contact_name == "Meridith Hoffman"
+        assert len(p.contacts) == 1
+        assert p.contacts[0].name == "Meridith Hoffman"
+
     def test_missing_optional_fields(self, tmp_path) -> None:
         imp = _importer(tmp_path)
         text = _csv("company", "Jim Woods Roofing")

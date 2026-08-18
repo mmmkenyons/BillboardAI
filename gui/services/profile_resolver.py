@@ -1,0 +1,950 @@
+"""Sprint 5Z profile resolution service (Qt-free).
+
+Resolves "Person Name + Parent Organization Website" into a high-confidence
+individual profile URL (e.g. a real-estate agent profile inside a brokerage
+site). The resolver is strictly an **enrichment** layer: it never modifies
+``Prospect.website`` (the authoritative parent/business website) and never
+creates a general crawler or people-search platform.
+
+Design rules:
+
+- **Qt-free / UI-free.** This module never imports Qt and spawns no browser.
+- **Injectably networked.** All network access goes through a small fetcher
+  ``Fetcher`` so deterministic tests and the durable verifier can use local
+  fixtures without touching the live web.
+- **Bounded and deterministic.** Hard limits on sitemap depth/child count/URL
+  count, directory pages, links, and candidate verification are centralized and
+  testable. No infinite pagination, no unrestricted crawling.
+- **Safety first.** Discovery allows only ``http``/``https`` and rejects
+  localhost / loopback / private IP literals (minimal SSRF protection scoped to
+  this layer).
+- **Same-domain boundary.** Candidates must share the parent registered domain
+  (``tldextract``); external domains are never auto-selected.
+- **Wrong-person is worse than NOT_FOUND.** Name matching is deterministic and
+  exact (full-name tokens with one middle-initial/suffix tolerance). No fuzzy
+  edit distance, no nickname guessing, no first/last-name-only matching. A weak
+  or ambiguous candidate is never silently auto-selected.
+
+The service also owns ``effective_scrape_url`` (manual profile URL -> resolved
+profile URL -> parent website), which the generation layer calls at job
+creation so existing execution remains unchanged.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import unicodedata
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Sequence
+from urllib.parse import urljoin, urlparse
+
+import requests
+from bs4 import BeautifulSoup
+import tldextract
+
+from gui.models.prospect import (
+    CONFIDENCE_HIGH,
+    CONFIDENCE_LOW,
+    CONFIDENCE_MEDIUM,
+    RESOLUTION_AMBIGUOUS,
+    RESOLUTION_ERROR,
+    RESOLUTION_NOT_FOUND,
+    RESOLUTION_RESOLVED,
+    Prospect,
+)
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Centralized bounds / constants (testable)
+# ---------------------------------------------------------------------------
+DEFAULT_TIMEOUT = 15.0           # seconds for a single resolver HTTP request
+MAX_SITEMAP_DEPTH = 1            # sitemap-index recursion depth
+MAX_CHILD_SITEMAPS = 25          # child sitemap <urlset> fetches per index
+MAX_SITEMAP_URLS = 20000         # total distinct sitemap URLs consumed
+MAX_SITEMAP_BYTES = 5_000_000    # per-sitemap response size guard
+MAX_DIRECTORY_PAGES = 5          # homepage-linked directory pages to fetch
+MAX_HOMEPAGE_LINKS = 800         # homepage <a href> cap for discovery
+MAX_LINKS_SCANNED = 600          # per-directory-page link cap
+MAX_CANDIDATES_VERIFY = 8        # candidates whose pages we actually fetch
+
+# Path token indicators that a URL is likely an individual/agent profile.
+PROFILE_PATH_TOKENS = (
+    "agent", "agents", "realtor", "realtors", "team", "staff", "member",
+    "members", "directory", "bio", "profile", "people", "about",
+)
+# Path tokens that a page is a directory/home (not itself a profile candidate).
+DIRECTORY_PATH_TOKENS = (
+    "agents", "realtors", "team", "staff", "members", "directory", "people",
+)
+SUFFIX_TOKENS = frozenset({"jr", "sr", "ii", "iii", "iv", "v", "md", "dds", "esq"})
+
+NETWORK_ERROR_TOKEN = "network/access failure"
+
+# ---------------------------------------------------------------------------
+# Fetching abstraction (injectable for deterministic tests)
+# ---------------------------------------------------------------------------
+
+
+class FetchError(Exception):
+    """Raised when a bounded discovery fetch fails (non-2xx, timeout, size)."""
+
+
+#: Fetcher signature: ``(url) -> body str``, raising FetchError on failure.
+Fetcher = Callable[[str], str]
+
+
+def default_fetcher(timeout: float = DEFAULT_TIMEOUT) -> Fetcher:
+    """Production fetcher: requests + engine user-agent + redirect + size cap."""
+    from engine import config as engine_config
+
+    def _fetch(url: str) -> str:
+        try:
+            response = requests.get(
+                url,
+                timeout=timeout,
+                headers={"User-Agent": engine_config.USER_AGENT},
+                allow_redirects=True,
+                stream=True,
+            )
+        except requests.RequestException as exc:  # noqa: BLE001
+            raise FetchError(f"{NETWORK_ERROR_TOKEN}: {exc}") from exc
+        if response.status_code != 200:
+            raise FetchError(f"HTTP {response.status_code} for {url}")
+        chunks: List[str] = []
+        size = 0
+        for chunk in response.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            size += len(chunk)
+            if size > MAX_SITEMAP_BYTES:
+                raise FetchError(f"response too large for {url}")
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    return _fetch
+
+
+# ---------------------------------------------------------------------------
+# URL safety + domain boundary
+# ---------------------------------------------------------------------------
+
+_PRIVATE_HOST_RE = re.compile(
+    r"^(127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0$|"
+    r"100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)"
+)
+_PRIVATE_HOST_RE2 = re.compile(r"^(172\.(1[6-9]|2\d|3[01])\.)")
+
+
+def is_safe_url(url: str) -> bool:
+    """Return True when the URL is a bounded http(s) target we may fetch."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return False
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host or host == "::1":
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    if _PRIVATE_HOST_RE.match(host) or _PRIVATE_HOST_RE2.match(host):
+        return False
+    return "." in host
+
+
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
+
+
+def normalize_url(raw: str) -> str:
+    """Best-effort absolute URL; prepend https:// when scheme-less."""
+    if not raw:
+        return ""
+    value = raw.strip()
+    if not _URL_SCHEME_RE.match(value):
+        value = "https://" + value
+    return value
+
+
+def parent_origin(url: str) -> str:
+    """Return ``scheme://netloc`` for a parent website URL (https default)."""
+    value = normalize_url(url)
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ""
+    return f"{parsed.scheme or 'https'}://{parsed.netloc}"
+
+
+def registered_domain(url: str) -> str:
+    """Return the lowercase registered domain, e.g. 'pinnaclerealtyia.com'."""
+    value = normalize_url(url)
+    if not value:
+        return ""
+    try:
+        return (tldextract.extract(value).registered_domain or "").lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def same_registered_domain(a: str, b: str) -> bool:
+    rac = registered_domain(a)
+    return bool(rac) and rac == registered_domain(b)
+
+
+def is_within_parent(candidate: str, parent: str) -> bool:
+    """Candidates must be a safe http(s) URL within the parent's registration."""
+    candidate = normalize_url(candidate)
+    parent = parent_origin(parent)
+    return bool(is_safe_url(candidate)) and bool(is_safe_url(parent)) and (
+        same_registered_domain(candidate, parent)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Name normalization (deterministic, conservative)
+# ---------------------------------------------------------------------------
+
+_PUNCT_RE = re.compile(r"[^0-9\w\s\-']")
+_WS_RE = re.compile(r"\s+")
+_INITIAL_RE = re.compile(r"^[a-z]$")
+
+
+def normalize_person_name(name: Any) -> str:
+    """Canonical person name (lowercase, unicode-normalized, tokenized).
+
+    ``Meridith A. Hoffman`` and ``MERIDITH-HOFFMAN`` both become
+    ``meridith a hoffman``. Returns ``""`` for blank/whitespace input.
+    """
+    if name is None:
+        return ""
+    text = unicodedata.normalize("NFKD", str(name)).strip()
+    text = _PUNCT_RE.sub(" ", text)
+    return _WS_RE.sub(" ", text).strip().lower()
+
+
+def normalize_person_slug(name: Any) -> str:
+    """URL-ish slug from a person name (e.g. ``meridith-hoffman``)."""
+    return "-".join(t for t in normalize_person_name(name).split() if t)
+
+
+def person_name_tokens(name: Any) -> tuple[str, ...]:
+    return tuple(t for t in normalize_person_name(name).split() if t)
+
+
+def _core_name_tokens(name: Any) -> tuple[str, ...]:
+    """First + last tokens, dropping one middle initial and conventional suffixes.
+
+    Returns ``()`` when fewer than two distinct salient tokens exist, so
+    first-name-only / last-name-only matching is structurally impossible.
+    """
+    tokens = [t for t in person_name_tokens(name)]
+    if len(tokens) < 2:
+        return ()
+    # Drop conventional suffixes anywhere.
+    tokens = [t for t in tokens if t not in SUFFIX_TOKENS]
+    if len(tokens) < 2:
+        return ()
+    # Drop a single middle initial (a one-letter token between first and last).
+    reduced: List[str] = [tokens[0]]
+    middle = tokens[1:-1]
+    initials = [t for t in middle if _INITIAL_RE.match(t)]
+    if len(initials) >= 1 and len(middle) == 1:
+        # exactly one token sits between first and last and it's an initial
+        reduced = [tokens[0]] + [tokens[-1]]
+    else:
+        reduced = [tokens[0]] + [t for t in middle if not _INITIAL_RE.match(t)] + [tokens[-1]]
+    # De-dup adjacent duplicates while preserving order.
+    out: List[str] = []
+    for t in reduced:
+        if not out or out[-1] != t:
+            out.append(t)
+    return tuple(out)
+
+
+def persons_match(name_a: Any, name_b: Any) -> bool:
+    """Exact full-name comparison (one middle-initial / suffix tolerant)."""
+    ca, cb = _core_name_tokens(name_a), _core_name_tokens(name_b)
+    return bool(ca) and ca == cb
+
+
+def full_name_in_text(name: Any, text: Any) -> bool:
+    """True when the full name appears contiguously in a token stream (with
+    at most one middle initial/suffix tolerated). Never a first/last-only match.
+    """
+    tokens = _ws_tokens(text)
+    core = _core_name_tokens(name)
+    if len(core) < 2 or len(tokens) < 2:
+        return False
+    first, last = core[0], core[-1]
+    # Direct adjacency.
+    for i in range(len(tokens) - 1):
+        if tokens[i] == first and tokens[i + 1] == last:
+            return True
+    # Tolerate a single middle token that is an initial or suffix.
+    for i in range(len(tokens) - 2):
+        if tokens[i] == first and tokens[i + 2] == last:
+            middle = tokens[i + 1]
+            if _INITIAL_RE.match(middle) or middle in SUFFIX_TOKENS:
+                return True
+    return False
+
+
+def _ws_tokens(text: Any) -> tuple[str, ...]:
+    if not text:
+        return ()
+    norm = unicodedata.normalize("NFKD", str(text)).strip().lower()
+    return tuple(t for t in _WS_RE.sub(" ", norm).split() if t)
+
+
+def name_in_url_slug(name: Any, url: str) -> bool:
+    """True when first+last name tokens appear in the URL path (hyphen tolerant)."""
+    core = _core_name_tokens(name)
+    if len(core) < 2:
+        return False
+    try:
+        path = (urlparse(normalize_url(url)).path or "").strip("/").lower()
+    except ValueError:
+        return False
+    if not path:
+        return False
+    slug_tokens = [t.strip().strip("._-") for t in re.split(r"[/\-\s_]+", path) if t.strip()]
+    if not slug_tokens:
+        return False
+    return core[0] in slug_tokens and core[-1] in slug_tokens
+
+
+# ---------------------------------------------------------------------------
+# Parsers (robots + sitemap)
+# ---------------------------------------------------------------------------
+
+_SITEMAP_LINE_RE = re.compile(
+    r"^\s*Sitemap\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def parse_robots_sitemaps(robots_text: str) -> List[str]:
+    """Return distinct ``Sitemap:`` URLs declared in robots.txt."""
+    out: List[str] = []
+    seen = set()
+    for match in _SITEMAP_LINE_RE.finditer(robots_text or ""):
+        url = match.group(1).strip()
+        if url and url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def _fetch_or_none(fetcher: Fetcher, url: str) -> Optional[str]:
+    if not is_safe_url(url):
+        return None
+    try:
+        return fetcher(url)
+    except Exception as exc:  # noqa: BLE001 - never let one fetch kill a batch
+        logger.debug("resolver fetch failed for %s: %s", url, exc)
+        return None
+
+
+def _extract_loc_urls(xml_text: str, cap: int) -> List[str]:
+    """Return the <loc> URLs from a sitemap / index XML blob (bounded)."""
+    out: List[str] = []
+    if not xml_text:
+        return out
+    try:
+        soup = BeautifulSoup(xml_text, "xml")
+    except Exception:  # noqa: BLE001
+        return out
+    for loc in soup.find_all("loc"):
+        text = (loc.get_text("", strip=True) or "").strip()
+        if not text or not is_safe_url(text):
+            continue
+        out.append(text)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _sitemaps_from_index(index_text: str, cap: int) -> List[str]:
+    return _extract_loc_urls(index_text, cap)
+
+
+def _urls_from_sitemap(sitemap_text: str, cap: int) -> List[str]:
+    return _extract_loc_urls(sitemap_text, cap)
+
+
+def _looks_like_index(body: str) -> bool:
+    low = (body or "").lower()
+    return "<sitemapindex" in low
+
+
+# ---------------------------------------------------------------------------
+# Resolution result model
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ResolutionCandidate:
+    """Explainable evidence snapshot for one candidate profile URL."""
+
+    url: str = ""
+    method: str = ""                 # sitemap | directory | homepage
+    strong_name: bool = False        # full name in title/heading/content/jsonld
+    strong_slug: bool = False        # name slug in URL + corroboration
+    slug_only: bool = False          # name slug in URL but weak corroboration
+    title_contains_name: bool = False
+    has_schema: bool = False
+    has_contact: bool = False
+    has_image: bool = False
+    has_bio: bool = False
+    linked_from_directory: bool = False
+    same_domain: bool = False
+    reason: str = ""
+    confidence: str = ""
+
+    def plausibility_score(self) -> int:
+        score = 0
+        if self.strong_name:
+            score += 8
+        if self.strong_slug:
+            score += 5
+        if self.slug_only:
+            score += 2
+        if self.title_contains_name:
+            score += 2
+        if self.has_schema:
+            score += 3
+        if self.linked_from_directory:
+            score += 2
+        if self.has_contact:
+            score += 1
+        if self.has_image:
+            score += 1
+        if self.has_bio:
+            score += 1
+        return score
+
+    def is_strong(self) -> bool:
+        return self.strong_name or self.strong_slug
+
+
+@dataclass
+class ResolutionResult:
+    """Structured outcome of a single profile resolution."""
+
+    status: str = "NOT_ATTEMPTED"
+    url: str = ""
+    confidence: str = ""
+    method: str = ""
+    evidence: str = ""
+    candidates: List[ResolutionCandidate] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.candidates is None:
+            self.candidates = []
+
+    @property
+    def resolved_url(self) -> str:
+        return self.url if self.status == RESOLUTION_RESOLVED and self.url else ""
+
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+
+
+class ProfileResolverService:
+    """Qt-free resolver orchestrating discovery, decision, and effective URL.
+
+    Network access is injected via :attr:`fetcher` (defaults to the
+    ``requests``-based production fetcher) so all tests and the durable verifier
+    are deterministic and offline.
+    """
+
+    def __init__(
+        self,
+        *,
+        fetcher: Optional[Fetcher] = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        max_child_sitemaps: int = MAX_CHILD_SITEMAPS,
+        max_sitemap_urls: int = MAX_SITEMAP_URLS,
+        max_directory_pages: int = MAX_DIRECTORY_PAGES,
+        max_homepage_links: int = MAX_HOMEPAGE_LINKS,
+        max_links_scanned: int = MAX_LINKS_SCANNED,
+        max_candidates_verify: int = MAX_CANDIDATES_VERIFY,
+    ) -> None:
+        self._fetcher = fetcher or default_fetcher(timeout=timeout)
+        self._timeout = timeout
+        self.max_child_sitemaps = max_child_sitemaps
+        self.max_sitemap_urls = max_sitemap_urls
+        self.max_directory_pages = max_directory_pages
+        self.max_homepage_links = max_homepage_links
+        self.max_links_scanned = max_links_scanned
+        self.max_candidates_verify = max_candidates_verify
+
+    def _validate_input(self, person_name: str, parent_website: str):
+        parent = parent_origin(parent_website)
+        if not parent or not is_safe_url(parent):
+            return ResolutionResult(status=RESOLUTION_ERROR,
+                                    evidence="parent website is not a safe http(s) URL")
+        person = (person_name or "").strip()
+        if not person:
+            return ResolutionResult(status=RESOLUTION_ERROR, evidence="person name required")
+        if len(_core_name_tokens(person)) < 2:
+            return ResolutionResult(status=RESOLUTION_ERROR,
+                                    evidence="person name needs first and last name")
+        return person, parent
+
+    def resolve(self, person_name: str, parent_website: str) -> ResolutionResult:
+        """Resolve a person profile within the parent's web presence."""
+        _require = self._validate_input(person_name, parent_website)
+        if isinstance(_require, ResolutionResult):
+            return _require
+        person, parent = _require
+
+        seen: Dict[str, ResolutionCandidate] = {}
+        candidates: List[ResolutionCandidate] = []
+
+        def _add_candidate(c: ResolutionCandidate) -> None:
+            if not c.url:
+                return
+            existing = seen.get(c.url)
+            if existing is not None:
+                existing.linked_from_directory = (
+                    existing.linked_from_directory or c.linked_from_directory
+                )
+                existing.method = existing.method or c.method
+                return
+            if is_within_parent(c.url, parent):
+                seen[c.url] = c
+                candidates.append(c)
+
+        # Stage 1/2: robots-declared sitemaps + conventional sitemap endpoints.
+        for sm in self._collect_sitemap_urls(parent):
+            body = _fetch_or_none(self._fetcher, sm)
+            if body is None:
+                continue
+            if _looks_like_index(body):
+                for child in _sitemaps_from_index(body, self.max_child_sitemaps):
+                    child_body = _fetch_or_none(self._fetcher, child)
+                    if child_body is None:
+                        continue
+                    self._add_from_urlset(child, child_body, person, parent, _add_candidate)
+            else:
+                self._add_from_urlset(sm, body, person, parent, _add_candidate)
+
+        # Stage 4: homepage + a bounded set of directory pages.
+        self._discover_from_homepage(person, parent, candidates, _add_candidate)
+
+        # Stage 5: verify the best-bounded candidates by fetching their pages.
+        ranked = self._rank_candidates(candidates, person)
+        verified: List[ResolutionCandidate] = []
+        for cand in ranked[: self.max_candidates_verify]:
+            body = _fetch_or_none(self._fetcher, cand.url)
+            if body is None:
+                verified.append(cand)
+                continue
+            self._score_candidate_page(cand, body, person)
+            verified.append(cand)
+
+        return self._decision(verified, person)
+
+    def resolve_prospects(
+        self, prospects: Sequence[Prospect], *, apply: bool = True
+    ) -> List[ResolutionResult]:
+        """Resolve many prospects; one failure never aborts the rest.
+
+        When ``apply=True`` auto-resolution fields are written onto each
+        ``Prospect`` in place (the caller persists). Results are ordered.
+        """
+        results: List[ResolutionResult] = []
+        for prospect in prospects:
+            if prospect is None:
+                results.append(ResolutionResult(status=RESOLUTION_ERROR))
+                continue
+            parent = prospect.website or ""
+            person = (prospect.contact_name or prospect.company_name or "").strip()
+            if not parent or not is_safe_url(parent_origin(parent)):
+                results.append(ResolutionResult(status=RESOLUTION_ERROR,
+                                                evidence="parent website missing/unsafe"))
+                continue
+            try:
+                result = self.resolve(person, parent)
+            except Exception as exc:  # noqa: BLE001 - never kill the batch
+                logger.warning("resolution failed for %s: %s", prospect.prospect_id, exc)
+                result = ResolutionResult(status=RESOLUTION_ERROR,
+                                          evidence=f"resolution error: {exc}")
+            results.append(result)
+            if apply:
+                self.apply_result(prospect, result)
+        return results
+
+    # ------------------------------------------------------------------
+    # Persist / apply / manual override
+    # ------------------------------------------------------------------
+
+    def apply_result(self, prospect: Prospect, result: ResolutionResult) -> Prospect:
+        """Write auto-resolution fields (never manual) onto ``prospect``.
+
+        Preserves ``prospect.website`` and any existing ``manual_profile_url``.
+        Concise evidence is stored only in ``metadata`` (never page bodies).
+        """
+        if prospect is None:
+            raise ValueError("prospect required")
+        resolution = result.status if result else RESOLUTION_ERROR
+        if resolution not in (RESOLUTION_RESOLVED, RESOLUTION_AMBIGUOUS,
+                              RESOLUTION_NOT_FOUND, RESOLUTION_ERROR):
+            resolution = RESOLUTION_ERROR
+        resolved = resolution == RESOLUTION_RESOLVED and bool(result and result.url)
+        prospect.resolution_status = resolution
+        prospect.resolution_confidence = (result.confidence if result and resolved else "")
+        prospect.resolved_profile_url = (result.url if result and resolved else "")
+        meta = dict(prospect.metadata)
+        meta["profile_resolution"] = {
+            "resolution_method": (result.method if result else "") or "",
+            "resolution_evidence": (result.evidence if result else "") or "",
+            "resolved_at": _utc_now_iso(),
+            "candidate_count": len(result.candidates) if result and result.candidates else 0,
+        }
+        prospect.metadata = meta
+        prospect.touch()
+        return prospect
+
+    def set_manual_profile_url(self, prospect: Prospect, url: str) -> Prospect:
+        """Set a persisted manual override (same scheme/host safety guard)."""
+        if prospect is None:
+            raise ValueError("prospect required")
+        value = normalize_url(url)
+        if value and not is_safe_url(value):
+            raise ValueError("manual profile URL must be a safe http(s) URL")
+        prospect.manual_profile_url = value or ""
+        prospect.touch()
+        return prospect
+
+    def clear_manual_profile_url(self, prospect: Prospect) -> Prospect:
+        prospect.manual_profile_url = ""
+        prospect.touch()
+        return prospect
+
+    # ------------------------------------------------------------------
+    # Effective scrape URL (authoritative single source)
+    # ------------------------------------------------------------------
+
+    def effective_scrape_url(self, prospect: Prospect) -> str:
+        """manual -> resolved(HIGH/MEDIUM) -> parent website (see module fn)."""
+        return effective_scrape_url(prospect)
+
+    # ------------------------------------------------------------------
+    # Discovery internals (bounded, deterministic)
+    # ------------------------------------------------------------------
+
+    def _collect_sitemap_urls(self, parent: str) -> List[str]:
+        """robots-declared sitemaps + conventional endpoints (bounded)."""
+        urls: List[str] = []
+        seen = set()
+
+        def _consider(raw: str) -> None:
+            url = urljoin(parent, raw) if not _URL_SCHEME_RE.match(raw) else raw
+            if not url or not is_safe_url(url) or not same_registered_domain(url, parent):
+                return
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+        robots = _fetch_or_none(self._fetcher, urljoin(parent, "/robots.txt"))
+        if robots is not None:
+            for sm in parse_robots_sitemaps(robots):
+                _consider(sm)
+        _consider("/sitemap.xml")
+        _consider("/sitemap_index.xml")
+        return urls
+
+    def _add_from_urlset(
+        self,
+        sitemap_url: str,
+        body: str,
+        person: str,
+        parent: str,
+        add: Callable[[ResolutionCandidate], None],
+    ) -> None:
+        page_urls = _urls_from_sitemap(body, self.max_sitemap_urls)
+        for url in page_urls:
+            if not url or not is_within_parent(url, parent):
+                continue
+            if _looks_directory_path(url):
+                continue
+            if not _looks_profile_path(url) and not name_in_url_slug(person, url):
+                continue
+            add(
+                ResolutionCandidate(
+                    url=url,
+                    method="sitemap",
+                    slug_only=name_in_url_slug(person, url),
+                    same_domain=is_within_parent(url, parent),
+                )
+            )
+
+    def _discover_from_homepage(
+        self,
+        person: str,
+        parent: str,
+        candidates: List[ResolutionCandidate],
+        add: Callable[[ResolutionCandidate], None],
+    ) -> None:
+        home_body = _fetch_or_none(self._fetcher, parent)
+        if home_body is None:
+            return
+        directory_pages: List[str] = []
+        seen_dir: set = set()
+        try:
+            soup = BeautifulSoup(home_body, "lxml")
+        except Exception:  # noqa: BLE001
+            return
+        for anchor in soup.find_all("a", href=True)[: self.max_homepage_links]:
+            url = normalize_url(urljoin(parent, (anchor.get("href") or "").strip()))
+            if not url or not is_within_parent(url, parent):
+                continue
+            text = " ".join((anchor.get_text(" ", strip=True) or "").lower().split())[:120]
+            if name_in_url_slug(person, url) or full_name_in_text(person, text):
+                add(ResolutionCandidate(url=url, method="homepage",
+                                        slug_only=name_in_url_slug(person, url),
+                                        same_domain=True))
+            if _looks_directory_path(url) and url not in seen_dir:
+                seen_dir.add(url)
+                directory_pages.append(url)
+        for url in directory_pages[: self.max_directory_pages]:
+            body = _fetch_or_none(self._fetcher, url)
+            if body is None:
+                continue
+            for profile_url in self._links_from_directory_page(body, parent, person):
+                add(ResolutionCandidate(url=profile_url, method="directory",
+                                        slug_only=name_in_url_slug(person, profile_url),
+                                        linked_from_directory=True,
+                                        same_domain=is_within_parent(profile_url, parent)))
+
+    def _links_from_directory_page(
+        self, dir_body: str, parent: str, person: str
+    ) -> List[str]:
+        out: List[str] = []
+        seen: set = set()
+        try:
+            soup = BeautifulSoup(dir_body, "lxml")
+        except Exception:  # noqa: BLE001
+            return out
+        for anchor in soup.find_all("a", href=True)[: self.max_links_scanned]:
+            url = normalize_url(urljoin(parent, (anchor.get("href") or "").strip()))
+            if not url or not is_within_parent(url, parent) or _looks_directory_path(url):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            text = " ".join((anchor.get_text(" ", strip=True) or "").lower().split())[:120]
+            if name_in_url_slug(person, url) or full_name_in_text(person, text):
+                out.append(url)
+        return out
+
+    @staticmethod
+    def _rank_candidates(
+        candidates: List[ResolutionCandidate], person: str
+    ) -> List[ResolutionCandidate]:
+        def _key(c: ResolutionCandidate) -> int:
+            score = c.plausibility_score()
+            if c.slug_only:
+                score += 3
+            if c.linked_from_directory:
+                score += 1
+            return -score
+
+        return sorted(candidates, key=_key)
+
+    def _score_candidate_page(
+        self, cand: ResolutionCandidate, body: str, person: str
+    ) -> ResolutionCandidate:
+        title = ""
+        soup_text = ""
+        jsonld_names: List[str] = []
+        has_schema = False
+        has_contact = False
+        has_image = False
+        has_bio = False
+        try:
+            soup = BeautifulSoup(body, "lxml")
+            title = (soup.title.get_text(" ", strip=True) if soup.title else "") or ""
+            soup_text = soup.get_text(" ", strip=True) or ""
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    data = json.loads(script.string or "")
+                except Exception:  # noqa: BLE001
+                    continue
+                _collect_jsonld_names(data, jsonld_names)
+                if isinstance(data, (dict, list)) and data:
+                    has_schema = True
+            if any(t in soup_text.lower() for t in ("tel:", "@", "phone", "email")):
+                has_contact = True
+            if soup.find("img"):
+                has_image = True
+            low = soup_text.lower()
+            if any(k in low for k in ("bio", "biograph", "experience", "specialties", "about me")):
+                has_bio = True
+        except Exception:  # noqa: BLE001
+            return cand
+
+        combined = f"{title}\n{soup_text}"
+        cand.title_contains_name = full_name_in_text(person, title)
+        strong_text = full_name_in_text(person, combined)
+        structured_match = any(persons_match(person, n) for n in jsonld_names)
+        slug = name_in_url_slug(person, cand.url)
+        corroboration = (
+            has_schema or has_bio or cand.linked_from_directory
+            or (has_image and has_contact) or cand.title_contains_name
+        )
+        cand.has_schema = has_schema or bool(jsonld_names)
+        cand.has_contact = has_contact
+        cand.has_image = has_image
+        cand.has_bio = has_bio
+        cand.strong_name = strong_text or structured_match
+        cand.strong_slug = bool(slug) and corroboration and not cand.strong_name
+        cand.slug_only = bool(slug) and not cand.strong_slug and not cand.strong_name
+        cand.confidence = _confidence_for(cand)
+        cand.reason = _build_reason(cand)
+        return cand
+
+    def _decision(
+        self, verified: List[ResolutionCandidate], person: str
+    ) -> ResolutionResult:
+        strong = [c for c in verified if c.is_strong()]
+        if len(strong) == 1:
+            cand = strong[0]
+            if cand.confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM):
+                return ResolutionResult(
+                    status=RESOLUTION_RESOLVED, url=cand.url,
+                    confidence=cand.confidence, method=cand.method,
+                    evidence=cand.reason or "unique strong name match",
+                    candidates=verified,
+                )
+        if len(strong) > 1:
+            return ResolutionResult(
+                status=RESOLUTION_AMBIGUOUS,
+                evidence=f"multiple plausible candidates ({len(strong)})\u2014 manual review",
+                candidates=verified,
+            )
+        plausible = [c for c in verified if c.plausibility_score() > 0]
+        if len(plausible) > 1:
+            return ResolutionResult(status=RESOLUTION_AMBIGUOUS,
+                                    evidence="multiple weak candidates\u2014manual review",
+                                    candidates=verified)
+        if plausible:
+            return ResolutionResult(status=RESOLUTION_NOT_FOUND,
+                                    evidence="only weak evidence\u2014no safe selection",
+                                    candidates=verified)
+        return ResolutionResult(status=RESOLUTION_NOT_FOUND,
+                                evidence="no matching individual profile found",
+                                candidates=verified)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _collect_jsonld_names(data: Any, out: List[str]) -> None:
+    if isinstance(data, list):
+        for item in data:
+            _collect_jsonld_names(item, out)
+    elif isinstance(data, dict):
+        if isinstance(data.get("name"), str):
+            out.append(data["name"])
+        for value in data.values():
+            if isinstance(value, (dict, list)):
+                _collect_jsonld_names(value, out)
+
+
+def _looks_directory_path(url: str) -> bool:
+    try:
+        path = (urlparse(url).path or "").strip("/").lower()
+    except ValueError:
+        return False
+    tokens = set(t.strip().strip("._-") for t in re.split(r"[/\-_\s]+", path) if t.strip())
+    return bool(tokens & set(DIRECTORY_PATH_TOKENS))
+
+
+def _looks_profile_path(url: str) -> bool:
+    try:
+        path = (urlparse(url).path or "").strip("/").lower()
+    except ValueError:
+        return False
+    tokens = set(t.strip().strip("._-") for t in re.split(r"[/\-_]+", path) if t.strip())
+    return bool(tokens & set(PROFILE_PATH_TOKENS))
+
+
+def _confidence_for(cand: ResolutionCandidate) -> str:
+    if cand.strong_name:
+        return CONFIDENCE_HIGH
+    if cand.strong_slug:
+        if cand.has_schema or cand.has_bio or cand.title_contains_name:
+            return CONFIDENCE_HIGH
+        return CONFIDENCE_MEDIUM
+    if cand.slug_only or cand.title_contains_name:
+        return CONFIDENCE_LOW
+    return CONFIDENCE_LOW
+
+
+def _build_reason(cand: ResolutionCandidate) -> str:
+    parts: List[str] = []
+    if cand.strong_name:
+        parts.append("full name in page title/heading/content")
+    elif cand.title_contains_name:
+        parts.append("name in title")
+    if cand.strong_slug:
+        parts.append("name slug in URL + corroboration")
+    elif cand.slug_only:
+        parts.append("name slug in URL (weak corroboration)")
+    if cand.linked_from_directory:
+        parts.append("linked from agent/team directory")
+    if cand.has_schema:
+        parts.append("person/structured data")
+    if cand.has_contact:
+        parts.append("contact info")
+    if cand.has_bio:
+        parts.append("biography-like content")
+    if cand.has_image:
+        parts.append("profile image")
+    return ", ".join(parts) or "no strong evidence"
+
+
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def effective_scrape_url(prospect: Prospect) -> str:
+    """Authoritative scrape-target selection: manual -> resolved -> parent.
+
+    - a valid ``manual_profile_url`` always wins;
+    - otherwise a ``RESOLVED`` profile with HIGH/MEDIUM confidence wins;
+    - otherwise the parent ``prospect.website`` (unchanged identity).
+
+    This is the single source of truth for URL selection so the logic is never
+    duplicated across generation/batch/workers. No network is performed here.
+    """
+    if prospect is None:
+        return ""
+    manual = (prospect.manual_profile_url or "").strip()
+    if manual and is_safe_url(manual):
+        return manual
+    if (
+        (prospect.resolution_status or "") == RESOLUTION_RESOLVED
+        and (prospect.resolved_profile_url or "").strip()
+        and is_safe_url(prospect.resolved_profile_url)
+        and (prospect.resolution_confidence or "") in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM)
+    ):
+        return prospect.resolved_profile_url.strip()
+    return (prospect.website or "").strip()

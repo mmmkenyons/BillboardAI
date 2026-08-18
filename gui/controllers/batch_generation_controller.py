@@ -8,9 +8,11 @@ from typing import Optional
 from PySide6.QtCore import QObject, QThread, Signal
 
 from gui.controllers.prospect_controller import ProspectController
+from gui.controllers.profile_resolution_controller import ProfileResolutionController
 from gui.models.campaign_package import CampaignPackageResult
 from gui.services.campaign_export import CampaignExportService
 from gui.services.campaign_package import CampaignPackageService
+from gui.services.profile_resolver import effective_scrape_url
 from gui.services.prospect_generation import ProspectGenerationService
 from gui.workers.prospect_generation_worker import ProspectGenerationWorker
 import os
@@ -35,10 +37,19 @@ class BatchGenerationController(QObject):
         *,
         prospect_controller: ProspectController,
         service: ProspectGenerationService,
+        resolution_service=None,
     ) -> None:
         super().__init__()
         self._prospect_controller = prospect_controller
         self._service = service
+        self._resolution = ProfileResolutionController(
+            prospect_store=service.prospect_store,
+            service=resolution_service,
+        )
+        self._resolution.status_message.connect(self.status_message)
+        self._resolution.error_message.connect(self.error_message)
+        self._resolution.running_changed.connect(self.running_changed)
+        self._resolution.results_changed.connect(self._on_resolution_results)
         self._export_service = CampaignExportService(
             prospect_store=service.prospect_store,
             job_store=service.job_store,
@@ -78,6 +89,25 @@ class BatchGenerationController(QObject):
             self.status_message.emit(f"Queued {queued} generation job(s).")
         if rejected:
             self.error_message.emit("; ".join(rejected))
+
+    # ------------------------------------------------------------------
+    # Sprint 5Z profile resolution (delegated to the resolution controller)
+    # ------------------------------------------------------------------
+    def resolve_profiles(self, prospect_ids: list[str]) -> None:
+        """Start background profile resolution for the selected prospects."""
+        self._resolution.resolve(prospect_ids)
+
+    def set_manual_profile(self, prospect_id: str, url: str) -> None:
+        """Persist a manual profile URL override for one prospect."""
+        self._resolution.set_manual_profile(prospect_id, url)
+
+    def clear_manual_profile(self, prospect_id: str) -> None:
+        """Clear a manual override and restore the automatic result."""
+        self._resolution.clear_manual_profile(prospect_id)
+
+    def _on_resolution_results(self, _by_id: dict) -> None:
+        # Resolution applied/persisted; reflect new status/URLs in the table.
+        self.refresh()
 
     def run_queue(self) -> None:
         if self.is_running:
@@ -190,6 +220,11 @@ class BatchGenerationController(QObject):
                     "opportunity": self._service.recommended_opportunity_label(prospect.prospect_id),
                     "eligibility": "Ready" if eligibility.eligible else ", ".join(eligibility.reasons),
                     "export_status": export_eligibility.status.title(),
+                    "resolution_status": prospect.resolution_status,
+                    "resolution_confidence": prospect.resolution_confidence,
+                    "resolved_profile_url": prospect.resolved_profile_url,
+                    "manual_profile_url": prospect.manual_profile_url,
+                    "effective_scrape_url": effective_scrape_url(prospect),
                 }
             )
         return rows

@@ -25,6 +25,7 @@ from gui.models.prospect_generation import (
 )
 from gui.models.prospect_generation_store import ProspectGenerationStore
 from gui.models.prospect_store import ProspectStore
+from gui.services.profile_resolver import effective_scrape_url
 from gui.services.prospect_opportunity_workspace import ProspectOpportunityWorkspaceService
 
 
@@ -147,7 +148,10 @@ class ProspectGenerationService:
         effective_root = os.path.abspath(output_root or self._default_output_root)
         job = ProspectGenerationJob(
             prospect_id=prospect.prospect_id,
-            website=prospect.website,
+            # Sprint 5Z: snapshot the effective scrape URL (manual -> resolved ->
+            # parent). Execution/run_job is unchanged; existing jobs keep their
+            # original snapshot; a new/regenerated job uses the current target.
+            website=effective_scrape_url(prospect),
             template=eligibility.resolved_template,
             status=JOB_STATUS_QUEUED,
             output_root=effective_root,

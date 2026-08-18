@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -28,6 +29,8 @@ class BatchPage(QWidget):
     COL_OPPORTUNITY = 4
     COL_ELIGIBILITY = 5
     COL_EXPORT_STATUS = 6
+    COL_PROFILE_STATUS = 7
+    COL_PROFILE_URL = 8
 
     JOB_COL_COMPANY = 0
     JOB_COL_TEMPLATE = 1
@@ -41,6 +44,9 @@ class BatchPage(QWidget):
     export_requested = Signal(list, str)
     package_requested = Signal(list, str, object)
     review_requested = Signal(list)
+    resolve_requested = Signal(list)
+    set_manual_requested = Signal(str, str)
+    clear_manual_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -52,8 +58,8 @@ class BatchPage(QWidget):
         label.setObjectName("previewHeading")
         layout.addWidget(label)
 
-        self.prospect_table = QTableWidget(0, 7, self)
-        self.prospect_table.setHorizontalHeaderLabels(["Select", "Company", "Website", "Template", "Opportunity", "Eligibility", "Export"])
+        self.prospect_table = QTableWidget(0, 9, self)
+        self.prospect_table.setHorizontalHeaderLabels(["Select", "Company", "Website", "Template", "Opportunity", "Eligibility", "Export", "Profile Status", "Profile URL"])
         self.prospect_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.prospect_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.prospect_table, 2)
@@ -73,6 +79,20 @@ class BatchPage(QWidget):
         actions.addWidget(self.review_button)
         actions.addStretch(1)
         layout.addLayout(actions)
+
+        # Sprint 5Z: profile resolution actions
+        resolution_actions = QHBoxLayout()
+        self.resolve_button = QPushButton("Resolve Profiles", self)
+        self.resolve_button.clicked.connect(self._emit_resolve)
+        resolution_actions.addWidget(self.resolve_button)
+        self.set_manual_button = QPushButton("Set Manual URL", self)
+        self.set_manual_button.clicked.connect(self._emit_set_manual)
+        resolution_actions.addWidget(self.set_manual_button)
+        self.clear_manual_button = QPushButton("Clear Manual URL", self)
+        self.clear_manual_button.clicked.connect(self._emit_clear_manual)
+        resolution_actions.addWidget(self.clear_manual_button)
+        resolution_actions.addStretch(1)
+        layout.addLayout(resolution_actions)
 
         jobs_label = QLabel("Generation Jobs", self)
         jobs_label.setObjectName("previewHeading")
@@ -129,6 +149,13 @@ class BatchPage(QWidget):
             self.export_requested.connect(controller.export_campaign_csv)
         if hasattr(controller, "build_campaign_package"):
             self.package_requested.connect(controller.build_campaign_package)
+        # Sprint 5Z: profile resolution wiring
+        if hasattr(controller, "resolve_profiles"):
+            self.resolve_requested.connect(controller.resolve_profiles)
+        if hasattr(controller, "set_manual_profile"):
+            self.set_manual_requested.connect(controller.set_manual_profile)
+        if hasattr(controller, "clear_manual_profile"):
+            self.clear_manual_requested.connect(controller.clear_manual_profile)
         if hasattr(controller, "refresh"):
             controller.refresh()
 
@@ -174,6 +201,19 @@ class BatchPage(QWidget):
             self.prospect_table.setItem(row, self.COL_ELIGIBILITY, QTableWidgetItem(str(row_data.get("eligibility") or "")))
             self.prospect_table.setItem(row, self.COL_EXPORT_STATUS, QTableWidgetItem(str(row_data.get("export_status") or "")))
 
+            # Sprint 5Z: profile resolution columns
+            resolution_status = str(row_data.get("resolution_status") or "")
+            status_display = resolution_status.replace("NOT_ATTEMPTED", "—").replace("_", " ")
+            status_item = QTableWidgetItem(status_display)
+            if resolution_status == "RESOLVED":
+                status_item.setForeground(Qt.GlobalColor.darkGreen)
+            elif resolution_status in ("AMBIGUOUS", "ERROR"):
+                status_item.setForeground(Qt.GlobalColor.darkRed)
+            self.prospect_table.setItem(row, self.COL_PROFILE_STATUS, status_item)
+
+            profile_url = str(row_data.get("resolved_profile_url") or row_data.get("manual_profile_url") or "")
+            self.prospect_table.setItem(row, self.COL_PROFILE_URL, QTableWidgetItem(profile_url))
+
     def set_jobs(self, rows: list[dict]) -> None:
         self.jobs_table.setRowCount(0)
         for row_data in rows:
@@ -197,6 +237,9 @@ class BatchPage(QWidget):
         self.open_project_button.setEnabled(not running)
         self.export_button.setEnabled(not running)
         self.package_button.setEnabled(not running)
+        self.resolve_button.setEnabled(not running)
+        self.set_manual_button.setEnabled(not running)
+        self.clear_manual_button.setEnabled(not running)
 
     def _consume_export_preview(self, _rows: list[dict]) -> None:
         # Preview is currently summarized directly in the prospect table's Export column.
@@ -229,6 +272,48 @@ class BatchPage(QWidget):
 
     def _emit_queue(self) -> None:
         self.queue_requested.emit(self.selected_prospect_ids(), self.selected_templates(), {})
+
+    # Sprint 5Z: resolution button handlers
+    def _emit_resolve(self) -> None:
+        selected = self.selected_prospect_ids()
+        if not selected:
+            self.show_error("Select at least one prospect to resolve.")
+            return
+        self.resolve_requested.emit(selected)
+
+    def _emit_set_manual(self) -> None:
+        selected = self.selected_prospect_ids()
+        if not selected:
+            self.show_error("Select one prospect first.")
+            return
+        if len(selected) > 1:
+            self.show_error("Select only one prospect for manual override.")
+            return
+        url, ok = QInputDialog.getText(
+            self, "Set Manual Profile URL",
+            "Enter the profile URL for this prospect:",
+            text=str(self._current_profile_url(selected[0]) or ""),
+        )
+        if ok and url.strip():
+            self.set_manual_requested.emit(selected[0], url.strip())
+
+    def _emit_clear_manual(self) -> None:
+        selected = self.selected_prospect_ids()
+        if not selected:
+            self.show_error("Select one prospect first.")
+            return
+        if len(selected) > 1:
+            self.show_error("Select only one prospect to clear.")
+            return
+        self.clear_manual_requested.emit(selected[0])
+
+    def _current_profile_url(self, prospect_id: str) -> str:
+        for row in range(self.prospect_table.rowCount()):
+            item = self.prospect_table.item(row, self.COL_SELECT)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == prospect_id:
+                url_item = self.prospect_table.item(row, self.COL_PROFILE_URL)
+                return url_item.text() if url_item else ""
+        return ""
 
     def _emit_run(self) -> None:
         self.run_requested.emit([])
