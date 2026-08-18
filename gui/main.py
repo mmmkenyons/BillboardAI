@@ -44,6 +44,7 @@ from gui.services.smartlead_handoff import SmartleadHandoffService
 from gui.services.smartlead_pilot import SmartleadPilotService
 from gui.services.smartlead_publish import SmartleadPublishService
 from gui.services.smartlead_reconciliation import SmartleadReconciliationService
+from gui.services.smartlead_run_export import SmartleadRunExportService
 from gui.services.smartlead_run_handoff import SmartleadRunHandoffService
 from gui.services.smartlead_sequence_readiness import SmartleadSequenceReadinessService
 from gui.main_window import MainWindow
@@ -161,6 +162,10 @@ def main() -> None:
         api_client=api_client,
         sequence_service=sequence_service,
     )
+    smartlead_run_export_service = SmartleadRunExportService(
+        run_handoff_service=smartlead_run_service,
+        hosted_asset_store=hosted_asset_store,
+    )
     smartlead_controller = SmartleadHandoffController(
         service=SmartleadHandoffService(),
         publish_service=publish_service,
@@ -170,6 +175,7 @@ def main() -> None:
         activation_service=activation_service,
         pilot_service=pilot_service,
         run_handoff_service=smartlead_run_service,
+        run_export_service=smartlead_run_export_service,
     )
     window = MainWindow(
         controller,

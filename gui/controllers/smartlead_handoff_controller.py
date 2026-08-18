@@ -3,6 +3,8 @@ readiness, and safe URL sync (Sprint 5R)."""
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QObject, Signal
 
 from gui.models.smartlead_publication import SmartleadPublishTarget
@@ -35,6 +37,7 @@ class SmartleadHandoffController(QObject):
     pilot_activation_changed = Signal(object)
     pilot_pause_changed = Signal(object)
     run_context_changed = Signal(object)
+    run_export_result_changed = Signal(object)
 
     def __init__(
         self,
@@ -47,6 +50,7 @@ class SmartleadHandoffController(QObject):
         activation_service: SmartleadActivationService | None = None,
         pilot_service: SmartleadPilotService | None = None,
         run_handoff_service: SmartleadRunHandoffService | None = None,
+        run_export_service: object | None = None,
     ) -> None:
         super().__init__()
         self._service = service
@@ -57,6 +61,8 @@ class SmartleadHandoffController(QObject):
         self._activation_service = activation_service
         self._pilot_service = pilot_service
         self._run_handoff_service = run_handoff_service
+        self._run_export_service = run_export_service
+        self._run_export_destination: str | None = None
         self._last_result = None
         self._active_run_id = ""
 
@@ -421,3 +427,67 @@ class SmartleadHandoffController(QObject):
         self.refresh_pilots()
         self.status_message.emit("Pilot review marked complete.")
         return result
+
+    # ------------------------------------------------------------------
+    # Run-scoped Smartlead export (Sprint 5Y)
+    # ------------------------------------------------------------------
+    def refresh_run_export(self) -> object:
+        """Compute read-only export readiness for the active run (no files written)."""
+        if self._run_export_service is None or not self._active_run_id:
+            return None
+        result = self._run_export_service.build_export_rows(self._active_run_id)
+        self.run_export_result_changed.emit(result)
+        return result
+
+    def set_run_export_destination(self, path: str | None) -> None:
+        self._run_export_destination = str(path or "").strip() or None
+        if self._run_export_destination:
+            self.status_message.emit(f"Smartlead export destination: {self._run_export_destination}")
+
+    def export_run_smartlead(self) -> object:
+        if self._run_export_service is None:
+            self.error_message.emit("Run export service is not available.")
+            return None
+        if not self._active_run_id:
+            self.error_message.emit("No active Campaign Run to export.")
+            return None
+        result = self._run_export_service.export_run(self._active_run_id, destination=self._run_export_destination)
+        self.run_export_result_changed.emit(result)
+        if getattr(result, "success", False):
+            self.status_message.emit(result.message)
+        else:
+            self.error_message.emit(result.message)
+        return result
+
+    def open_run_export_folder(self) -> None:
+        receipt = self._latest_run_export()
+        if receipt is None:
+            self.error_message.emit("No run export found yet. Export the Smartlead CSV first.")
+            return
+        folder = str(getattr(receipt, "export_directory", "") or "")
+        if not folder or not os.path.isdir(folder):
+            self.error_message.emit("The latest run export folder is no longer available.")
+            return
+        try:
+            os.startfile(folder)
+        except Exception as exc:  # noqa: BLE001 - surface OS error cleanly
+            self.error_message.emit(f"Could not open export folder:\n{exc}")
+
+    def open_run_export_file(self) -> None:
+        receipt = self._latest_run_export()
+        if receipt is None:
+            self.error_message.emit("No run export found yet. Export the Smartlead CSV first.")
+            return
+        path = str(getattr(receipt, "smartlead_csv_path", "") or "")
+        if not path or not os.path.isfile(path):
+            self.error_message.emit("The latest run export CSV is no longer available.")
+            return
+        try:
+            os.startfile(path)
+        except Exception as exc:  # noqa: BLE001 - surface OS error cleanly
+            self.error_message.emit(f"Could not open export file:\n{exc}")
+
+    def _latest_run_export(self):
+        if self._run_export_service is None or not self._active_run_id:
+            return None
+        return self._run_export_service.latest_export(self._active_run_id)

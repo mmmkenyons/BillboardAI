@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -129,6 +130,38 @@ class SmartleadHandoffPage(QWidget):
         self.detail.setReadOnly(True)
         preflight_layout.addWidget(self.detail)
         layout.addWidget(preflight_box)
+
+        run_export_box = self._section_box("Run Export (Smartlead-Ready)", content)
+        run_export_layout = self._section_layout(run_export_box)
+        self.run_export_status_label = QLabel(
+            "No run export yet. Prepare a run-scoped Smartlead package, then export.", self
+        )
+        self.run_export_status_label.setWordWrap(True)
+        run_export_layout.addWidget(self.run_export_status_label)
+
+        destination_row = QHBoxLayout()
+        destination_row.setSpacing(8)
+        self.run_export_dest_edit = QLineEdit(self)
+        self.run_export_dest_edit.setPlaceholderText(
+            "Optional export directory (default: output/smartlead/exports)"
+        )
+        self.browse_export_dest_button = QPushButton("Browse…", self)
+        destination_row.addWidget(QLabel("Destination:", self))
+        destination_row.addWidget(self.run_export_dest_edit, 1)
+        destination_row.addWidget(self.browse_export_dest_button)
+        run_export_layout.addLayout(destination_row)
+
+        export_actions = QHBoxLayout()
+        export_actions.setSpacing(8)
+        self.export_run_button = QPushButton("Export Smartlead CSV", self)
+        self.open_export_folder_button = QPushButton("Open Export Folder", self)
+        self.open_export_file_button = QPushButton("Open Export File", self)
+        export_actions.addWidget(self.export_run_button)
+        export_actions.addWidget(self.open_export_folder_button)
+        export_actions.addWidget(self.open_export_file_button)
+        export_actions.addStretch(1)
+        run_export_layout.addLayout(export_actions)
+        layout.addWidget(run_export_box)
 
         hosting_box = self._section_box("Hosted Mockups", content)
         hosting_layout = self._section_layout(hosting_box)
@@ -300,6 +333,8 @@ class SmartleadHandoffPage(QWidget):
             controller.pilot_activation_changed.connect(self.show_pilot_activation)
         if hasattr(controller, "pilot_pause_changed"):
             controller.pilot_pause_changed.connect(self.show_pilot_pause)
+        if hasattr(controller, "run_export_result_changed"):
+            controller.run_export_result_changed.connect(self.set_run_export_result)
         if not self._action_signals_connected:
             self.test_connection_button.clicked.connect(self._on_test_connection)
             self.refresh_campaigns_button.clicked.connect(self._on_refresh_campaigns)
@@ -322,6 +357,10 @@ class SmartleadHandoffPage(QWidget):
             self.pause_pilot_button.clicked.connect(self._on_pause_pilot)
             self.complete_pilot_button.clicked.connect(self._on_complete_pilot)
             self.prepare_run_package_button.clicked.connect(self._on_prepare_run_package)
+            self.browse_export_dest_button.clicked.connect(self._on_browse_export_destination)
+            self.export_run_button.clicked.connect(self._on_export_run)
+            self.open_export_folder_button.clicked.connect(self._on_open_export_folder)
+            self.open_export_file_button.clicked.connect(self._on_open_export_file)
             self.pilot_recipient_list.itemSelectionChanged.connect(self._update_pilot_buttons)
             self.target_mode_combo.currentTextChanged.connect(self._sync_target_mode)
             self.campaign_combo.currentIndexChanged.connect(self._update_activation_button_state)
@@ -359,6 +398,7 @@ class SmartleadHandoffPage(QWidget):
         self._run_context = context
         if context is None:
             self.run_context_label.setText("No active Campaign Run.")
+            self._update_run_export_controls()
             return
         summary = getattr(context, "summary", None)
         self.run_context_label.setText(
@@ -368,6 +408,9 @@ class SmartleadHandoffPage(QWidget):
             f"Blocked {getattr(summary, 'blocked', 0) if summary is not None else 0} • "
             f"Packaged {getattr(summary, 'packaged', 0) if summary is not None else 0}"
         )
+        self._update_run_export_controls()
+        if getattr(context, "package_record", None) is not None:
+            self._refresh_run_export_readiness()
 
     def set_connection_status(self, result: object) -> None:
         configured = "Configured" if getattr(result, "status", "") != "NOT_CONFIGURED" else "Not configured"
@@ -460,6 +503,65 @@ class SmartleadHandoffPage(QWidget):
             self._controller.prepare_run_package()
         if self._controller is not None and hasattr(self._controller, "refresh_pilots"):
             self._controller.refresh_pilots()
+
+    def _refresh_run_export_readiness(self) -> None:
+        if self._controller is not None and hasattr(self._controller, "refresh_run_export"):
+            self._controller.refresh_run_export()
+
+    def set_run_export_result(self, result: object) -> None:
+        if result is None:
+            self.run_export_status_label.setText("No run export result yet.")
+            self._update_run_export_controls()
+            return
+        message = str(getattr(result, "message", "") or "")
+        lines = [message] if message else ["Run export result:"]
+        lines.append(
+            f"Exportable {getattr(result, 'exported_rows', 0)} | Ready {getattr(result, 'ready', 0)} | "
+            f"Warning {getattr(result, 'warning', 0)} | Blocked {getattr(result, 'blocked', 0)} | "
+            f"Conflict {getattr(result, 'conflict', 0)} | Excluded {getattr(result, 'excluded', 0)}"
+        )
+        lines.append(
+            f"Public URL {getattr(result, 'with_public_url', 0)} | Local fallback {getattr(result, 'local_fallback', 0)}"
+        )
+        csv_path = str(getattr(result, "smartlead_csv_path", "") or "")
+        if csv_path:
+            lines.append(f"CSV: {csv_path}")
+        self.run_export_status_label.setText("\n".join(lines))
+        self.show_status("\n".join(lines))
+        self._update_run_export_controls()
+
+    def _update_run_export_controls(self) -> None:
+        has_run = self._run_context is not None
+        self.export_run_button.setEnabled(has_run)
+        self.open_export_folder_button.setEnabled(has_run)
+        self.open_export_file_button.setEnabled(has_run)
+        self.browse_export_dest_button.setEnabled(has_run)
+        self.run_export_dest_edit.setEnabled(has_run)
+
+    def _on_browse_export_destination(self) -> None:
+        start = self.run_export_dest_edit.text().strip()
+        path = QFileDialog.getExistingDirectory(self, "Choose Export Destination", start or "")
+        if path:
+            self.run_export_dest_edit.setText(path)
+            if self._controller is not None and hasattr(self._controller, "set_run_export_destination"):
+                self._controller.set_run_export_destination(path)
+
+    def _on_export_run(self) -> None:
+        if self._controller is None:
+            return
+        dest = self.run_export_dest_edit.text().strip() or None
+        if self._controller is not None and hasattr(self._controller, "set_run_export_destination"):
+            self._controller.set_run_export_destination(dest)
+        if hasattr(self._controller, "export_run_smartlead"):
+            self._controller.export_run_smartlead()
+
+    def _on_open_export_folder(self) -> None:
+        if self._controller is not None and hasattr(self._controller, "open_run_export_folder"):
+            self._controller.open_run_export_folder()
+
+    def _on_open_export_file(self) -> None:
+        if self._controller is not None and hasattr(self._controller, "open_run_export_file"):
+            self._controller.open_run_export_file()
 
     def _on_publish(self) -> None:
         if self._controller is None or not self._handoff_directory:

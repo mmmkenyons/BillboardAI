@@ -52,6 +52,7 @@ class SmartleadRunPackageRecord:
     blocked_count: int = 0
     packaged_count: int = 0
     entries: tuple[SmartleadRunPackageEntry, ...] = field(default_factory=tuple)
+    last_export: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -82,6 +83,7 @@ class SmartleadRunPackageRecord:
                 for item in list(raw.get("entries") or [])
                 if isinstance(item, dict)
             ),
+            last_export=dict(raw.get("last_export") or {}),
         )
 
 
