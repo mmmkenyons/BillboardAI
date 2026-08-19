@@ -32,11 +32,12 @@ creation so existing execution remains unchanged.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import urljoin, urlparse
 
@@ -65,6 +66,7 @@ MAX_SITEMAP_DEPTH = 1            # sitemap-index recursion depth
 MAX_CHILD_SITEMAPS = 25          # child sitemap <urlset> fetches per index
 MAX_SITEMAP_URLS = 20000         # total distinct sitemap URLs consumed
 MAX_SITEMAP_BYTES = 5_000_000    # per-sitemap response size guard
+MAX_GZIP_DECOMPRESSED_BYTES = 10_000_000  # decompressed sitemap response guard
 MAX_DIRECTORY_PAGES = 5          # homepage-linked directory pages to fetch
 MAX_HOMEPAGE_LINKS = 800         # homepage <a href> cap for discovery
 MAX_LINKS_SCANNED = 600          # per-directory-page link cap
@@ -82,6 +84,12 @@ DIRECTORY_PATH_TOKENS = (
 SUFFIX_TOKENS = frozenset({"jr", "sr", "ii", "iii", "iv", "v", "md", "dds", "esq"})
 
 NETWORK_ERROR_TOKEN = "network/access failure"
+GZIP_MAGIC = b"\x1f\x8b"
+STATIC_PROFILE_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf",
+    ".css", ".js", ".ico", ".zip", ".gz",
+})
+GENERIC_PROFILE_ROOTS = frozenset({"agent", "agents", "profile", "profiles", "team", "staff"})
 
 # ---------------------------------------------------------------------------
 # Fetching abstraction (injectable for deterministic tests)
@@ -113,7 +121,7 @@ def default_fetcher(timeout: float = DEFAULT_TIMEOUT) -> Fetcher:
             raise FetchError(f"{NETWORK_ERROR_TOKEN}: {exc}") from exc
         if response.status_code != 200:
             raise FetchError(f"HTTP {response.status_code} for {url}")
-        chunks: List[str] = []
+        chunks: List[bytes] = []
         size = 0
         for chunk in response.iter_content(chunk_size=65536):
             if not chunk:
@@ -122,9 +130,30 @@ def default_fetcher(timeout: float = DEFAULT_TIMEOUT) -> Fetcher:
             if size > MAX_SITEMAP_BYTES:
                 raise FetchError(f"response too large for {url}")
             chunks.append(chunk)
-        return b"".join(chunks).decode("utf-8", errors="replace")
+        payload = b"".join(chunks)
+        if _is_gzip_payload(url, response.headers.get("Content-Type"), payload):
+            payload = _decompress_gzip(payload, url)
+        return payload.decode("utf-8", errors="replace")
 
     return _fetch
+
+
+def _is_gzip_payload(url: str, content_type: str | None, payload: bytes) -> bool:
+    """True for actual gzip bytes or sitemap/document URLs advertised as gzip."""
+    low_url = (url or "").lower()
+    low_type = (content_type or "").lower()
+    return payload.startswith(GZIP_MAGIC) or low_url.endswith(".gz") or "gzip" in low_type
+
+
+def _decompress_gzip(payload: bytes, url: str) -> bytes:
+    """Bounded single-member gzip decompression for sitemap fetches."""
+    try:
+        data = gzip.decompress(payload)
+    except (OSError, EOFError, gzip.BadGzipFile) as exc:
+        raise FetchError(f"malformed gzip response for {url}") from exc
+    if len(data) > MAX_GZIP_DECOMPRESSED_BYTES:
+        raise FetchError(f"decompressed response too large for {url}")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +219,7 @@ def registered_domain(url: str) -> str:
     if not value:
         return ""
     try:
-        return (tldextract.extract(value).registered_domain or "").lower()
+        return (tldextract.extract(value).top_domain_under_public_suffix or "").lower()
     except Exception:  # noqa: BLE001
         return ""
 
@@ -445,6 +474,7 @@ class ResolutionResult:
     method: str = ""
     evidence: str = ""
     candidates: List[ResolutionCandidate] = None  # type: ignore[assignment]
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.candidates is None:
@@ -511,9 +541,22 @@ class ProfileResolverService:
 
         seen: Dict[str, ResolutionCandidate] = {}
         candidates: List[ResolutionCandidate] = []
+        diagnostics: Dict[str, Any] = {
+            "robots_fetched": False,
+            "sitemap_count_attempted": 0,
+            "sitemap_count_parsed": 0,
+            "sitemap_urls_examined": [],
+            "candidate_count_before_filtering": 0,
+            "candidate_count_after_filtering": 0,
+            "directory_pages_examined": 0,
+            "final_decision_reason": "",
+        }
 
         def _add_candidate(c: ResolutionCandidate) -> None:
+            diagnostics["candidate_count_before_filtering"] += 1
             if not c.url:
+                return
+            if _is_static_profile_candidate(c.url):
                 return
             existing = seen.get(c.url)
             if existing is not None:
@@ -525,23 +568,35 @@ class ProfileResolverService:
             if is_within_parent(c.url, parent):
                 seen[c.url] = c
                 candidates.append(c)
+                diagnostics["candidate_count_after_filtering"] = len(candidates)
 
         # Stage 1/2: robots-declared sitemaps + conventional sitemap endpoints.
-        for sm in self._collect_sitemap_urls(parent):
+        sitemap_urls = self._collect_sitemap_urls(parent)
+        diagnostics["robots_fetched"] = getattr(self, "_last_robots_fetched", False)
+        diagnostics["sitemap_urls_examined"] = sitemap_urls[:10]
+        for sm in sitemap_urls:
+            diagnostics["sitemap_count_attempted"] += 1
             body = _fetch_or_none(self._fetcher, sm)
             if body is None:
                 continue
             if _looks_like_index(body):
                 for child in _sitemaps_from_index(body, self.max_child_sitemaps):
+                    diagnostics["sitemap_count_attempted"] += 1
+                    if len(diagnostics["sitemap_urls_examined"]) < 10:
+                        diagnostics["sitemap_urls_examined"].append(child)
                     child_body = _fetch_or_none(self._fetcher, child)
                     if child_body is None:
                         continue
+                    diagnostics["sitemap_count_parsed"] += 1
                     self._add_from_urlset(child, child_body, person, parent, _add_candidate)
             else:
+                diagnostics["sitemap_count_parsed"] += 1
                 self._add_from_urlset(sm, body, person, parent, _add_candidate)
 
         # Stage 4: homepage + a bounded set of directory pages.
-        self._discover_from_homepage(person, parent, candidates, _add_candidate)
+        diagnostics["directory_pages_examined"] = self._discover_from_homepage(
+            person, parent, candidates, _add_candidate
+        )
 
         # Stage 5: verify the best-bounded candidates by fetching their pages.
         ranked = self._rank_candidates(candidates, person)
@@ -549,12 +604,25 @@ class ProfileResolverService:
         for cand in ranked[: self.max_candidates_verify]:
             body = _fetch_or_none(self._fetcher, cand.url)
             if body is None:
+                cand.strong_name = False
+                cand.strong_slug = False
+                cand.slug_only = False
+                cand.title_contains_name = False
+                cand.has_schema = False
+                cand.has_contact = False
+                cand.has_image = False
+                cand.has_bio = False
+                cand.confidence = ""
+                cand.reason = "candidate page fetch failed"
                 verified.append(cand)
                 continue
             self._score_candidate_page(cand, body, person)
             verified.append(cand)
 
-        return self._decision(verified, person)
+        result = self._decision(verified, person)
+        diagnostics["final_decision_reason"] = result.evidence
+        result.diagnostics = diagnostics
+        return result
 
     def resolve_prospects(
         self, prospects: Sequence[Prospect], *, apply: bool = True
@@ -613,6 +681,8 @@ class ProfileResolverService:
             "resolved_at": _utc_now_iso(),
             "candidate_count": len(result.candidates) if result and result.candidates else 0,
         }
+        if result and result.diagnostics:
+            meta["profile_resolution"].update(_compact_diagnostics(result.diagnostics))
         prospect.metadata = meta
         prospect.touch()
         return prospect
@@ -649,6 +719,7 @@ class ProfileResolverService:
         """robots-declared sitemaps + conventional endpoints (bounded)."""
         urls: List[str] = []
         seen = set()
+        self._last_robots_fetched = False
 
         def _consider(raw: str) -> None:
             url = urljoin(parent, raw) if not _URL_SCHEME_RE.match(raw) else raw
@@ -660,6 +731,7 @@ class ProfileResolverService:
 
         robots = _fetch_or_none(self._fetcher, urljoin(parent, "/robots.txt"))
         if robots is not None:
+            self._last_robots_fetched = True
             for sm in parse_robots_sitemaps(robots):
                 _consider(sm)
         _consider("/sitemap.xml")
@@ -675,10 +747,19 @@ class ProfileResolverService:
         add: Callable[[ResolutionCandidate], None],
     ) -> None:
         page_urls = _urls_from_sitemap(body, self.max_sitemap_urls)
+        if _looks_agent_profile_sitemap(sitemap_url):
+            page_urls = sorted(
+                page_urls,
+                key=lambda u: (0 if name_in_url_slug(person, u) else 1, u),
+            )
         for url in page_urls:
             if not url or not is_within_parent(url, parent):
                 continue
+            if _is_static_profile_candidate(url):
+                continue
             if _looks_directory_path(url):
+                continue
+            if _looks_agent_profile_sitemap(sitemap_url) and not name_in_url_slug(person, url):
                 continue
             if not _looks_profile_path(url) and not name_in_url_slug(person, url):
                 continue
@@ -697,16 +778,16 @@ class ProfileResolverService:
         parent: str,
         candidates: List[ResolutionCandidate],
         add: Callable[[ResolutionCandidate], None],
-    ) -> None:
+    ) -> int:
         home_body = _fetch_or_none(self._fetcher, parent)
         if home_body is None:
-            return
+            return 0
         directory_pages: List[str] = []
         seen_dir: set = set()
         try:
             soup = BeautifulSoup(home_body, "lxml")
         except Exception:  # noqa: BLE001
-            return
+            return 0
         for anchor in soup.find_all("a", href=True)[: self.max_homepage_links]:
             url = normalize_url(urljoin(parent, (anchor.get("href") or "").strip()))
             if not url or not is_within_parent(url, parent):
@@ -728,6 +809,7 @@ class ProfileResolverService:
                                         slug_only=name_in_url_slug(person, profile_url),
                                         linked_from_directory=True,
                                         same_domain=is_within_parent(profile_url, parent)))
+        return len(directory_pages[: self.max_directory_pages])
 
     def _links_from_directory_page(
         self, dir_body: str, parent: str, person: str
@@ -741,6 +823,8 @@ class ProfileResolverService:
         for anchor in soup.find_all("a", href=True)[: self.max_links_scanned]:
             url = normalize_url(urljoin(parent, (anchor.get("href") or "").strip()))
             if not url or not is_within_parent(url, parent) or _looks_directory_path(url):
+                continue
+            if _is_static_profile_candidate(url):
                 continue
             if url in seen:
                 continue
@@ -810,8 +894,9 @@ class ProfileResolverService:
         cand.has_image = has_image
         cand.has_bio = has_bio
         cand.strong_name = strong_text or structured_match
-        cand.strong_slug = bool(slug) and corroboration and not cand.strong_name
-        cand.slug_only = bool(slug) and not cand.strong_slug and not cand.strong_name
+        generic_root = _is_generic_profile_root(cand.url)
+        cand.strong_slug = bool(slug) and not generic_root and corroboration and not cand.strong_name
+        cand.slug_only = bool(slug) and not generic_root and not cand.strong_slug and not cand.strong_name
         cand.confidence = _confidence_for(cand)
         cand.reason = _build_reason(cand)
         return cand
@@ -873,6 +958,44 @@ def _looks_directory_path(url: str) -> bool:
         return False
     tokens = set(t.strip().strip("._-") for t in re.split(r"[/\-_\s]+", path) if t.strip())
     return bool(tokens & set(DIRECTORY_PATH_TOKENS))
+
+
+def _is_generic_profile_root(url: str) -> bool:
+    try:
+        parts = [p for p in (urlparse(url).path or "").strip("/").lower().split("/") if p]
+    except ValueError:
+        return False
+    return len(parts) == 1 and parts[0].strip("._-") in GENERIC_PROFILE_ROOTS
+
+
+def _is_static_profile_candidate(url: str) -> bool:
+    try:
+        path = (urlparse(url).path or "").lower()
+    except ValueError:
+        return True
+    leaf = path.rsplit("/", 1)[-1]
+    return any(leaf.endswith(ext) for ext in STATIC_PROFILE_EXTENSIONS)
+
+
+def _looks_agent_profile_sitemap(url: str) -> bool:
+    path = (urlparse(url).path or "").lower()
+    leaf = path.rsplit("/", 1)[-1]
+    return "sitemap-agent-profiles" in leaf or (
+        "agent" in leaf and "profile" in leaf and "sitemap" in leaf
+    )
+
+
+def _compact_diagnostics(diag: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "robots_fetched": bool(diag.get("robots_fetched")),
+        "sitemap_count_attempted": int(diag.get("sitemap_count_attempted") or 0),
+        "sitemap_count_parsed": int(diag.get("sitemap_count_parsed") or 0),
+        "sitemap_urls_examined": list(diag.get("sitemap_urls_examined") or [])[:10],
+        "candidate_count_before_filtering": int(diag.get("candidate_count_before_filtering") or 0),
+        "candidate_count_after_filtering": int(diag.get("candidate_count_after_filtering") or 0),
+        "directory_pages_examined": int(diag.get("directory_pages_examined") or 0),
+        "final_decision_reason": str(diag.get("final_decision_reason") or "")[:240],
+    }
 
 
 def _looks_profile_path(url: str) -> bool:

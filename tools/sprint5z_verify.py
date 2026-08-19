@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import gzip
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -28,6 +29,7 @@ from gui.models.prospect_store import ProspectStore
 from gui.services.profile_resolver import (
     ProfileResolverService,
     FetchError,
+    _decompress_gzip,
     effective_scrape_url,
     is_safe_url,
 )
@@ -118,6 +120,46 @@ class _Pages:
                 f"<h1>John Doe</h1><p>{note} John Doe covers rural listings.</p>"
                 "</body></html>"
             )
+        raise FetchError(f"HTTP 404 for {path}")
+
+
+class _IdxPages:
+    def __init__(self, *, target_has_name: bool = True) -> None:
+        self.requests: list[str] = []
+        self.target_has_name = target_has_name
+        self.agent_sitemap = (
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            '<url><loc>https://pinnaclerealtyia.com/agent/100-John-Doe/</loc></url>'
+            '<url><loc>https://pinnaclerealtyia.com/agent/1714473-Meridith-Hoffman/</loc></url>'
+            '<url><loc>https://pinnaclerealtyia.com/app/uploads/Agent-listing.png</loc></url>'
+            '</urlset>'
+        )
+
+    def fetch(self, url: str) -> str:
+        self.requests.append(url)
+        path = url.split("//", 1)[-1]
+        path = path.split("/", 1)[1] if "/" in path else "/"
+        path = "/" + path.strip("/")
+        if path == "/robots.txt":
+            return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap.xml\n"
+        if path in ("/sitemap.xml", "/sitemap_index.xml"):
+            return (
+                '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                '<sitemap><loc>https://pinnaclerealtyia.com/idx-sitemaps/sitemap-agent-profiles-1.xml.gz</loc></sitemap>'
+                '</sitemapindex>'
+            )
+        if path == "/idx-sitemaps/sitemap-agent-profiles-1.xml.gz":
+            return gzip.decompress(gzip.compress(self.agent_sitemap.encode("utf-8"))).decode("utf-8")
+        if path == "/":
+            return "<html><body><a href='/agents'>Agents</a></body></html>"
+        if path == "/agents":
+            return "<html><body>No name-bearing cards.</body></html>"
+        if path == "/agent/1714473-Meridith-Hoffman":
+            if self.target_has_name:
+                return "<html><head><title>Meridith Hoffman</title></head><body><h1>Meridith Hoffman</h1><p>Bio.</p></body></html>"
+            return "<html><body><h1>Agent Profile</h1></body></html>"
+        if path.startswith("/agent/"):
+            return "<html><body><h1>Unrelated Agent</h1></body></html>"
         raise FetchError(f"HTTP 404 for {path}")
 
 
@@ -266,6 +308,40 @@ def _verify_csv_aliases(counts: dict[str, int]) -> None:
     )
 
 
+def _verify_5z1_hardening(counts: dict[str, int]) -> None:
+    xml = b"<urlset><url><loc>https://x.test/agent/meridith-hoffman</loc></url></urlset>"
+    check("gzip sitemap bytes decompress", _decompress_gzip(gzip.compress(xml), "https://x.test/s.xml.gz") == xml, counts)
+    try:
+        _decompress_gzip(b"not gzip", "https://x.test/s.xml.gz")
+        malformed_ok = False
+    except FetchError:
+        malformed_ok = True
+    check("malformed gzip rejected safely", malformed_ok, counts)
+
+    idx = _IdxPages()
+    result = ProfileResolverService(fetcher=idx.fetch).resolve("Meridith Hoffman", PARENT)
+    check("IDX agent sitemap resolves name-bearing verified profile", result.status == RESOLUTION_RESOLVED and result.resolved_url.endswith("/agent/1714473-Meridith-Hoffman/"), counts)
+    check("IDX unrelated agent not selected", "John-Doe" not in result.resolved_url, counts)
+    check("static asset excluded from profile verification", not any(req.endswith("Agent-listing.png") for req in idx.requests), counts)
+
+    weak = _IdxPages(target_has_name=False)
+    weak_result = ProfileResolverService(fetcher=weak.fetch).resolve("Meridith Hoffman", PARENT)
+    check("name-bearing IDX URL still requires page evidence", weak_result.status != RESOLUTION_RESOLVED and weak_result.resolved_url == "", counts)
+
+    class RootOnly(_Pages):
+        def _body(self, path: str) -> str:
+            if path == "/sitemap-agents.xml":
+                return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/</loc></url></urlset>'
+            if path == "/":
+                return "<html><body>No directory links.</body></html>"
+            if path == "/agent":
+                return "<html><body><h1>Agent Directory</h1></body></html>"
+            return super()._body(path)
+
+    root_result = ProfileResolverService(fetcher=RootOnly().fetch).resolve("Meridith Hoffman", PARENT)
+    check("generic /agent/ root cannot resolve without full-name evidence", root_result.status != RESOLUTION_RESOLVED and root_result.resolved_url == "", counts)
+
+
 def main() -> int:
     print("PROFILE RESOLUTION - SPRINT 5Z\n")
     print("SYNTHETIC VERIFICATION DATA (offline, no live network)\n")
@@ -274,6 +350,7 @@ def main() -> int:
     _verify_apply_and_effective(counts)
     _verify_persistence(counts)
     _verify_csv_aliases(counts)
+    _verify_5z1_hardening(counts)
     print("\nSPRINT 5Z VERIFICATION COMPLETE")
     print(f"Passed: {counts['passed']}")
     print(f"Failed: {counts['failed']}")

@@ -7,6 +7,7 @@ pages, candidate verification) runs without touching the live web.
 
 from __future__ import annotations
 
+import gzip
 import os
 
 import pytest
@@ -25,6 +26,8 @@ from gui.models.prospect_store import ProspectStore
 from gui.services.profile_resolver import (
     ProfileResolverService,
     FetchError,
+    _decompress_gzip,
+    default_fetcher,
     effective_scrape_url,
     full_name_in_text,
     is_safe_url,
@@ -123,6 +126,61 @@ class _Pages:
                 f"<p>{meridith_note} John Doe covers rural listings.</p>"
                 "</body></html>"
             )
+        raise FetchError(f"HTTP 404 for {path}")
+
+
+class _IdxGzipPages:
+    def __init__(self, *, target_has_name: bool = True, duplicate_target: bool = False) -> None:
+        self.requests: list[str] = []
+        sitemap = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            '<url><loc>https://pinnaclerealtyia.com/agent/1000-John-Doe/</loc></url>'
+            '<url><loc>https://pinnaclerealtyia.com/agent/1714473-Meridith-Hoffman/</loc></url>'
+            '<url><loc>https://pinnaclerealtyia.com/agent/2000-Jane-Roe/</loc></url>'
+            '<url><loc>https://pinnaclerealtyia.com/app/uploads/2023/07/Agent-listing.png</loc></url>'
+            '</urlset>'
+        )
+        if duplicate_target:
+            sitemap = sitemap.replace(
+                '</urlset>',
+                '<url><loc>https://pinnaclerealtyia.com/agent/9999-Meridith-Hoffman/</loc></url></urlset>',
+            )
+        self.gz_text = gzip.decompress(gzip.compress(sitemap.encode("utf-8"))).decode("utf-8")
+        self.target_has_name = target_has_name
+
+    def fetch(self, url: str) -> str:
+        self.requests.append(url)
+        path = url.split("//", 1)[-1]
+        path = path.split("/", 1)[1] if "/" in path else "/"
+        path = "/" + path.strip("/")
+        if path == "/robots.txt":
+            return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap.xml\n"
+        if path == "/sitemap.xml" or path == "/sitemap_index.xml":
+            return (
+                '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                '<sitemap><loc>https://pinnaclerealtyia.com/idx-sitemaps/sitemap-agent-profiles-1.xml.gz</loc></sitemap>'
+                '</sitemapindex>'
+            )
+        if path == "/idx-sitemaps/sitemap-agent-profiles-1.xml.gz":
+            return self.gz_text
+        if path == "/":
+            return "<html><body><a href='/agents'>Agents</a></body></html>"
+        if path == "/agents":
+            return "<html><body>No matching cards here.</body></html>"
+        if path == "/agent/1714473-Meridith-Hoffman":
+            if self.target_has_name:
+                return (
+                    "<html><head><title>Meridith Hoffman | Pinnacle Realty</title></head>"
+                    "<body><h1>Meridith Hoffman</h1><p>Bio and experience.</p>"
+                    '<script type="application/ld+json">{"@type":"Person","name":"Meridith Hoffman"}</script>'
+                    "</body></html>"
+                )
+            return "<html><head><title>Agent Profile</title></head><body><h1>Our Agent</h1></body></html>"
+        if path == "/agent/9999-Meridith-Hoffman":
+            return "<html><body><h1>Meridith Hoffman</h1><p>Bio and experience.</p></body></html>"
+        if path.startswith("/agent/"):
+            return "<html><body><h1>Unrelated Agent</h1></body></html>"
         raise FetchError(f"HTTP 404 for {path}")
 
 
@@ -226,6 +284,58 @@ class TestNameNormalization:
         ]
 
 
+class TestGzipSitemapSupport:
+    def test_default_fetcher_decompresses_actual_gzip_bytes(self, monkeypatch) -> None:
+        sitemap = b"<?xml version='1.0'?><urlset><url><loc>https://x.test/agent/a</loc></url></urlset>"
+
+        class FakeResponse:
+            status_code = 200
+            headers = {"Content-Type": "application/gzip"}
+
+            def iter_content(self, chunk_size: int = 65536):
+                yield gzip.compress(sitemap)
+
+        def fake_get(*args, **kwargs):
+            return FakeResponse()
+
+        monkeypatch.setattr("gui.services.profile_resolver.requests.get", fake_get)
+        assert "<urlset>" in default_fetcher()("https://x.test/sitemap.xml.gz")
+
+    def test_gzip_sitemap_decompresses_and_extracts_urls(self) -> None:
+        site = _IdxGzipPages()
+        result = ProfileResolverService(fetcher=site.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.resolved_url == "https://pinnaclerealtyia.com/agent/1714473-Meridith-Hoffman/"
+        assert "/idx-sitemaps/sitemap-agent-profiles-1.xml.gz" in "\n".join(site.requests)
+
+    def test_malformed_gzip_fails_safely(self) -> None:
+        with pytest.raises(FetchError):
+            _decompress_gzip(b"not gzip", "https://x.test/sitemap.xml.gz")
+
+    def test_decompressed_size_bound_enforced(self, monkeypatch) -> None:
+        from gui.services import profile_resolver
+
+        monkeypatch.setattr(profile_resolver, "MAX_GZIP_DECOMPRESSED_BYTES", 5)
+        payload = gzip.compress(b"<urlset></urlset>")
+        with pytest.raises(FetchError):
+            profile_resolver._decompress_gzip(payload, "https://x.test/sitemap.xml.gz")
+
+    def test_idx_sitemap_target_url_prioritized_and_unrelated_not_selected(self) -> None:
+        site = _IdxGzipPages()
+        result = ProfileResolverService(fetcher=site.fetch).resolve("Meridith Hoffman", PARENT)
+        target_index = site.requests.index("https://pinnaclerealtyia.com/agent/1714473-Meridith-Hoffman/")
+        unrelated_requests = [i for i, url in enumerate(site.requests) if "John-Doe" in url or "Jane-Roe" in url]
+        assert result.status == RESOLUTION_RESOLVED
+        assert not unrelated_requests or target_index < min(unrelated_requests)
+        assert "John-Doe" not in result.resolved_url
+
+    def test_idx_sitemap_url_still_requires_page_name_evidence(self) -> None:
+        site = _IdxGzipPages(target_has_name=False)
+        result = ProfileResolverService(fetcher=site.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status != RESOLUTION_RESOLVED
+        assert result.resolved_url == ""
+
+
 # ---------------------------------------------------------------------------
 # End-to-end resolution (deterministic FakeSite)
 # ---------------------------------------------------------------------------
@@ -303,6 +413,81 @@ class TestResolution:
         result = service.resolve("Meridith Hoffman", PARENT)
         assert result.status == RESOLUTION_AMBIGUOUS
         assert result.resolved_url == ""
+
+    def test_static_assets_are_not_profile_candidates(self) -> None:
+        class StaticSite(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/sitemap-agents.xml":
+                    return (
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        '<url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman.png</loc></url>'
+                        '<url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman.pdf</loc></url>'
+                        '<url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman.js</loc></url>'
+                        '<url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman.css</loc></url>'
+                        "</urlset>"
+                    )
+                return super()._body(path)
+
+        site = StaticSite()
+        result = ProfileResolverService(fetcher=site.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED  # homepage/directory fixture still finds real HTML profile
+        assert not any(url.endswith((".png", ".pdf", ".js", ".css")) for url in site.requests)
+
+    def test_generic_agent_root_cannot_resolve_without_full_name_evidence(self) -> None:
+        class RootOnlySite(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/sitemap-agents.xml":
+                    return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/</loc></url></urlset>'
+                if path == "/":
+                    return "<html><body>No directory links.</body></html>"
+                if path == "/agent":
+                    return "<html><body><h1>Agent Directory</h1></body></html>"
+                return super()._body(path)
+
+        result = ProfileResolverService(fetcher=RootOnlySite().fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_NOT_FOUND
+        assert result.resolved_url == ""
+
+    def test_404_candidate_cannot_resolve(self) -> None:
+        class MissingCandidateSite(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/sitemap-agents.xml":
+                    return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url></urlset>'
+                if path == "/":
+                    return "<html><body>No directory links.</body></html>"
+                if path == "/agent/meridith-hoffman":
+                    raise FetchError("HTTP 404 for /agent/meridith-hoffman")
+                return super()._body(path)
+
+        result = ProfileResolverService(fetcher=MissingCandidateSite().fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_NOT_FOUND
+        assert result.resolved_url == ""
+
+    def test_403_candidate_cannot_resolve(self) -> None:
+        class ForbiddenCandidateSite(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/sitemap-agents.xml":
+                    return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url></urlset>'
+                if path == "/":
+                    return "<html><body>No directory links.</body></html>"
+                if path == "/agent/meridith-hoffman":
+                    raise FetchError("HTTP 403 for /agent/meridith-hoffman")
+                return super()._body(path)
+
+        result = ProfileResolverService(fetcher=ForbiddenCandidateSite().fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_NOT_FOUND
+        assert result.resolved_url == ""
+
+    def test_diagnostics_are_compactly_persisted(self) -> None:
+        service, _ = _service()
+        prospect = _prospect()
+        result = service.resolve("Meridith Hoffman", PARENT)
+        service.apply_result(prospect, result)
+        meta = prospect.metadata["profile_resolution"]
+        assert meta["robots_fetched"] is True
+        assert meta["sitemap_count_attempted"] >= 1
+        assert meta["candidate_count_after_filtering"] >= 1
+        assert meta["final_decision_reason"]
 
     def test_not_found_when_no_matching_profile(self) -> None:
         service, _ = _service()
