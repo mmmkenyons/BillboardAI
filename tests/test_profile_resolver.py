@@ -837,6 +837,162 @@ class TestResolution:
         assert result.status == RESOLUTION_NOT_FOUND
         assert result.resolved_url == ""
 
+    def test_browser_fallback_runs_when_http_candidates_are_only_unusable(self) -> None:
+        parent = "https://example.com"
+
+        class DeadGenericHttp:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return "User-agent: *\nSitemap: https://example.com/sitemap.xml\n"
+                if path in ("/sitemap.xml", "/sitemap_index.xml"):
+                    return (
+                        "<urlset>"
+                        "<url><loc>https://example.com/about/</loc></url>"
+                        "<url><loc>https://example.com/agent/</loc></url>"
+                        "<url><loc>https://example.com/profile/</loc></url>"
+                        "</urlset>"
+                    )
+                if path in {"/", "/about", "/agent", "/profile", "/team", "/agent/alex-kahn"}:
+                    raise FetchError(f"HTTP 403 for {path}")
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite(
+            {
+                parent: (parent, '<html><body><a href="/team">Team</a></body></html>'),
+                f"{parent}/team": (
+                    f"{parent}/team",
+                    '<html><body><a href="/agent/alex-kahn">Alex Kahn</a></body></html>',
+                ),
+                f"{parent}/agent/alex-kahn": (
+                    f"{parent}/agent/alex-kahn",
+                    "<html><head><title>Alex Kahn</title></head><body><h1>Alex Kahn</h1>"
+                    "<p>Alex Kahn bio and experience.</p></body></html>",
+                ),
+            }
+        )
+
+        result = ProfileResolverService(fetcher=DeadGenericHttp(), browser_fetcher=browser.fetch).resolve("Alex Kahn", parent)
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.resolved_url == "https://example.com/agent/alex-kahn"
+        assert result.diagnostics["http_candidates_discovered"] == 3
+        assert result.diagnostics["http_candidates_usable"] == 0
+        assert result.diagnostics["http_candidates_unusable"] == 3
+        assert result.diagnostics["browser_fallback_attempted"] is True
+        assert result.diagnostics["browser_fallback_trigger_reason"] == "ONLY_UNUSABLE_HTTP_CANDIDATES"
+        assert result.diagnostics["browser_candidates_discovered"] == 1
+
+    def test_strong_http_candidate_suppresses_homepage_browser_fallback(self) -> None:
+        browser = _BrowserSite({PARENT: (PARENT, "<html></html>")})
+        result = ProfileResolverService(fetcher=_Pages().fetch, browser_fetcher=browser.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.diagnostics["http_candidates_usable"] >= 1
+        assert result.diagnostics["browser_fallback_attempted"] is False
+        assert result.diagnostics["browser_fallback_trigger_reason"] == "NOT_NEEDED"
+        assert browser.requests == []
+
+    def test_weak_http_candidate_still_uses_candidate_browser_verification_not_homepage_fallback(self) -> None:
+        class WeakHttp:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap.xml\n"
+                if path in ("/sitemap.xml", "/sitemap_index.xml"):
+                    return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url></urlset>'
+                if path == "/agent/meridith-hoffman":
+                    return '<html><body><div id="app"></div></body></html>'
+                if path in ("/", ""):
+                    return "<html><body>No directory links.</body></html>"
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite(
+            {
+                f"{PARENT}/agent/meridith-hoffman": (
+                    f"{PARENT}/agent/meridith-hoffman",
+                    "<html><head><title>Meridith Hoffman</title></head><body><h1>Meridith Hoffman</h1></body></html>",
+                )
+            }
+        )
+        result = ProfileResolverService(fetcher=WeakHttp(), browser_fetcher=browser.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.diagnostics["browser_candidate_verifications_attempted"] == 1
+        assert result.diagnostics["browser_fallback_attempted"] is False
+        assert result.diagnostics["browser_fallback_trigger_reason"] == "NOT_NEEDED"
+
+    def test_browser_fallback_finds_nothing_remains_not_found(self) -> None:
+        parent = "https://example.com"
+
+        class NoHttpCandidates:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return "User-agent: *\nSitemap: https://example.com/sitemap.xml\n"
+                if path in ("/sitemap.xml", "/sitemap_index.xml"):
+                    return "<urlset><url><loc>https://example.com/contact</loc></url></urlset>"
+                if path in ("/", ""):
+                    return "<html></html>"
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite({parent: (parent, "<html><body>No people here.</body></html>")})
+        result = ProfileResolverService(fetcher=NoHttpCandidates(), browser_fetcher=browser.fetch).resolve("Alex Kahn", parent)
+        assert result.status == RESOLUTION_NOT_FOUND
+        assert result.diagnostics["http_candidates_discovered"] == 0
+        assert result.diagnostics["browser_fallback_attempted"] is True
+        assert result.diagnostics["browser_fallback_trigger_reason"] == "NO_HTTP_CANDIDATES"
+        assert result.diagnostics["browser_candidates_discovered"] == 0
+
+    def test_browser_fallback_two_strong_same_name_profiles_are_ambiguous(self) -> None:
+        parent = "https://example.com"
+
+        class NoHttpCandidates:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return ""
+                if path in ("/sitemap.xml", "/sitemap_index.xml", "/", "/team", "/agent/alex-kahn", "/agent/alex-kahn-2"):
+                    raise FetchError(f"HTTP 403 for {path}")
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite(
+            {
+                parent: (parent, '<html><a href="/team">Team</a></html>'),
+                f"{parent}/team": (
+                    f"{parent}/team",
+                    '<a href="/agent/alex-kahn">Alex Kahn</a><a href="/agent/alex-kahn-2">Alex Kahn</a>',
+                ),
+                f"{parent}/agent/alex-kahn": (f"{parent}/agent/alex-kahn", "<html><h1>Alex Kahn</h1></html>"),
+                f"{parent}/agent/alex-kahn-2": (f"{parent}/agent/alex-kahn-2", "<html><h1>Alex Kahn</h1></html>"),
+            }
+        )
+        result = ProfileResolverService(fetcher=NoHttpCandidates(), browser_fetcher=browser.fetch).resolve("Alex Kahn", parent)
+        assert result.status == RESOLUTION_AMBIGUOUS
+
+    def test_browser_fallback_external_links_rejected(self) -> None:
+        parent = "https://example.com"
+
+        class NoHttpCandidates:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path in ("/robots.txt", "/sitemap.xml", "/sitemap_index.xml"):
+                    return ""
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite({parent: (parent, '<html><a href="https://external.test/agent/alex-kahn">Alex Kahn</a></html>')})
+        result = ProfileResolverService(fetcher=NoHttpCandidates(), browser_fetcher=browser.fetch).resolve("Alex Kahn", parent)
+        assert result.status == RESOLUTION_NOT_FOUND
+        assert result.diagnostics["browser_fallback_attempted"] is True
+        assert result.diagnostics["browser_candidates_discovered"] == 0
+
     def test_diagnostics_are_compactly_persisted(self) -> None:
         service, _ = _service()
         prospect = _prospect()

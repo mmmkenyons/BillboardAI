@@ -634,6 +634,10 @@ class ProfileResolverService:
             "sitemap_urls_examined": [],
             "candidate_count_before_filtering": 0,
             "candidate_count_after_filtering": 0,
+            "http_candidates_discovered": 0,
+            "http_candidates_usable": 0,
+            "http_candidates_unusable": 0,
+            "browser_fallback_trigger_reason": "NOT_NEEDED",
             "directory_pages_examined": 0,
             "browser_fallback_attempted": False,
             "browser_homepage_status": "NOT_ATTEMPTED",
@@ -722,13 +726,53 @@ class ProfileResolverService:
             person, parent, candidates, _add_candidate
         )
 
-        if not candidates and self._should_use_browser_fallback(diagnostics):
-            self._discover_from_browser(person, parent, candidates, seen, diagnostics, _add_candidate)
-
         # Stage 5: verify the best-bounded candidates by fetching their pages.
-        ranked = self._rank_candidates(candidates, person)
         verified: List[ResolutionCandidate] = []
         browser_verify_count = 0
+        http_candidates = list(candidates)
+        diagnostics["http_candidates_discovered"] = len(http_candidates)
+        ranked = self._rank_candidates(http_candidates, person)
+        browser_verify_count = self._verify_ranked_candidates(
+            ranked,
+            verified,
+            diagnostics,
+            parent,
+            person,
+            browser_verify_count,
+        )
+
+        usable = [c for c in verified if self._is_usable_http_candidate(c, parent)]
+        diagnostics["http_candidates_usable"] = len(usable)
+        diagnostics["http_candidates_unusable"] = max(0, len(http_candidates) - len(usable))
+
+        if self._should_use_browser_fallback(diagnostics):
+            before_browser = len(candidates)
+            self._discover_from_browser(person, parent, candidates, seen, diagnostics, _add_candidate)
+            browser_added = candidates[before_browser:]
+            if browser_added:
+                browser_verify_count = self._verify_ranked_candidates(
+                    self._rank_candidates(browser_added, person),
+                    verified,
+                    diagnostics,
+                    parent,
+                    person,
+                    browser_verify_count,
+                )
+
+        result = self._decision(verified, person)
+        diagnostics["final_decision_reason"] = result.evidence
+        result.diagnostics = diagnostics
+        return result
+
+    def _verify_ranked_candidates(
+        self,
+        ranked: List[ResolutionCandidate],
+        verified: List[ResolutionCandidate],
+        diagnostics: Dict[str, Any],
+        parent: str,
+        person: str,
+        browser_verify_count: int,
+    ) -> int:
         for cand in ranked[: self.max_candidates_verify]:
             body = _fetch_or_none(self._fetcher, cand.url)
             if body is not None:
@@ -766,11 +810,7 @@ class ProfileResolverService:
                 self._try_browser_verify_candidate(cand, parent, person)
             self._append_candidate_diagnostic(diagnostics, cand)
             verified.append(cand)
-
-        result = self._decision(verified, person)
-        diagnostics["final_decision_reason"] = result.evidence
-        result.diagnostics = diagnostics
-        return result
+        return browser_verify_count
 
     def resolve_prospects(
         self, prospects: Sequence[Prospect], *, apply: bool = True
@@ -997,12 +1037,35 @@ class ProfileResolverService:
                 out.append(url)
         return out
 
+    @staticmethod
+    def _is_usable_http_candidate(cand: ResolutionCandidate, parent: str) -> bool:
+        """True when an HTTP-verified candidate has meaningful identity evidence."""
+        if cand is None:
+            return False
+        if not cand.url or not is_within_parent(cand.url, parent):
+            return False
+        if _is_static_profile_candidate(cand.url) or _is_generic_profile_root(cand.url):
+            return False
+        if not cand.http_fetch_ok:
+            return False
+        if cand.confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM):
+            return True
+        return cand.is_strong() or cand.plausibility_score() > 0
+
     def _should_use_browser_fallback(self, diagnostics: Dict[str, Any]) -> bool:
         if self._browser_fetcher is None:
+            diagnostics["browser_fallback_trigger_reason"] = "NOT_NEEDED"
             return False
-        if int(diagnostics.get("candidate_count_after_filtering") or 0) > 0:
+        usable_count = int(diagnostics.get("http_candidates_usable") or 0)
+        raw_count = int(diagnostics.get("http_candidates_discovered") or 0)
+        if usable_count > 0:
+            diagnostics["browser_fallback_trigger_reason"] = "NOT_NEEDED"
             return False
+        if raw_count > 0:
+            diagnostics["browser_fallback_trigger_reason"] = "ONLY_UNUSABLE_HTTP_CANDIDATES"
+            return True
         if int(diagnostics.get("sitemap_count_attempted") or 0) <= 0:
+            diagnostics["browser_fallback_trigger_reason"] = "NO_HTTP_CANDIDATES"
             return True
         for record in diagnostics.get("sitemap_diagnostics") or []:
             if not isinstance(record, dict):
@@ -1011,8 +1074,10 @@ class ProfileResolverService:
                 continue
             reason = str(record.get("failure_reason") or "")
             if "403" in reason or "429" in reason:
+                diagnostics["browser_fallback_trigger_reason"] = "HTTP_DISCOVERY_BLOCKED"
                 return True
-        return False
+        diagnostics["browser_fallback_trigger_reason"] = "NO_HTTP_CANDIDATES"
+        return True
 
     def _browser_fetch(self, url: str) -> BrowserHtmlResult:
         fetcher = self._browser_fetcher or fetch_rendered_html
@@ -1028,6 +1093,7 @@ class ProfileResolverService:
         add: Callable[[ResolutionCandidate], None],
     ) -> None:
         diagnostics["browser_fallback_attempted"] = True
+        initial_candidate_count = len(candidates)
         try:
             homepage = self._browser_fetch(parent)
         except Exception as exc:  # noqa: BLE001
@@ -1059,7 +1125,7 @@ class ProfileResolverService:
                         same_domain=is_within_parent(profile_url, parent),
                     )
                 )
-        diagnostics["browser_candidates_discovered"] = len(candidates)
+        diagnostics["browser_candidates_discovered"] = max(0, len(candidates) - initial_candidate_count)
 
     def _browser_directory_pages(
         self,
@@ -1347,6 +1413,10 @@ def _compact_diagnostics(diag: Dict[str, Any]) -> Dict[str, Any]:
         "sitemap_urls_examined": list(diag.get("sitemap_urls_examined") or [])[:10],
         "candidate_count_before_filtering": int(diag.get("candidate_count_before_filtering") or 0),
         "candidate_count_after_filtering": int(diag.get("candidate_count_after_filtering") or 0),
+        "http_candidates_discovered": int(diag.get("http_candidates_discovered") or 0),
+        "http_candidates_usable": int(diag.get("http_candidates_usable") or 0),
+        "http_candidates_unusable": int(diag.get("http_candidates_unusable") or 0),
+        "browser_fallback_trigger_reason": str(diag.get("browser_fallback_trigger_reason") or "")[:80],
         "directory_pages_examined": int(diag.get("directory_pages_examined") or 0),
         "browser_fallback_attempted": bool(diag.get("browser_fallback_attempted")),
         "browser_homepage_status": str(diag.get("browser_homepage_status") or "")[:40],

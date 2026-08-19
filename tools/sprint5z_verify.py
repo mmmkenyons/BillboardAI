@@ -442,6 +442,67 @@ def _verify_5z3_browser_fallback(counts: dict[str, int]) -> None:
     check("external redirect during browser candidate verification rejected", redirect_result.diagnostics.get("browser_candidate_verifications_attempted", 0) >= 1 and any("redirect outside parent domain" in (row.get("browser_failure_reason") or "") for row in redirect_rows), counts)
 
 
+def _verify_5z4_browser_fallback_after_unusable_http(counts: dict[str, int]) -> None:
+    parent = "https://example.com"
+
+    class DeadGenericHttp:
+        def __call__(self, url: str) -> str:
+            path = url.split("//", 1)[-1]
+            path = path.split("/", 1)[1] if "/" in path else "/"
+            path = "/" + path.strip("/")
+            if path == "/robots.txt":
+                return "User-agent: *\nSitemap: https://example.com/sitemap.xml\n"
+            if path in ("/sitemap.xml", "/sitemap_index.xml"):
+                return (
+                    "<urlset>"
+                    "<url><loc>https://example.com/about/</loc></url>"
+                    "<url><loc>https://example.com/agent/</loc></url>"
+                    "<url><loc>https://example.com/profile/</loc></url>"
+                    "</urlset>"
+                )
+            if path in {"/", "/about", "/agent", "/profile", "/team", "/agent/alex-kahn"}:
+                raise FetchError(f"HTTP 403 for {path}")
+            raise FetchError(f"missing {path}")
+
+    browser = _BrowserSite(
+        {
+            parent: (parent, '<html><body><a href="/team">Team</a></body></html>'),
+            f"{parent}/team": (
+                f"{parent}/team",
+                '<html><body><a href="/agent/alex-kahn">Alex Kahn</a></body></html>',
+            ),
+            f"{parent}/agent/alex-kahn": (
+                f"{parent}/agent/alex-kahn",
+                "<html><head><title>Alex Kahn</title></head><body><h1>Alex Kahn</h1><p>Alex Kahn bio and experience.</p></body></html>",
+            ),
+        }
+    )
+    result = ProfileResolverService(fetcher=DeadGenericHttp(), browser_fetcher=browser.fetch).resolve("Alex Kahn", parent)
+    check("5Z.4 raw HTTP candidates recorded", result.diagnostics.get("http_candidates_discovered") == 3, counts)
+    check("5Z.4 zero usable HTTP candidates recorded", result.diagnostics.get("http_candidates_usable") == 0, counts)
+    check("5Z.4 unusable HTTP candidates recorded", result.diagnostics.get("http_candidates_unusable") == 3, counts)
+    check("5Z.4 browser fallback triggered after unusable HTTP", result.diagnostics.get("browser_fallback_attempted") is True, counts)
+    check("5Z.4 trigger reason explains unusable HTTP", result.diagnostics.get("browser_fallback_trigger_reason") == "ONLY_UNUSABLE_HTTP_CANDIDATES", counts)
+    check("5Z.4 browser fallback resolves with normal scoring", result.status == RESOLUTION_RESOLVED and result.resolved_url == "https://example.com/agent/alex-kahn", counts)
+
+    browser_unused = _BrowserSite({parent: (parent, "<html></html>")})
+    strong = ProfileResolverService(fetcher=_Pages().fetch, browser_fetcher=browser_unused.fetch).resolve("Meridith Hoffman", PARENT)
+    check("5Z.4 strong HTTP candidate suppresses homepage browser fallback", strong.status == RESOLUTION_RESOLVED and strong.diagnostics.get("browser_fallback_attempted") is False and strong.diagnostics.get("browser_fallback_trigger_reason") == "NOT_NEEDED", counts)
+
+    class NoHttpCandidates:
+        def __call__(self, url: str) -> str:
+            path = url.split("//", 1)[-1]
+            path = path.split("/", 1)[1] if "/" in path else "/"
+            path = "/" + path.strip("/")
+            if path in ("/robots.txt", "/sitemap.xml", "/sitemap_index.xml"):
+                return ""
+            raise FetchError(f"missing {path}")
+
+    external = _BrowserSite({parent: (parent, '<html><a href="https://external.test/agent/alex-kahn">Alex Kahn</a></html>')})
+    external_result = ProfileResolverService(fetcher=NoHttpCandidates(), browser_fetcher=external.fetch).resolve("Alex Kahn", parent)
+    check("5Z.4 browser fallback external links rejected", external_result.status != RESOLUTION_RESOLVED and external_result.diagnostics.get("browser_candidates_discovered") == 0, counts)
+
+
 def main() -> int:
     print("PROFILE RESOLUTION - SPRINT 5Z\n")
     print("SYNTHETIC VERIFICATION DATA (offline, no live network)\n")
@@ -452,6 +513,7 @@ def main() -> int:
     _verify_csv_aliases(counts)
     _verify_5z1_hardening(counts)
     _verify_5z3_browser_fallback(counts)
+    _verify_5z4_browser_fallback_after_unusable_http(counts)
     print("\nSPRINT 5Z VERIFICATION COMPLETE")
     print(f"Passed: {counts['passed']}")
     print(f"Failed: {counts['failed']}")
