@@ -163,6 +163,21 @@ class _IdxPages:
         raise FetchError(f"HTTP 404 for {path}")
 
 
+class _BlockedIdxPages(_IdxPages):
+    def fetch(self, url: str) -> str:
+        self.requests.append(url)
+        path = url.split("//", 1)[-1]
+        path = path.split("/", 1)[1] if "/" in path else "/"
+        path = "/" + path.strip("/")
+        if path == "/robots.txt":
+            return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/idx-sitemaps/index.xml\n"
+        if path == "/idx-sitemaps/index.xml":
+            raise FetchError("HTTP 403 for https://pinnaclerealtyia.com/idx-sitemaps/index.xml")
+        if path == "/idx-sitemaps/sitemap-agent-html-sitemap-1.xml.gz":
+            return '<urlset><url><loc>https://pinnaclerealtyia.com/agents/</loc></url></urlset>'
+        return super().fetch(url)
+
+
 def _prospect_(*, name: str = "Meridith Hoffman", website: str = PARENT,
                prospect_id: str = "p1") -> Prospect:
     return Prospect(
@@ -327,6 +342,15 @@ def _verify_5z1_hardening(counts: dict[str, int]) -> None:
     weak = _IdxPages(target_has_name=False)
     weak_result = ProfileResolverService(fetcher=weak.fetch).resolve("Meridith Hoffman", PARENT)
     check("name-bearing IDX URL still requires page evidence", weak_result.status != RESOLUTION_RESOLVED and weak_result.resolved_url == "", counts)
+
+    blocked = _BlockedIdxPages()
+    blocked_result = ProfileResolverService(fetcher=blocked.fetch).resolve("Meridith Hoffman", PARENT)
+    diag = blocked_result.diagnostics.get("sitemap_diagnostics", [])
+    agent_record = next((r for r in diag if r.get("url") == "https://pinnaclerealtyia.com/idx-sitemaps/sitemap-agent-profiles-1.xml.gz"), {})
+    index_record = next((r for r in diag if r.get("url") == "https://pinnaclerealtyia.com/idx-sitemaps/index.xml"), {})
+    check("blocked nested sitemap index fallback resolves profile", blocked_result.status == RESOLUTION_RESOLVED and blocked_result.resolved_url.endswith("/agent/1714473-Meridith-Hoffman/"), counts)
+    check("blocked sitemap index diagnostic records fetch failure", index_record.get("fetch") == "FETCH_FAILED", counts)
+    check("fallback agent sitemap diagnostic records target loc admission", agent_record.get("parse") == "TARGET_MATCH_FOUND" and agent_record.get("target_name_loc_count") == 1 and agent_record.get("candidate_admitted_count") == 1, counts)
 
     class RootOnly(_Pages):
         def _body(self, path: str) -> str:

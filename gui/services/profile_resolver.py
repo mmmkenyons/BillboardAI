@@ -71,6 +71,7 @@ MAX_DIRECTORY_PAGES = 5          # homepage-linked directory pages to fetch
 MAX_HOMEPAGE_LINKS = 800         # homepage <a href> cap for discovery
 MAX_LINKS_SCANNED = 600          # per-directory-page link cap
 MAX_CANDIDATES_VERIFY = 8        # candidates whose pages we actually fetch
+MAX_SITEMAP_DIAGNOSTICS = 20     # compact per-sitemap observability cap
 
 # Path token indicators that a URL is likely an individual/agent profile.
 PROFILE_PATH_TOKENS = (
@@ -85,6 +86,10 @@ SUFFIX_TOKENS = frozenset({"jr", "sr", "ii", "iii", "iv", "v", "md", "dds", "esq
 
 NETWORK_ERROR_TOKEN = "network/access failure"
 GZIP_MAGIC = b"\x1f\x8b"
+SITEMAP_FETCH_FAILED = "FETCH_FAILED"
+SITEMAP_PARSED_ZERO_LOCS = "PARSED_ZERO_LOCS"
+SITEMAP_PARSED_WITH_LOCS = "PARSED_WITH_LOCS"
+SITEMAP_TARGET_MATCH_FOUND = "TARGET_MATCH_FOUND"
 STATIC_PROFILE_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf",
     ".css", ".js", ".ico", ".zip", ".gz",
@@ -382,6 +387,66 @@ def _fetch_or_none(fetcher: Fetcher, url: str) -> Optional[str]:
         return None
 
 
+def _bounded_failure_reason(exc: Exception) -> str:
+    """Compact, non-body failure reason suitable for diagnostics metadata."""
+    text = " ".join(str(exc or "").split())
+    return text[:160]
+
+
+def _looks_gzip_sitemap_url(url: str) -> bool:
+    return (url or "").lower().split("?", 1)[0].endswith(".gz")
+
+
+def _profile_sitemap_fallbacks(index_url: str) -> List[str]:
+    """Small same-directory profile-sitemap fallbacks for blocked sitemap indexes.
+
+    Some real estate platforms expose typed child sitemaps even when their
+    sitemap index endpoint is intermittently inaccessible. This does not guess a
+    person/profile URL; it only tries bounded, profile-oriented sitemap names
+    under an already discovered sitemap-index directory.
+    """
+    try:
+        parsed = urlparse(index_url)
+    except ValueError:
+        return []
+    path = parsed.path or ""
+    if path.count("/") < 2:
+        return []
+    leaf = path.rsplit("/", 1)[-1].lower()
+    if leaf not in {"index.xml", "sitemap.xml", "sitemap_index.xml"}:
+        return []
+    base = index_url.rsplit("/", 1)[0].rstrip("/")
+    if not base:
+        return []
+    names = (
+        "sitemap-agent-profiles-1.xml.gz",
+        "sitemap-agent-html-sitemap-1.xml.gz",
+        "sitemap-agents.xml",
+        "sitemap-realtors.xml",
+        "sitemap-team.xml",
+    )
+    return [f"{base}/{name}" for name in names]
+
+
+def _append_sitemap_diagnostic(diag: Dict[str, Any], record: Dict[str, Any]) -> None:
+    records = diag.setdefault("sitemap_diagnostics", [])
+    if not isinstance(records, list) or len(records) >= MAX_SITEMAP_DIAGNOSTICS:
+        return
+    compact = {
+        "url": str(record.get("url") or "")[:240],
+        "fetch": str(record.get("fetch") or "")[:40],
+        "parse": str(record.get("parse") or "")[:40],
+        "gzip_url": bool(record.get("gzip_url")),
+        "loc_count": int(record.get("loc_count") or 0),
+        "target_name_loc_count": int(record.get("target_name_loc_count") or 0),
+        "candidate_admitted_count": int(record.get("candidate_admitted_count") or 0),
+    }
+    reason = str(record.get("failure_reason") or "")[:160]
+    if reason:
+        compact["failure_reason"] = reason
+    records.append(compact)
+
+
 def _extract_loc_urls(xml_text: str, cap: int) -> List[str]:
     """Return the <loc> URLs from a sitemap / index XML blob (bounded)."""
     out: List[str] = []
@@ -550,6 +615,7 @@ class ProfileResolverService:
             "candidate_count_after_filtering": 0,
             "directory_pages_examined": 0,
             "final_decision_reason": "",
+            "sitemap_diagnostics": [],
         }
 
         def _add_candidate(c: ResolutionCandidate) -> None:
@@ -576,22 +642,51 @@ class ProfileResolverService:
         diagnostics["sitemap_urls_examined"] = sitemap_urls[:10]
         for sm in sitemap_urls:
             diagnostics["sitemap_count_attempted"] += 1
-            body = _fetch_or_none(self._fetcher, sm)
-            if body is None:
+            sm_record: Dict[str, Any] = {"url": sm, "gzip_url": _looks_gzip_sitemap_url(sm)}
+            try:
+                body = self._fetcher(sm)
+            except Exception as exc:  # noqa: BLE001 - one sitemap must not kill resolution
+                sm_record.update({
+                    "fetch": SITEMAP_FETCH_FAILED,
+                    "parse": "NOT_ATTEMPTED",
+                    "failure_reason": _bounded_failure_reason(exc),
+                })
+                _append_sitemap_diagnostic(diagnostics, sm_record)
                 continue
+            sm_record["fetch"] = "OK"
             if _looks_like_index(body):
-                for child in _sitemaps_from_index(body, self.max_child_sitemaps):
+                child_urls = _sitemaps_from_index(body, self.max_child_sitemaps)
+                sm_record.update({
+                    "parse": SITEMAP_PARSED_WITH_LOCS if child_urls else SITEMAP_PARSED_ZERO_LOCS,
+                    "loc_count": len(child_urls),
+                    "target_name_loc_count": sum(1 for u in child_urls if name_in_url_slug(person, u)),
+                })
+                _append_sitemap_diagnostic(diagnostics, sm_record)
+                for child in child_urls:
                     diagnostics["sitemap_count_attempted"] += 1
                     if len(diagnostics["sitemap_urls_examined"]) < 10:
                         diagnostics["sitemap_urls_examined"].append(child)
-                    child_body = _fetch_or_none(self._fetcher, child)
-                    if child_body is None:
+                    child_record: Dict[str, Any] = {"url": child, "gzip_url": _looks_gzip_sitemap_url(child)}
+                    try:
+                        child_body = self._fetcher(child)
+                    except Exception as exc:  # noqa: BLE001
+                        child_record.update({
+                            "fetch": SITEMAP_FETCH_FAILED,
+                            "parse": "NOT_ATTEMPTED",
+                            "failure_reason": _bounded_failure_reason(exc),
+                        })
+                        _append_sitemap_diagnostic(diagnostics, child_record)
                         continue
+                    child_record["fetch"] = "OK"
                     diagnostics["sitemap_count_parsed"] += 1
-                    self._add_from_urlset(child, child_body, person, parent, _add_candidate)
+                    child_record.update(
+                        self._add_from_urlset(child, child_body, person, parent, _add_candidate)
+                    )
+                    _append_sitemap_diagnostic(diagnostics, child_record)
             else:
                 diagnostics["sitemap_count_parsed"] += 1
-                self._add_from_urlset(sm, body, person, parent, _add_candidate)
+                sm_record.update(self._add_from_urlset(sm, body, person, parent, _add_candidate))
+                _append_sitemap_diagnostic(diagnostics, sm_record)
 
         # Stage 4: homepage + a bounded set of directory pages.
         diagnostics["directory_pages_examined"] = self._discover_from_homepage(
@@ -736,6 +831,9 @@ class ProfileResolverService:
                 _consider(sm)
         _consider("/sitemap.xml")
         _consider("/sitemap_index.xml")
+        for existing in list(urls):
+            for fallback in _profile_sitemap_fallbacks(existing):
+                _consider(fallback)
         return urls
 
     def _add_from_urlset(
@@ -745,8 +843,10 @@ class ProfileResolverService:
         person: str,
         parent: str,
         add: Callable[[ResolutionCandidate], None],
-    ) -> None:
+    ) -> Dict[str, Any]:
         page_urls = _urls_from_sitemap(body, self.max_sitemap_urls)
+        target_name_loc_count = sum(1 for url in page_urls if name_in_url_slug(person, url))
+        admitted = 0
         if _looks_agent_profile_sitemap(sitemap_url):
             page_urls = sorted(
                 page_urls,
@@ -771,6 +871,16 @@ class ProfileResolverService:
                     same_domain=is_within_parent(url, parent),
                 )
             )
+            admitted += 1
+        parse = SITEMAP_PARSED_ZERO_LOCS
+        if page_urls:
+            parse = SITEMAP_TARGET_MATCH_FOUND if target_name_loc_count else SITEMAP_PARSED_WITH_LOCS
+        return {
+            "parse": parse,
+            "loc_count": len(page_urls),
+            "target_name_loc_count": target_name_loc_count,
+            "candidate_admitted_count": admitted,
+        }
 
     def _discover_from_homepage(
         self,
@@ -986,7 +1096,7 @@ def _looks_agent_profile_sitemap(url: str) -> bool:
 
 
 def _compact_diagnostics(diag: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    compact = {
         "robots_fetched": bool(diag.get("robots_fetched")),
         "sitemap_count_attempted": int(diag.get("sitemap_count_attempted") or 0),
         "sitemap_count_parsed": int(diag.get("sitemap_count_parsed") or 0),
@@ -996,6 +1106,13 @@ def _compact_diagnostics(diag: Dict[str, Any]) -> Dict[str, Any]:
         "directory_pages_examined": int(diag.get("directory_pages_examined") or 0),
         "final_decision_reason": str(diag.get("final_decision_reason") or "")[:240],
     }
+    sitemap_diag = diag.get("sitemap_diagnostics") or []
+    if isinstance(sitemap_diag, list):
+        compact["sitemap_diagnostics"] = [
+            record for record in sitemap_diag[:MAX_SITEMAP_DIAGNOSTICS]
+            if isinstance(record, dict)
+        ]
+    return compact
 
 
 def _looks_profile_path(url: str) -> bool:

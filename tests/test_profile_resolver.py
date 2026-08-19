@@ -184,6 +184,23 @@ class _IdxGzipPages:
         raise FetchError(f"HTTP 404 for {path}")
 
 
+class _BlockedIdxReachableProfileSitemapPages(_IdxGzipPages):
+    """IDX-style index is blocked, but same-directory agent sitemap is reachable."""
+
+    def fetch(self, url: str) -> str:
+        self.requests.append(url)
+        path = url.split("//", 1)[-1]
+        path = path.split("/", 1)[1] if "/" in path else "/"
+        path = "/" + path.strip("/")
+        if path == "/robots.txt":
+            return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/idx-sitemaps/index.xml\n"
+        if path == "/idx-sitemaps/index.xml":
+            raise FetchError("HTTP 403 for https://pinnaclerealtyia.com/idx-sitemaps/index.xml")
+        if path == "/idx-sitemaps/sitemap-agent-html-sitemap-1.xml.gz":
+            return '<urlset><url><loc>https://pinnaclerealtyia.com/agents/</loc></url></urlset>'
+        return super().fetch(url)
+
+
 def _service(dup_strong: bool = False) -> tuple[ProfileResolverService, _Pages]:
     site = _Pages(dup_strong=dup_strong)
     return ProfileResolverService(fetcher=site.fetch), site
@@ -334,6 +351,53 @@ class TestGzipSitemapSupport:
         result = ProfileResolverService(fetcher=site.fetch).resolve("Meridith Hoffman", PARENT)
         assert result.status != RESOLUTION_RESOLVED
         assert result.resolved_url == ""
+
+    def test_blocked_nested_index_falls_back_to_same_directory_agent_sitemap(self) -> None:
+        site = _BlockedIdxReachableProfileSitemapPages()
+        result = ProfileResolverService(fetcher=site.fetch).resolve("Meridith Hoffman", PARENT)
+        diagnostics = result.diagnostics["sitemap_diagnostics"]
+        agent_record = next(
+            r for r in diagnostics
+            if r["url"] == "https://pinnaclerealtyia.com/idx-sitemaps/sitemap-agent-profiles-1.xml.gz"
+        )
+        blocked_record = next(
+            r for r in diagnostics
+            if r["url"] == "https://pinnaclerealtyia.com/idx-sitemaps/index.xml"
+        )
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.resolved_url == "https://pinnaclerealtyia.com/agent/1714473-Meridith-Hoffman/"
+        assert blocked_record["fetch"] == "FETCH_FAILED"
+        assert blocked_record["failure_reason"].startswith("HTTP 403")
+        assert agent_record["fetch"] == "OK"
+        assert agent_record["gzip_url"] is True
+        assert agent_record["parse"] == "TARGET_MATCH_FOUND"
+        assert agent_record["loc_count"] == 4
+        assert agent_record["target_name_loc_count"] == 1
+        assert agent_record["candidate_admitted_count"] == 1
+
+    def test_blocked_nested_index_fallback_still_requires_page_evidence(self) -> None:
+        site = _BlockedIdxReachableProfileSitemapPages(target_has_name=False)
+        result = ProfileResolverService(fetcher=site.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status != RESOLUTION_RESOLVED
+        assert result.resolved_url == ""
+
+    def test_sitemap_diagnostics_are_bounded_and_compact(self) -> None:
+        class ManyBlockedIndexes(_BlockedIdxReachableProfileSitemapPages):
+            def fetch(self, url: str) -> str:
+                if url.endswith("/robots.txt"):
+                    return "".join(
+                        f"Sitemap: https://pinnaclerealtyia.com/idx-sitemaps-{i}/index.xml\n"
+                        for i in range(30)
+                    )
+                if "/idx-sitemaps-" in url:
+                    raise FetchError(f"HTTP 403 for {url} with " + "x" * 500)
+                return super().fetch(url)
+
+        result = ProfileResolverService(fetcher=ManyBlockedIndexes().fetch).resolve("Nobody Else", PARENT)
+        diagnostics = result.diagnostics["sitemap_diagnostics"]
+        assert len(diagnostics) == 20
+        assert all("body" not in record and "xml" not in record for record in diagnostics)
+        assert all(len(record.get("failure_reason", "")) <= 160 for record in diagnostics)
 
 
 # ---------------------------------------------------------------------------
