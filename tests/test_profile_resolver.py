@@ -43,6 +43,25 @@ from gui.services.profile_resolver import (
 PARENT = "https://pinnaclerealtyia.com"
 
 
+class _BrowserPage:
+    def __init__(self, final_url: str, html: str) -> None:
+        self.final_url = final_url
+        self.html = html
+
+
+class _BrowserSite:
+    def __init__(self, pages: dict[str, tuple[str, str]] | None = None) -> None:
+        self.pages = pages or {}
+        self.requests: list[str] = []
+
+    def fetch(self, url: str) -> _BrowserPage:
+        self.requests.append(url)
+        if url not in self.pages:
+            raise FetchError(f"HTTP 404 for {url}")
+        final_url, html = self.pages[url]
+        return _BrowserPage(final_url=final_url, html=html)
+
+
 class _Pages:
     """Serves deterministic HTML/XML keyed by URL path."""
 
@@ -201,9 +220,9 @@ class _BlockedIdxReachableProfileSitemapPages(_IdxGzipPages):
         return super().fetch(url)
 
 
-def _service(dup_strong: bool = False) -> tuple[ProfileResolverService, _Pages]:
+def _service(dup_strong: bool = False, browser_fetcher=None) -> tuple[ProfileResolverService, _Pages]:
     site = _Pages(dup_strong=dup_strong)
-    return ProfileResolverService(fetcher=site.fetch), site
+    return ProfileResolverService(fetcher=site.fetch, browser_fetcher=browser_fetcher), site
 
 
 def _prospect(
@@ -441,7 +460,283 @@ class TestResolution:
         result = service.resolve("Meridith Hoffman", PARENT)
         assert result.status == RESOLUTION_RESOLVED
         assert result.resolved_url == "https://pinnaclerealtyia.com/agent/meridith-hoffman"
+
+    def test_http_success_does_not_invoke_browser_fallback(self) -> None:
+        browser = _BrowserSite({PARENT: (PARENT, "<html></html>")})
+        service, _ = _service(browser_fetcher=browser.fetch)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        assert browser.requests == []
+        assert result.diagnostics.get("browser_fallback_attempted") is False
+
+    def test_browser_fallback_invoked_when_http_discovery_blocked_and_barren(self) -> None:
+        class Blocked(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/robots.txt":
+                    return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap.xml\n"
+                if path in {"/sitemap.xml", "/sitemap_index.xml", "/sitemap-agents.xml", "/sitemap-pages.xml", "/"}:
+                    raise FetchError(f"HTTP 403 for https://pinnaclerealtyia.com{path}")
+                return super()._body(path)
+
+        browser = _BrowserSite(
+            {
+                PARENT: (PARENT, '<a href="/agents">Agents</a>'),
+                f"{PARENT}/agents": (f"{PARENT}/agents", '<a href="/agent/meridith-hoffman">Meridith Hoffman</a>'),
+            }
+        )
+        service = ProfileResolverService(fetcher=Blocked().fetch, browser_fetcher=browser.fetch)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.diagnostics.get("browser_fallback_attempted") is True
+        assert browser.requests[0] == PARENT
+
+    def test_browser_directory_and_candidate_resolves_high(self) -> None:
+        class Blocked(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/robots.txt":
+                    return ""
+                if path == "/":
+                    return "<html><body>No useful requests path</body></html>"
+                raise FetchError(f"HTTP 403 for https://pinnaclerealtyia.com{path}")
+
+        browser = _BrowserSite(
+            {
+                PARENT: (PARENT, '<a href="/agents">Our Team</a>'),
+                f"{PARENT}/agents": (f"{PARENT}/agents", '<a href="/agent/meridith-hoffman">Meridith Hoffman</a>'),
+                f"{PARENT}/agent/meridith-hoffman": (
+                    f"{PARENT}/agent/meridith-hoffman",
+                    "<html><head><title>Meridith Hoffman | Pinnacle Realty</title></head><body><h1>Meridith Hoffman</h1><p>Bio and experience.</p></body></html>",
+                ),
+            }
+        )
+        service = ProfileResolverService(fetcher=Blocked().fetch, browser_fetcher=browser.fetch)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
         assert result.confidence == CONFIDENCE_HIGH
+
+    def test_browser_name_bearing_url_without_page_corroboration_not_resolved(self) -> None:
+        class Blocked(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/robots.txt":
+                    return ""
+                if path == "/":
+                    return "<html></html>"
+                if path == "/agent/meridith-hoffman":
+                    return "<html><body><h1>About Our Team</h1></body></html>"
+                raise FetchError(f"HTTP 403 for https://pinnaclerealtyia.com{path}")
+
+        browser = _BrowserSite({PARENT: (PARENT, '<a href="/agent/meridith-hoffman">Meridith Hoffman</a>')})
+        service = ProfileResolverService(fetcher=Blocked().fetch, browser_fetcher=browser.fetch)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status != RESOLUTION_RESOLVED
+
+    def test_browser_ambiguous_two_plausible_candidates(self) -> None:
+        class Blocked(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/robots.txt":
+                    return ""
+                if path in {"/agent/meridith-hoffman", "/agent/meridith-hoffman-2"}:
+                    return "<html><head><title>Meridith Hoffman | Pinnacle Realty</title></head><body><h1>Meridith Hoffman</h1></body></html>"
+                raise FetchError(f"HTTP 403 for https://pinnaclerealtyia.com{path}")
+
+        browser = _BrowserSite(
+            {
+                PARENT: (PARENT, '<a href="/agents">Agents</a>'),
+                f"{PARENT}/agents": (f"{PARENT}/agents", '<a href="/agent/meridith-hoffman">Meridith Hoffman</a><a href="/agent/meridith-hoffman-2">Meridith Hoffman</a>'),
+            }
+        )
+        service = ProfileResolverService(fetcher=Blocked().fetch, browser_fetcher=browser.fetch)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_AMBIGUOUS
+
+    def test_browser_rejects_external_and_private_and_redirect_external(self) -> None:
+        class Blocked(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/robots.txt":
+                    return ""
+                raise FetchError(f"HTTP 403 for https://pinnaclerealtyia.com{path}")
+
+        browser = _BrowserSite(
+            {
+                PARENT: ("https://external.example/", '<a href="https://external.example/agents">Agents</a><a href="http://127.0.0.1/x">Local</a>')
+            }
+        )
+        service = ProfileResolverService(fetcher=Blocked().fetch, browser_fetcher=browser.fetch)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_NOT_FOUND
+        assert result.diagnostics.get("browser_homepage_status") == "REDIRECT_REJECTED"
+
+    def test_browser_bounds_respected(self) -> None:
+        class Blocked(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/robots.txt":
+                    return ""
+                raise FetchError(f"HTTP 403 for https://pinnaclerealtyia.com{path}")
+
+        many_links = "".join(f'<a href="/agents-{i}">Agents {i}</a>' for i in range(20))
+        pages = {PARENT: (PARENT, many_links)}
+        for i in range(20):
+            pages[f"{PARENT}/agents-{i}"] = (f"{PARENT}/agents-{i}", '<a href="/agent/meridith-hoffman">Meridith Hoffman</a>')
+        browser = _BrowserSite(pages)
+        service = ProfileResolverService(fetcher=Blocked().fetch, browser_fetcher=browser.fetch, max_directory_pages=3, max_browser_links_scanned=5)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.diagnostics.get("browser_directory_pages_examined") <= 3
+        assert result.diagnostics.get("browser_links_examined") <= 20
+
+    def test_browser_failure_graceful(self) -> None:
+        class Blocked(_Pages):
+            def _body(self, path: str) -> str:
+                if path == "/robots.txt":
+                    return ""
+                raise FetchError(f"HTTP 403 for https://pinnaclerealtyia.com{path}")
+
+        class BrokenBrowser:
+            def __call__(self, url: str) -> _BrowserPage:
+                raise RuntimeError("browser unavailable")
+
+        service = ProfileResolverService(fetcher=Blocked().fetch, browser_fetcher=BrokenBrowser())
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_NOT_FOUND
+        assert result.diagnostics.get("browser_fallback_attempted") is True
+        assert result.confidence == ""
+
+    def test_http_candidate_strong_does_not_trigger_browser_verification(self) -> None:
+        browser = _BrowserSite({f"{PARENT}/agent/meridith-hoffman": (f"{PARENT}/agent/meridith-hoffman", "<html></html>")})
+        service, _ = _service(browser_fetcher=browser.fetch)
+        result = service.resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        rows = result.diagnostics.get("candidate_diagnostics") or []
+        assert rows
+        assert all(not row.get("browser_verification_attempted") for row in rows)
+
+    def test_http_candidate_weak_triggers_browser_verification_and_resolves(self) -> None:
+        class WeakHttp:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap-agent-profiles.xml\n"
+                if path == "/sitemap-agent-profiles.xml":
+                    return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url></urlset>'
+                if path == "/agent/meridith-hoffman":
+                    return '<html><body><div id="app"></div></body></html>'
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite({
+            f"{PARENT}/agent/meridith-hoffman": (
+                f"{PARENT}/agent/meridith-hoffman",
+                "<html><head><title>Meridith Hoffman | Pinnacle Realty</title></head><body><h1>Meridith Hoffman</h1></body></html>",
+            )
+        })
+        result = ProfileResolverService(fetcher=WeakHttp(), browser_fetcher=browser.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_RESOLVED
+        rows = result.diagnostics.get("candidate_diagnostics") or []
+        assert any(row.get("browser_verification_attempted") for row in rows)
+
+    def test_http_candidate_weak_browser_still_weak_remains_not_found(self) -> None:
+        class WeakHttp:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap-agent-profiles.xml\n"
+                if path == "/sitemap-agent-profiles.xml":
+                    return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url></urlset>'
+                if path == "/agent/meridith-hoffman":
+                    return '<html><body><div id="app"></div></body></html>'
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite({
+            f"{PARENT}/agent/meridith-hoffman": (f"{PARENT}/agent/meridith-hoffman", "<html><body><p>About our agents</p></body></html>")
+        })
+        result = ProfileResolverService(fetcher=WeakHttp(), browser_fetcher=browser.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status != RESOLUTION_RESOLVED
+
+    def test_browser_candidate_redirect_external_rejected(self) -> None:
+        class WeakHttp:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap-agent-profiles.xml\n"
+                if path == "/sitemap-agent-profiles.xml":
+                    return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url></urlset>'
+                if path == "/agent/meridith-hoffman":
+                    return '<html><body><div id="app"></div></body></html>'
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite({
+            f"{PARENT}/agent/meridith-hoffman": ("https://external.example/profile", "<html><h1>Meridith Hoffman</h1></html>")
+        })
+        result = ProfileResolverService(fetcher=WeakHttp(), browser_fetcher=browser.fetch).resolve("Meridith Hoffman", PARENT)
+        rows = result.diagnostics.get("candidate_diagnostics") or []
+        assert any("redirect outside parent domain" in (row.get("browser_failure_reason") or "") for row in rows)
+
+    def test_about_candidate_does_not_trigger_browser_verification(self) -> None:
+        class AboutHttp:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return ""
+                if path in ("/", ""):
+                    return '<a href="/about">Meridith Hoffman</a>'
+                if path == "/about":
+                    return "<html><body><p>Meridith Hoffman mentioned in company history.</p></body></html>"
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite({f"{PARENT}/about": (f"{PARENT}/about", "<html></html>")})
+        result = ProfileResolverService(fetcher=AboutHttp(), browser_fetcher=browser.fetch).resolve("Meridith Hoffman", PARENT)
+        rows = result.diagnostics.get("candidate_diagnostics") or []
+        assert rows
+        assert all(not row.get("browser_verification_attempted") for row in rows)
+
+    def test_multiple_browser_verified_strong_candidates_are_ambiguous(self) -> None:
+        class WeakHttp:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return ""
+                if path in ("/", ""):
+                    return '<a href="/agents">Team</a>'
+                if path == "/agents":
+                    return '<a href="/agent/meridith-hoffman">Meridith Hoffman</a><a href="/agent/meridith-hoffman-2">Meridith Hoffman</a>'
+                if path in {"/agent/meridith-hoffman", "/agent/meridith-hoffman-2"}:
+                    return "<html><body><p>Call today</p></body></html>"
+                raise FetchError(f"missing {path}")
+
+        browser = _BrowserSite({
+            f"{PARENT}/agent/meridith-hoffman": (f"{PARENT}/agent/meridith-hoffman", "<html><head><title>Meridith Hoffman</title></head><body><h1>Meridith Hoffman</h1></body></html>"),
+            f"{PARENT}/agent/meridith-hoffman-2": (f"{PARENT}/agent/meridith-hoffman-2", "<html><head><title>Meridith Hoffman</title></head><body><h1>Meridith Hoffman</h1></body></html>"),
+        })
+        result = ProfileResolverService(fetcher=WeakHttp(), browser_fetcher=browser.fetch).resolve("Meridith Hoffman", PARENT)
+        assert result.status == RESOLUTION_AMBIGUOUS
+
+    def test_browser_candidate_verification_count_bound_respected(self) -> None:
+        class WeakMany:
+            def __call__(self, url: str) -> str:
+                path = url.split("//", 1)[-1]
+                path = path.split("/", 1)[1] if "/" in path else "/"
+                path = "/" + path.strip("/")
+                if path == "/robots.txt":
+                    return ""
+                if path in ("/", ""):
+                    return '<a href="/agents">Team</a>'
+                if path == "/agents":
+                    return ''.join(f'<a href="/agent/meridith-hoffman-{i}">Meridith Hoffman</a>' for i in range(8))
+                if path.startswith("/agent/meridith-hoffman-"):
+                    return "<html><body><p>Call today</p></body></html>"
+                raise FetchError(f"missing {path}")
+
+        browser_pages = {f"{PARENT}/agent/meridith-hoffman-{i}": (f"{PARENT}/agent/meridith-hoffman-{i}", "<html><body>Weak</body></html>") for i in range(8)}
+        browser = _BrowserSite(browser_pages)
+        result = ProfileResolverService(fetcher=WeakMany(), browser_fetcher=browser.fetch, max_browser_candidate_verify=2).resolve("Meridith Hoffman", PARENT)
+        assert result.diagnostics.get("browser_candidate_verifications_attempted") <= 2
 
     def test_resolves_when_medium_confidence_slug_only(self) -> None:
         # Candidate page has the name slug + image/contact corroboration but no

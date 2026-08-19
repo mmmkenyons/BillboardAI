@@ -38,6 +38,23 @@ from gui.services.prospect_csv_import import ProspectCsvImporter, detect_mapping
 PARENT = "https://pinnaclerealtyia.com"
 
 
+class _BrowserPage:
+    def __init__(self, final_url: str, html: str) -> None:
+        self.final_url = final_url
+        self.html = html
+
+
+class _BrowserSite:
+    def __init__(self, pages: dict[str, tuple[str, str]]) -> None:
+        self.pages = pages
+        self.requests: list[str] = []
+
+    def fetch(self, url: str) -> _BrowserPage:
+        self.requests.append(url)
+        final_url, html = self.pages[url]
+        return _BrowserPage(final_url, html)
+
+
 def check(name: str, condition: bool, counts: dict[str, int]) -> None:
     print(("PASS" if condition else "FAIL") + f": {name}")
     counts["passed" if condition else "failed"] += 1
@@ -366,6 +383,65 @@ def _verify_5z1_hardening(counts: dict[str, int]) -> None:
     check("generic /agent/ root cannot resolve without full-name evidence", root_result.status != RESOLUTION_RESOLVED and root_result.resolved_url == "", counts)
 
 
+def _verify_5z3_browser_fallback(counts: dict[str, int]) -> None:
+    class Blocked(_Pages):
+        def _body(self, path: str) -> str:
+            if path == "/robots.txt":
+                return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap.xml\n"
+            raise FetchError(f"HTTP 403 for https://pinnaclerealtyia.com{path}")
+
+    browser = _BrowserSite(
+        {
+            PARENT: (PARENT, '<a href="/agents">Agents</a>'),
+            f"{PARENT}/agents": (f"{PARENT}/agents", '<a href="/agent/meridith-hoffman">Meridith Hoffman</a>'),
+            f"{PARENT}/agent/meridith-hoffman": (
+                f"{PARENT}/agent/meridith-hoffman",
+                "<html><head><title>Meridith Hoffman | Pinnacle Realty</title></head><body><h1>Meridith Hoffman</h1><p>Bio and contact.</p></body></html>",
+            ),
+        }
+    )
+    result = ProfileResolverService(fetcher=Blocked().fetch, browser_fetcher=browser.fetch).resolve("Meridith Hoffman", PARENT)
+    check("browser fallback attempted when requests discovery blocked", result.diagnostics.get("browser_fallback_attempted") is True, counts)
+    check("browser fallback resolves bounded same-domain profile", result.status == RESOLUTION_RESOLVED and result.resolved_url.endswith("/agent/meridith-hoffman"), counts)
+    check("browser diagnostics record directory examination", int(result.diagnostics.get("browser_directory_pages_examined") or 0) >= 1, counts)
+
+    class WeakHttp:
+        def __call__(self, url: str) -> str:
+            path = url.split("//", 1)[-1]
+            path = path.split("/", 1)[1] if "/" in path else "/"
+            path = "/" + path.strip("/")
+            if path == "/robots.txt":
+                return "User-agent: *\nSitemap: https://pinnaclerealtyia.com/sitemap-agent-profiles.xml\n"
+            if path == "/sitemap-agent-profiles.xml":
+                return '<urlset><url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url></urlset>'
+            if path == "/agent/meridith-hoffman":
+                return '<html><body><div id="app"></div></body></html>'
+            raise FetchError(f"missing {path}")
+
+    browser_verify = _BrowserSite(
+        {
+            f"{PARENT}/agent/meridith-hoffman": (
+                f"{PARENT}/agent/meridith-hoffman",
+                "<html><head><title>Meridith Hoffman | Pinnacle Realty</title></head><body><h1>Meridith Hoffman</h1></body></html>",
+            )
+        }
+    )
+    verify_result = ProfileResolverService(fetcher=WeakHttp(), browser_fetcher=browser_verify.fetch).resolve("Meridith Hoffman", PARENT)
+    verify_rows = verify_result.diagnostics.get("candidate_diagnostics") or []
+    check("weak HTTP candidate triggers browser verification", verify_result.diagnostics.get("browser_candidate_verifications_attempted", 0) >= 1 and any(row.get("browser_verification_attempted") for row in verify_rows), counts)
+    check("browser verification reuses normal scoring to resolve", verify_result.status == RESOLUTION_RESOLVED and verify_result.resolved_url.endswith("/agent/meridith-hoffman"), counts)
+
+    browser_weak = _BrowserSite({f"{PARENT}/agent/meridith-hoffman": (f"{PARENT}/agent/meridith-hoffman", "<html><body>Weak</body></html>")})
+    weak_result = ProfileResolverService(fetcher=WeakHttp(), browser_fetcher=browser_weak.fetch).resolve("Meridith Hoffman", PARENT)
+    weak_rows = weak_result.diagnostics.get("candidate_diagnostics") or []
+    check("weak browser candidate still rejected", weak_result.diagnostics.get("browser_candidate_verifications_attempted", 0) >= 1 and weak_result.status != RESOLUTION_RESOLVED, counts)
+
+    browser_redirect = _BrowserSite({f"{PARENT}/agent/meridith-hoffman": ("https://external.example/profile", "<html><h1>Meridith Hoffman</h1></html>")})
+    redirect_result = ProfileResolverService(fetcher=WeakHttp(), browser_fetcher=browser_redirect.fetch).resolve("Meridith Hoffman", PARENT)
+    redirect_rows = redirect_result.diagnostics.get("candidate_diagnostics") or []
+    check("external redirect during browser candidate verification rejected", redirect_result.diagnostics.get("browser_candidate_verifications_attempted", 0) >= 1 and any("redirect outside parent domain" in (row.get("browser_failure_reason") or "") for row in redirect_rows), counts)
+
+
 def main() -> int:
     print("PROFILE RESOLUTION - SPRINT 5Z\n")
     print("SYNTHETIC VERIFICATION DATA (offline, no live network)\n")
@@ -375,6 +451,7 @@ def main() -> int:
     _verify_persistence(counts)
     _verify_csv_aliases(counts)
     _verify_5z1_hardening(counts)
+    _verify_5z3_browser_fallback(counts)
     print("\nSPRINT 5Z VERIFICATION COMPLETE")
     print(f"Passed: {counts['passed']}")
     print(f"Failed: {counts['failed']}")

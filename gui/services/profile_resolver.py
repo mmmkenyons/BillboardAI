@@ -45,6 +45,8 @@ import requests
 from bs4 import BeautifulSoup
 import tldextract
 
+from engine.scraper.browser_fetch import BrowserHtmlResult, fetch_rendered_html
+
 from gui.models.prospect import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
@@ -72,6 +74,8 @@ MAX_HOMEPAGE_LINKS = 800         # homepage <a href> cap for discovery
 MAX_LINKS_SCANNED = 600          # per-directory-page link cap
 MAX_CANDIDATES_VERIFY = 8        # candidates whose pages we actually fetch
 MAX_SITEMAP_DIAGNOSTICS = 20     # compact per-sitemap observability cap
+MAX_BROWSER_LINKS_SCANNED = 200  # per rendered page anchor scan cap
+MAX_BROWSER_CANDIDATE_VERIFY = 4 # bounded browser verification retries for weak candidates
 
 # Path token indicators that a URL is likely an individual/agent profile.
 PROFILE_PATH_TOKENS = (
@@ -107,6 +111,7 @@ class FetchError(Exception):
 
 #: Fetcher signature: ``(url) -> body str``, raising FetchError on failure.
 Fetcher = Callable[[str], str]
+BrowserFetcher = Callable[[str], BrowserHtmlResult]
 
 
 def default_fetcher(timeout: float = DEFAULT_TIMEOUT) -> Fetcher:
@@ -502,6 +507,16 @@ class ResolutionCandidate:
     same_domain: bool = False
     reason: str = ""
     confidence: str = ""
+    http_fetch_ok: bool = False
+    http_failure_reason: str = ""
+    http_evidence_summary: str = ""
+    http_confidence: str = ""
+    browser_verification_attempted: bool = False
+    browser_final_url: str = ""
+    browser_title: str = ""
+    browser_evidence_summary: str = ""
+    browser_confidence: str = ""
+    browser_failure_reason: str = ""
 
     def plausibility_score(self) -> int:
         score = 0
@@ -567,6 +582,7 @@ class ProfileResolverService:
         self,
         *,
         fetcher: Optional[Fetcher] = None,
+        browser_fetcher: Optional[BrowserFetcher] = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_child_sitemaps: int = MAX_CHILD_SITEMAPS,
         max_sitemap_urls: int = MAX_SITEMAP_URLS,
@@ -574,8 +590,11 @@ class ProfileResolverService:
         max_homepage_links: int = MAX_HOMEPAGE_LINKS,
         max_links_scanned: int = MAX_LINKS_SCANNED,
         max_candidates_verify: int = MAX_CANDIDATES_VERIFY,
+        max_browser_links_scanned: int = MAX_BROWSER_LINKS_SCANNED,
+        max_browser_candidate_verify: int = MAX_BROWSER_CANDIDATE_VERIFY,
     ) -> None:
         self._fetcher = fetcher or default_fetcher(timeout=timeout)
+        self._browser_fetcher = browser_fetcher
         self._timeout = timeout
         self.max_child_sitemaps = max_child_sitemaps
         self.max_sitemap_urls = max_sitemap_urls
@@ -583,6 +602,8 @@ class ProfileResolverService:
         self.max_homepage_links = max_homepage_links
         self.max_links_scanned = max_links_scanned
         self.max_candidates_verify = max_candidates_verify
+        self.max_browser_links_scanned = max_browser_links_scanned
+        self.max_browser_candidate_verify = max_browser_candidate_verify
 
     def _validate_input(self, person_name: str, parent_website: str):
         parent = parent_origin(parent_website)
@@ -614,6 +635,14 @@ class ProfileResolverService:
             "candidate_count_before_filtering": 0,
             "candidate_count_after_filtering": 0,
             "directory_pages_examined": 0,
+            "browser_fallback_attempted": False,
+            "browser_homepage_status": "NOT_ATTEMPTED",
+            "browser_directory_pages_examined": 0,
+            "browser_links_examined": 0,
+            "browser_candidates_discovered": 0,
+            "browser_failure_reason": "",
+            "browser_candidate_verifications_attempted": 0,
+            "candidate_diagnostics": [],
             "final_decision_reason": "",
             "sitemap_diagnostics": [],
         }
@@ -693,11 +722,27 @@ class ProfileResolverService:
             person, parent, candidates, _add_candidate
         )
 
+        if not candidates and self._should_use_browser_fallback(diagnostics):
+            self._discover_from_browser(person, parent, candidates, seen, diagnostics, _add_candidate)
+
         # Stage 5: verify the best-bounded candidates by fetching their pages.
         ranked = self._rank_candidates(candidates, person)
         verified: List[ResolutionCandidate] = []
+        browser_verify_count = 0
         for cand in ranked[: self.max_candidates_verify]:
             body = _fetch_or_none(self._fetcher, cand.url)
+            if body is not None:
+                cand.http_fetch_ok = True
+            if body is None:
+                cand.http_fetch_ok = False
+                cand.http_failure_reason = "candidate page fetch failed"
+            if body is None and cand.method in {"browser_directory", "browser_homepage"} and self._browser_fetcher is not None:
+                try:
+                    rendered = self._browser_fetch(cand.url)
+                except Exception:  # noqa: BLE001
+                    rendered = None
+                if rendered is not None and is_within_parent(rendered.final_url, parent):
+                    body = rendered.html or ""
             if body is None:
                 cand.strong_name = False
                 cand.strong_slug = False
@@ -709,9 +754,17 @@ class ProfileResolverService:
                 cand.has_bio = False
                 cand.confidence = ""
                 cand.reason = "candidate page fetch failed"
+                self._append_candidate_diagnostic(diagnostics, cand)
                 verified.append(cand)
                 continue
             self._score_candidate_page(cand, body, person)
+            cand.http_evidence_summary = cand.reason
+            cand.http_confidence = cand.confidence
+            if self._should_browser_verify_candidate(cand, person) and browser_verify_count < self.max_browser_candidate_verify:
+                browser_verify_count += 1
+                diagnostics["browser_candidate_verifications_attempted"] = browser_verify_count
+                self._try_browser_verify_candidate(cand, parent, person)
+            self._append_candidate_diagnostic(diagnostics, cand)
             verified.append(cand)
 
         result = self._decision(verified, person)
@@ -944,6 +997,197 @@ class ProfileResolverService:
                 out.append(url)
         return out
 
+    def _should_use_browser_fallback(self, diagnostics: Dict[str, Any]) -> bool:
+        if self._browser_fetcher is None:
+            return False
+        if int(diagnostics.get("candidate_count_after_filtering") or 0) > 0:
+            return False
+        if int(diagnostics.get("sitemap_count_attempted") or 0) <= 0:
+            return True
+        for record in diagnostics.get("sitemap_diagnostics") or []:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("fetch") or "") != SITEMAP_FETCH_FAILED:
+                continue
+            reason = str(record.get("failure_reason") or "")
+            if "403" in reason or "429" in reason:
+                return True
+        return False
+
+    def _browser_fetch(self, url: str) -> BrowserHtmlResult:
+        fetcher = self._browser_fetcher or fetch_rendered_html
+        return fetcher(url)
+
+    def _discover_from_browser(
+        self,
+        person: str,
+        parent: str,
+        candidates: List[ResolutionCandidate],
+        seen: Dict[str, ResolutionCandidate],
+        diagnostics: Dict[str, Any],
+        add: Callable[[ResolutionCandidate], None],
+    ) -> None:
+        diagnostics["browser_fallback_attempted"] = True
+        try:
+            homepage = self._browser_fetch(parent)
+        except Exception as exc:  # noqa: BLE001
+            diagnostics["browser_homepage_status"] = "FETCH_FAILED"
+            diagnostics["browser_failure_reason"] = _bounded_failure_reason(exc)
+            return
+        if not is_within_parent(homepage.final_url, parent):
+            diagnostics["browser_homepage_status"] = "REDIRECT_REJECTED"
+            diagnostics["browser_failure_reason"] = f"redirect outside parent domain: {homepage.final_url}"[:160]
+            return
+        diagnostics["browser_homepage_status"] = "OK"
+        directory_pages = self._browser_directory_pages(homepage.html, homepage.final_url, parent, person, diagnostics, add)
+        for url in directory_pages[: self.max_directory_pages]:
+            try:
+                rendered = self._browser_fetch(url)
+            except Exception as exc:  # noqa: BLE001
+                diagnostics["browser_failure_reason"] = _bounded_failure_reason(exc)
+                continue
+            if not is_within_parent(rendered.final_url, parent):
+                continue
+            diagnostics["browser_directory_pages_examined"] += 1
+            for profile_url in self._browser_profile_links(rendered.html, rendered.final_url, parent, person, diagnostics):
+                add(
+                    ResolutionCandidate(
+                        url=profile_url,
+                        method="browser_directory",
+                        slug_only=name_in_url_slug(person, profile_url),
+                        linked_from_directory=True,
+                        same_domain=is_within_parent(profile_url, parent),
+                    )
+                )
+        diagnostics["browser_candidates_discovered"] = len(candidates)
+
+    def _browser_directory_pages(
+        self,
+        body: str,
+        base_url: str,
+        parent: str,
+        person: str,
+        diagnostics: Dict[str, Any],
+        add: Callable[[ResolutionCandidate], None],
+    ) -> List[str]:
+        directory_pages: List[str] = []
+        seen_dir: set[str] = set()
+        try:
+            soup = BeautifulSoup(body, "lxml")
+        except Exception:  # noqa: BLE001
+            return directory_pages
+        for anchor in soup.find_all("a", href=True)[: self.max_browser_links_scanned]:
+            diagnostics["browser_links_examined"] += 1
+            url = normalize_url(urljoin(base_url, (anchor.get("href") or "").strip()))
+            if not url or not is_within_parent(url, parent):
+                continue
+            text = " ".join((anchor.get_text(" ", strip=True) or "").lower().split())[:120]
+            if name_in_url_slug(person, url) or full_name_in_text(person, text):
+                add(ResolutionCandidate(url=url, method="browser_homepage", slug_only=name_in_url_slug(person, url), same_domain=True))
+            if _looks_directory_path(url) and url not in seen_dir:
+                seen_dir.add(url)
+                directory_pages.append(url)
+        return directory_pages
+
+    def _browser_profile_links(
+        self,
+        body: str,
+        base_url: str,
+        parent: str,
+        person: str,
+        diagnostics: Dict[str, Any],
+    ) -> List[str]:
+        out: List[str] = []
+        seen_urls: set[str] = set()
+        try:
+            soup = BeautifulSoup(body, "lxml")
+        except Exception:  # noqa: BLE001
+            return out
+        for anchor in soup.find_all("a", href=True)[: self.max_browser_links_scanned]:
+            diagnostics["browser_links_examined"] += 1
+            url = normalize_url(urljoin(base_url, (anchor.get("href") or "").strip()))
+            if not url or not is_within_parent(url, parent) or _looks_directory_path(url):
+                continue
+            if _is_static_profile_candidate(url) or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            text = " ".join((anchor.get_text(" ", strip=True) or "").lower().split())[:120]
+            if name_in_url_slug(person, url) or full_name_in_text(person, text):
+                out.append(url)
+        return out
+
+    def _should_browser_verify_candidate(self, cand: ResolutionCandidate, person: str) -> bool:
+        if self._browser_fetcher is None:
+            return False
+        if not cand.same_domain or not cand.url or _is_static_profile_candidate(cand.url):
+            return False
+        if _looks_directory_path(cand.url):
+            return False
+        if cand.confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM) and cand.is_strong():
+            return False
+        if _is_generic_profile_root(cand.url):
+            return False
+        return bool(name_in_url_slug(person, cand.url))
+
+    def _try_browser_verify_candidate(self, cand: ResolutionCandidate, parent: str, person: str) -> None:
+        cand.browser_verification_attempted = True
+        try:
+            rendered = self._browser_fetch(cand.url)
+        except Exception as exc:  # noqa: BLE001
+            cand.browser_failure_reason = _bounded_failure_reason(exc)
+            return
+        cand.browser_final_url = rendered.final_url or ""
+        if not is_within_parent(cand.browser_final_url, parent):
+            cand.browser_failure_reason = f"redirect outside parent domain: {cand.browser_final_url}"[:160]
+            return
+        browser_probe = ResolutionCandidate(
+            url=cand.browser_final_url or cand.url,
+            method=cand.method,
+            slug_only=cand.slug_only,
+            linked_from_directory=cand.linked_from_directory,
+            same_domain=True,
+        )
+        self._score_candidate_page(browser_probe, rendered.html or "", person)
+        cand.browser_evidence_summary = browser_probe.reason
+        cand.browser_confidence = browser_probe.confidence
+        try:
+            soup = BeautifulSoup(rendered.html or "", "lxml")
+            cand.browser_title = ((soup.title.get_text(" ", strip=True) if soup.title else "") or "")[:160]
+        except Exception:  # noqa: BLE001
+            cand.browser_title = ""
+        if browser_probe.is_strong() and browser_probe.confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM):
+            cand.strong_name = browser_probe.strong_name
+            cand.strong_slug = browser_probe.strong_slug
+            cand.slug_only = browser_probe.slug_only
+            cand.title_contains_name = browser_probe.title_contains_name
+            cand.has_schema = browser_probe.has_schema
+            cand.has_contact = browser_probe.has_contact
+            cand.has_image = browser_probe.has_image
+            cand.has_bio = browser_probe.has_bio
+            cand.reason = browser_probe.reason
+            cand.confidence = browser_probe.confidence
+
+    def _append_candidate_diagnostic(self, diagnostics: Dict[str, Any], cand: ResolutionCandidate) -> None:
+        rows = diagnostics.setdefault("candidate_diagnostics", [])
+        if not isinstance(rows, list) or len(rows) >= self.max_candidates_verify:
+            return
+        rows.append(
+            {
+                "url": str(cand.url or "")[:240],
+                "method": str(cand.method or "")[:40],
+                "http_fetch_ok": bool(cand.http_fetch_ok),
+                "http_failure_reason": str(cand.http_failure_reason or "")[:160],
+                "http_evidence_summary": str(cand.http_evidence_summary or "")[:160],
+                "http_confidence": str(cand.http_confidence or "")[:20],
+                "browser_verification_attempted": bool(cand.browser_verification_attempted),
+                "browser_final_url": str(cand.browser_final_url or "")[:240],
+                "browser_title": str(cand.browser_title or "")[:160],
+                "browser_evidence_summary": str(cand.browser_evidence_summary or "")[:160],
+                "browser_confidence": str(cand.browser_confidence or "")[:20],
+                "browser_failure_reason": str(cand.browser_failure_reason or "")[:160],
+            }
+        )
+
     @staticmethod
     def _rank_candidates(
         candidates: List[ResolutionCandidate], person: str
@@ -1104,12 +1348,25 @@ def _compact_diagnostics(diag: Dict[str, Any]) -> Dict[str, Any]:
         "candidate_count_before_filtering": int(diag.get("candidate_count_before_filtering") or 0),
         "candidate_count_after_filtering": int(diag.get("candidate_count_after_filtering") or 0),
         "directory_pages_examined": int(diag.get("directory_pages_examined") or 0),
+        "browser_fallback_attempted": bool(diag.get("browser_fallback_attempted")),
+        "browser_homepage_status": str(diag.get("browser_homepage_status") or "")[:40],
+        "browser_directory_pages_examined": int(diag.get("browser_directory_pages_examined") or 0),
+        "browser_links_examined": int(diag.get("browser_links_examined") or 0),
+        "browser_candidates_discovered": int(diag.get("browser_candidates_discovered") or 0),
+        "browser_failure_reason": str(diag.get("browser_failure_reason") or "")[:160],
+        "browser_candidate_verifications_attempted": int(diag.get("browser_candidate_verifications_attempted") or 0),
         "final_decision_reason": str(diag.get("final_decision_reason") or "")[:240],
     }
     sitemap_diag = diag.get("sitemap_diagnostics") or []
     if isinstance(sitemap_diag, list):
         compact["sitemap_diagnostics"] = [
             record for record in sitemap_diag[:MAX_SITEMAP_DIAGNOSTICS]
+            if isinstance(record, dict)
+        ]
+    candidate_diag = diag.get("candidate_diagnostics") or []
+    if isinstance(candidate_diag, list):
+        compact["candidate_diagnostics"] = [
+            record for record in candidate_diag[:MAX_CANDIDATES_VERIFY]
             if isinstance(record, dict)
         ]
     return compact
