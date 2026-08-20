@@ -20,6 +20,7 @@ from gui.services.campaign_run import (
     CampaignRunService,
     CampaignRunSnapshot,
 )
+from gui.services.campaign_assembly import CampaignAssemblyService
 
 
 class CampaignRunController(QObject):
@@ -27,6 +28,7 @@ class CampaignRunController(QObject):
     run_opened = Signal(object)
     rows_changed = Signal(object)
     summary_changed = Signal(object)
+    assembly_changed = Signal(object)
     status_message = Signal(str)
     error_message = Signal(str)
     open_prospect_requested = Signal(str)
@@ -36,9 +38,10 @@ class CampaignRunController(QObject):
     open_pipeline_requested = Signal(str)
     continue_requested = Signal(str)
 
-    def __init__(self, *, service: CampaignRunService) -> None:
+    def __init__(self, *, service: CampaignRunService, assembly_service: CampaignAssemblyService | None = None) -> None:
         super().__init__()
         self._service = service
+        self._assembly_service = assembly_service
         self._active_run_id: Optional[str] = None
         self._selected_prospect_id: Optional[str] = None
         self._package_directory: Optional[str] = None
@@ -50,6 +53,13 @@ class CampaignRunController(QObject):
     @property
     def service(self) -> CampaignRunService:
         return self._service
+
+    @property
+    def assembly_service(self) -> CampaignAssemblyService | None:
+        return self._assembly_service
+
+    def set_assembly_service(self, assembly_service: CampaignAssemblyService | None) -> None:
+        self._assembly_service = assembly_service
 
     def active_run_id(self) -> Optional[str]:
         return self._active_run_id
@@ -176,6 +186,7 @@ class CampaignRunController(QObject):
         self._last_snapshot = snapshot
         self.rows_changed.emit([row.to_dict() for row in snapshot.rows])
         self.summary_changed.emit(snapshot.summary.to_dict())
+        self._emit_assembly()
         return snapshot
 
     # ------------------------------------------------------------------
@@ -257,5 +268,73 @@ class CampaignRunController(QObject):
     def recommended_next_action(self) -> str:
         summary = self._current_summary_dict()
         return str(summary.get("recommended_next_action") or "")
+
+    # ------------------------------------------------------------------
+    # Sprint 5AD assembly actions (delegate to existing services)
+    # ------------------------------------------------------------------
+    def refresh_assembly(self) -> object | None:
+        return self._emit_assembly()
+
+    def prepare_assembly_package(self) -> object | None:
+        if not self._active_run_id or self._assembly_service is None:
+            self.error_message.emit("No active campaign assembly service.")
+            return None
+        result = self._assembly_service.prepare_package(self._active_run_id)
+        if result.success:
+            self.status_message.emit(result.message)
+        else:
+            self.error_message.emit(result.message)
+        self._emit_assembly(result)
+        self.refresh()
+        return result
+
+    def export_assembly_package(self, destination: str | None = None) -> object | None:
+        if not self._active_run_id or self._assembly_service is None:
+            self.error_message.emit("No active campaign assembly service.")
+            return None
+        result = self._assembly_service.export_campaign(self._active_run_id, destination=destination)
+        if result.success:
+            self.status_message.emit(result.message)
+        else:
+            self.error_message.emit(result.message)
+        self._emit_assembly(result)
+        self.refresh()
+        return result
+
+    def exclude_from_assembly(self, prospect_id: str | None = None) -> object | None:
+        return self._set_assembly_excluded(prospect_id, True)
+
+    def include_in_assembly(self, prospect_id: str | None = None) -> object | None:
+        return self._set_assembly_excluded(prospect_id, False)
+
+    def _set_assembly_excluded(self, prospect_id: str | None, excluded: bool) -> object | None:
+        pid = str(prospect_id or self._selected_prospect_id or "").strip()
+        if not pid or not self._active_run_id or self._assembly_service is None:
+            return None
+        result = self._assembly_service.set_excluded(self._active_run_id, pid, excluded)
+        if result.success:
+            self.status_message.emit(result.message)
+        else:
+            self.error_message.emit(result.message)
+        self._emit_assembly(result)
+        self.refresh()
+        return result
+
+    def _emit_assembly(self, result: object | None = None) -> object | None:
+        if not self._active_run_id or self._assembly_service is None:
+            return None
+        if result is None:
+            result = self._assembly_service.assemble_campaign(self._active_run_id)
+        snapshot = getattr(result, "snapshot", None)
+        summary = getattr(result, "summary", None)
+        payload = {
+            "success": bool(getattr(result, "success", False)),
+            "message": str(getattr(result, "message", "") or ""),
+            "summary": summary.to_dict() if hasattr(summary, "to_dict") else {},
+            "rows": [item.to_dict() for item in getattr(snapshot, "readiness", ())] if snapshot is not None else [],
+            "snapshot": snapshot.to_dict() if hasattr(snapshot, "to_dict") else {},
+        }
+        self.assembly_changed.emit(payload)
+        return result
 
 

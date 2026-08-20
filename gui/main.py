@@ -22,6 +22,7 @@ from gui.controllers.prospect_controller import ProspectController
 from gui.controllers.smartlead_handoff_controller import SmartleadHandoffController
 from gui.models.campaign_review_store import CampaignReviewStore
 from gui.models.campaign_run import CampaignRunStore
+from gui.models.campaign_assembly import CampaignAssemblyStore
 from gui.models.hosted_asset_store import HostedAssetStore
 from gui.models.project_store import ProjectStore
 from gui.models.prospect_generation_store import ProspectGenerationStore
@@ -36,6 +37,7 @@ from gui.services.campaign_export import CampaignExportService
 from gui.services.campaign_package import CampaignPackageService
 from gui.services.campaign_review import CampaignReviewService
 from gui.services.campaign_run import CampaignRunService
+from gui.services.campaign_assembly import CampaignAssemblyService
 from gui.services.hosted_mockups import AssetHostingService
 from gui.services.prospect_generation import ProspectGenerationService
 from gui.services.smartlead_activation import SmartleadActivationService
@@ -166,6 +168,13 @@ def main() -> None:
         run_handoff_service=smartlead_run_service,
         hosted_asset_store=hosted_asset_store,
     )
+    campaign_assembly_service = CampaignAssemblyService(
+        run_service=campaign_run_service,
+        run_handoff_service=smartlead_run_service,
+        run_export_service=smartlead_run_export_service,
+        assembly_store=CampaignAssemblyStore(),
+    )
+    campaign_run_controller.set_assembly_service(campaign_assembly_service)
     smartlead_controller = SmartleadHandoffController(
         service=SmartleadHandoffService(),
         publish_service=publish_service,

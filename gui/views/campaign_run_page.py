@@ -53,6 +53,7 @@ class CampaignRunPage(QWidget):
         super().__init__(parent)
         self._controller = None
         self._row_ids: list[str] = []
+        self._assembly_rows: dict[str, dict] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -107,6 +108,27 @@ class CampaignRunPage(QWidget):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
+        self.assembly_label = QLabel("Campaign Assembly: no active run.", left)
+        self.assembly_label.setWordWrap(True)
+        left_layout.addWidget(self.assembly_label)
+
+        assembly_actions = QHBoxLayout()
+        assembly_actions.setSpacing(6)
+        self.include_button = QPushButton("Include", left)
+        self.include_button.clicked.connect(self._on_include_selected)
+        self.exclude_button = QPushButton("Exclude", left)
+        self.exclude_button.clicked.connect(self._on_exclude_selected)
+        self.prepare_package_button = QPushButton("Prepare Package", left)
+        self.prepare_package_button.clicked.connect(self._on_prepare_package)
+        self.export_package_button = QPushButton("Export Smartlead CSV", left)
+        self.export_package_button.clicked.connect(self._on_export_package)
+        assembly_actions.addWidget(self.include_button)
+        assembly_actions.addWidget(self.exclude_button)
+        assembly_actions.addWidget(self.prepare_package_button)
+        assembly_actions.addWidget(self.export_package_button)
+        assembly_actions.addStretch(1)
+        left_layout.addLayout(assembly_actions)
+
         self.table = QTableWidget(0, 9, left)
         self.table.setHorizontalHeaderLabels(
             ["Company", "Email", "Research", "Opportunity", "Generate",
@@ -236,6 +258,8 @@ class CampaignRunPage(QWidget):
         controller.run_opened.connect(self._on_run_opened)
         controller.rows_changed.connect(self.set_rows)
         controller.summary_changed.connect(self.set_summary)
+        if hasattr(controller, "assembly_changed"):
+            controller.assembly_changed.connect(self.set_assembly)
         controller.status_message.connect(self.show_status)
         controller.error_message.connect(self.show_error)
         controller.runs_changed.emit(controller.list_runs())
@@ -314,6 +338,30 @@ class CampaignRunPage(QWidget):
         self._sync_selection(selected_id)
         self._update_action_state()
 
+    def set_assembly(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+        self._assembly_rows = {
+            str(row.get("prospect_id") or ""): dict(row)
+            for row in list(data.get("rows") or [])
+            if isinstance(row, dict) and str(row.get("prospect_id") or "")
+        }
+        if summary:
+            self.assembly_label.setText(
+                "Campaign Assembly — "
+                f"Total: {summary.get('total_prospects', 0)} • "
+                f"Ready: {summary.get('ready', 0)} • "
+                f"Warnings: {summary.get('warning', 0)} • "
+                f"Blocked: {summary.get('blocked', 0)} • "
+                f"Excluded: {summary.get('excluded', 0)} • "
+                f"Exportable: {summary.get('exportable', 0)}"
+            )
+        else:
+            self.assembly_label.setText("Campaign Assembly: no active run.")
+        if self._controller is not None and self._controller.last_snapshot() is not None:
+            self.set_rows([row.to_dict() for row in self._controller.last_snapshot().rows])
+        self._update_action_state()
+
     def clear_detail(self) -> None:
         self._populate_detail("")
 
@@ -351,6 +399,11 @@ class CampaignRunPage(QWidget):
         has_selection = bool(self.current_prospect_id())
         self.continue_button.setEnabled(has_controller and has_active)
         self.add_prospects_button.setEnabled(has_controller and has_active)
+        has_assembly = has_controller and has_active and hasattr(self._controller, "assembly_service") and self._controller.assembly_service is not None
+        self.prepare_package_button.setEnabled(has_assembly)
+        self.export_package_button.setEnabled(has_assembly)
+        self.include_button.setEnabled(has_assembly and has_selection)
+        self.exclude_button.setEnabled(has_assembly and has_selection)
         self.open_prospect_button.setEnabled(has_controller and has_selection)
         self.open_project_button.setEnabled(has_controller and has_selection)
         self.open_review_button.setEnabled(has_controller and has_active)
@@ -511,10 +564,52 @@ class CampaignRunPage(QWidget):
         self.detail_next_action.setText(str(detail.get("next_action") or "—"))
         blockers = list(detail.get("blockers") or [])
         self.blockers_edit.setPlainText("\n".join(blockers) if blockers else "No blockers.")
+        assembly = self._assembly_rows.get(prospect_id, {})
+        if assembly:
+            assembly_lines = [
+                "",
+                "Assembly:",
+                f"Status: {assembly.get('status') or '—'}",
+                f"Included: {'Yes' if assembly.get('included') else 'No'}",
+                f"Headline: {assembly.get('headline') or '—'}",
+                f"CTA: {assembly.get('cta') or '—'}",
+                f"Personalization: {assembly.get('personalization_complete', 0)}/{assembly.get('personalization_total', 0)}",
+                f"Reasons: {self._assembly_reason_text(assembly) or '—'}",
+            ]
+            existing = self.blockers_edit.toPlainText()
+            self.blockers_edit.setPlainText(existing + "\n" + "\n".join(assembly_lines))
+
+    def _assembly_reason_text(self, assembly: dict) -> str:
+        reasons = []
+        for key in ("blocking_reasons", "warning_reasons"):
+            for item in list(assembly.get(key) or []):
+                if isinstance(item, dict):
+                    reasons.append(str(item.get("message") or item.get("code") or ""))
+        return "; ".join(part for part in reasons if part)
 
     def _on_continue(self) -> None:
         if self._controller is not None:
             self._controller.continue_campaign()
+
+    def _on_include_selected(self) -> None:
+        if self._controller is not None:
+            self._controller.include_in_assembly(self.current_prospect_id())
+
+    def _on_exclude_selected(self) -> None:
+        if self._controller is not None:
+            self._controller.exclude_from_assembly(self.current_prospect_id())
+
+    def _on_prepare_package(self) -> None:
+        if self._controller is not None:
+            self._controller.prepare_assembly_package()
+
+    def _on_export_package(self) -> None:
+        if self._controller is None:
+            return
+        destination = QFileDialog.getExistingDirectory(self, "Choose Smartlead Export Folder")
+        if not destination:
+            return
+        self._controller.export_assembly_package(destination=destination)
 
     def _on_open_prospect(self) -> None:
         prospect_id = self.current_prospect_id()
