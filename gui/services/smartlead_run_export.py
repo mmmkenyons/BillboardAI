@@ -26,6 +26,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from gui.models.hosted_asset_store import HostedAssetStore
+from gui.models.personalization_field_catalog import (
+    DEFAULT_REQUIRED_EXPORT_COLUMNS,
+    PersonalizationFieldMapping,
+    PersonalizationFieldMappingStore,
+    default_personalization_mapping,
+    enabled_mappings_in_order,
+    mapping_fingerprint,
+    normalize_export_name,
+    validate_personalization_mapping,
+)
 from gui.models.smartlead_handoff import (
     DEFAULT_SMARTLEAD_COLUMN_ORDER,
     SMARTLEAD_PREFLIGHT_BLOCKED,
@@ -45,6 +55,11 @@ from gui.models.smartlead_run_export import (
     SmartleadRunExportRow,
 )
 from gui.models.smartlead_run_package import SmartleadRunPackageRecord, SmartleadRunPackageStore
+from gui.services.personalization_field_values import (
+    PersonalizationFieldContext,
+    get_personalization_field_value,
+    personalization_preview_rows,
+)
 from gui.services.smartlead_run_handoff import SmartleadRunHandoffService
 
 EXPORT_VERSION = "5Y"
@@ -87,10 +102,12 @@ class SmartleadRunExportService:
         *,
         run_handoff_service: SmartleadRunHandoffService,
         hosted_asset_store: HostedAssetStore | None = None,
+        mapping_store: PersonalizationFieldMappingStore | None = None,
         export_root: str | None = None,
     ) -> None:
         self._run_handoff = run_handoff_service
         self._hosted_asset_store = hosted_asset_store or HostedAssetStore()
+        self._mapping_store = mapping_store or PersonalizationFieldMappingStore()
         default_root = os.path.join(os.path.dirname(self._run_handoff.package_store.path), "exports")
         self._export_root = os.path.abspath(export_root or default_root)
 
@@ -101,6 +118,18 @@ class SmartleadRunExportService:
     @property
     def package_store(self) -> SmartleadRunPackageStore:
         return self._run_handoff.package_store
+
+    def get_field_mapping(self) -> list[PersonalizationFieldMapping]:
+        return self._mapping_store.load_or_default()
+
+    def save_field_mapping(self, mapping: list[PersonalizationFieldMapping]) -> list[PersonalizationFieldMapping]:
+        self._mapping_store.save(mapping)
+        return self.get_field_mapping()
+
+    def restore_default_field_mapping(self) -> list[PersonalizationFieldMapping]:
+        mapping = default_personalization_mapping()
+        self._mapping_store.save(mapping)
+        return mapping
 
     # ------------------------------------------------------------------
     # Read-only preview / readiness
@@ -142,7 +171,19 @@ class SmartleadRunExportService:
 
         rows, counts, handoff_columns = self._build_rows(record)
         exportable = [row for row in rows if row.exportable]
-        columns = build_export_columns(handoff_columns)
+        mapping = self.get_field_mapping()
+        try:
+            validate_personalization_mapping(mapping)
+        except ValueError as exc:
+            return SmartleadRunExportResult(
+                success=False,
+                message=str(exc),
+                campaign_run_id=record.campaign_run_id,
+                campaign_name=_clean(getattr(context, "campaign_name", "")),
+                rows=rows,
+                **counts,
+            )
+        columns = self._build_mapped_columns(handoff_columns, mapping)
 
         campaign_name = _clean(getattr(context, "campaign_name", ""))
         label = self._sanitize_label(campaign_name or record.campaign_run_id)
@@ -152,14 +193,13 @@ class SmartleadRunExportService:
 
         csv_rows: list[dict[str, str]] = []
         for row in exportable:
-            payload: dict[str, str] = {str(k): str(v or "") for k, v in row.fields.items()}
-            payload[SMARTLEAD_EXPORT_MOCKUP_URL_COLUMN] = row.mockup_url
+            payload = self._project_row(row, mapping, columns)
             csv_rows.append({column: payload.get(column, "") for column in columns})
 
         if csv_rows:
             self._write_export_csv(csv_path, columns, csv_rows)
 
-        fingerprint = self._fingerprint(exportable)
+        fingerprint = self._fingerprint(exportable, mapping)
         receipt = SmartleadRunExportReceipt(
             campaign_run_id=record.campaign_run_id,
             package_id=_clean(record.package_id),
@@ -178,7 +218,7 @@ class SmartleadRunExportService:
             local_fallback=counts["local_fallback"],
             fingerprint=fingerprint,
         )
-        self._write_export_manifest(manifest_path, receipt, rows)
+        self._write_export_manifest(manifest_path, receipt, rows, columns, mapping)
         self._persist_receipt(record, receipt)
 
         return SmartleadRunExportResult(
@@ -202,6 +242,13 @@ class SmartleadRunExportService:
         if not last:
             return None
         return SmartleadRunExportReceipt.from_dict(last)
+
+    def preview_field_mapping(self, campaign_run_id: str) -> list[dict[str, str]]:
+        rows_result = self.build_export_rows(campaign_run_id)
+        first = next((row for row in rows_result.rows if row.exportable), None)
+        if first is None:
+            return []
+        return personalization_preview_rows(self.get_field_mapping(), self._field_context(first))
 # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -261,6 +308,61 @@ class SmartleadRunExportService:
 
         counts = self._counts(rows)
         return tuple(rows), counts, handoff_columns
+
+    def _build_mapped_columns(self, handoff_columns: list[str], mapping: list[PersonalizationFieldMapping]) -> list[str]:
+        legacy_columns = build_export_columns(handoff_columns)
+        columns = [column for column in legacy_columns if column in DEFAULT_REQUIRED_EXPORT_COLUMNS]
+        for item in enabled_mappings_in_order(mapping):
+            export_name = normalize_export_name(item.export_name)
+            if not export_name or export_name in columns:
+                continue
+            columns.append(export_name)
+        return columns
+
+    def _project_row(
+        self,
+        row: SmartleadRunExportRow,
+        mapping: list[PersonalizationFieldMapping],
+        columns: list[str],
+    ) -> dict[str, str]:
+        context = self._field_context(row)
+        payload: dict[str, str] = {}
+        for item in enabled_mappings_in_order(mapping):
+            export_name = normalize_export_name(item.export_name)
+            if not export_name:
+                continue
+            payload[export_name] = get_personalization_field_value(item.field_key, context)
+        # Backward-compatible guard for Sprint 5Y default schema. These are all
+        # populated through the default mapping, but preserving row.fields here
+        # protects older/corrupt mapping load fallbacks from dropping columns.
+        for column in columns:
+            if column not in payload:
+                if column == SMARTLEAD_EXPORT_MOCKUP_URL_COLUMN:
+                    payload[column] = row.mockup_url
+                else:
+                    payload[column] = _clean(row.fields.get(column))
+        return payload
+
+    def _field_context(self, row: SmartleadRunExportRow) -> PersonalizationFieldContext:
+        run_service = self._run_handoff._run_service
+        prospect = run_service._prospect_store.get(row.prospect_id)
+        job = run_service._job_store.get(row.generation_job_id) if row.generation_job_id else None
+        project = None
+        project_id = row.project_id or _clean(getattr(job, "project_id", ""))
+        if project_id:
+            try:
+                project = run_service._project_store.load(project_id)
+            except Exception:
+                project = None
+        return PersonalizationFieldContext(
+            prospect=prospect,
+            generation_job=job,
+            project=project,
+            handoff_fields=dict(row.fields),
+            mockup_url=row.mockup_url,
+            campaign_run_id="",
+        )
+
     def _counts(self, rows: list[SmartleadRunExportRow]) -> dict[str, int]:
         ready = sum(1 for r in rows if r.status == SMARTLEAD_EXPORT_READY)
         warning = sum(1 for r in rows if r.status == SMARTLEAD_EXPORT_WARNING)
@@ -335,8 +437,10 @@ class SmartleadRunExportService:
     @staticmethod
     def _latest_asset(assets: list) -> Any:
         return sorted(assets, key=lambda a: _clean(a.hosted_at))[-1]
-    def _fingerprint(self, rows: list[SmartleadRunExportRow]) -> str:
+    def _fingerprint(self, rows: list[SmartleadRunExportRow], mapping: list[PersonalizationFieldMapping] | None = None) -> str:
         parts = ["|".join([row.prospect_id, row.status, row.mockup_url]) for row in rows]
+        if mapping is not None:
+            parts.append(mapping_fingerprint(mapping))
         return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
     @staticmethod
@@ -385,7 +489,11 @@ class SmartleadRunExportService:
 
     @staticmethod
     def _write_export_manifest(
-        path: str, receipt: SmartleadRunExportReceipt, rows: list[SmartleadRunExportRow]
+        path: str,
+        receipt: SmartleadRunExportReceipt,
+        rows: list[SmartleadRunExportRow],
+        columns: list[str] | None = None,
+        mapping: list[PersonalizationFieldMapping] | None = None,
     ) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         payload = {
@@ -393,6 +501,16 @@ class SmartleadRunExportService:
             "receipt": receipt.to_dict(),
             "rows": [row.to_dict() for row in rows],
         }
+        if columns is not None:
+            payload["export_columns"] = list(columns)
+        if mapping is not None:
+            payload["field_mapping"] = {
+                "fingerprint": mapping_fingerprint(mapping),
+                "enabled_fields": [
+                    {"field_key": item.field_key, "export_name": normalize_export_name(item.export_name)}
+                    for item in enabled_mappings_in_order(mapping)
+                ],
+            }
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
@@ -26,6 +27,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 
+from gui.models.personalization_field_catalog import (
+    DEFAULT_REQUIRED_EXPORT_COLUMNS,
+    FIELD_DEFINITIONS_BY_KEY,
+    PersonalizationFieldMapping,
+    default_personalization_mapping,
+)
 from gui.models.smartlead_publication import (
     SMARTLEAD_PUBLISH_MODE_DRY_RUN,
     SMARTLEAD_PUBLISH_MODE_LIVE,
@@ -49,6 +56,7 @@ class SmartleadHandoffPage(QWidget):
         self._pilot_runs: list[object] = []
         self._current_pilot_id: str = ""
         self._run_context = None
+        self._field_mapping: list[PersonalizationFieldMapping] = []
         self._controller_signals_connected = False
         self._action_signals_connected = False
 
@@ -161,6 +169,33 @@ class SmartleadHandoffPage(QWidget):
         export_actions.addWidget(self.open_export_file_button)
         export_actions.addStretch(1)
         run_export_layout.addLayout(export_actions)
+
+        field_mapping_box = self._section_box("Export Fields", content)
+        field_mapping_layout = self._section_layout(field_mapping_box)
+        field_mapping_hint = QLabel(
+            "Default/core Smartlead columns are locked to preserve the current CSV contract. "
+            "Enable optional personalization fields or rename their export columns for future Smartlead custom variables.",
+            self,
+        )
+        field_mapping_hint.setWordWrap(True)
+        field_mapping_layout.addWidget(field_mapping_hint)
+        self.field_mapping_table = QTableWidget(0, 4, self)
+        self.field_mapping_table.setHorizontalHeaderLabels(["Include", "Field", "Export Name", "Core"])
+        field_mapping_layout.addWidget(self.field_mapping_table)
+        mapping_actions = QHBoxLayout()
+        mapping_actions.setSpacing(8)
+        self.save_field_mapping_button = QPushButton("Save Mapping", self)
+        self.restore_field_mapping_button = QPushButton("Restore Defaults", self)
+        self.refresh_field_preview_button = QPushButton("Refresh Preview", self)
+        mapping_actions.addWidget(self.save_field_mapping_button)
+        mapping_actions.addWidget(self.restore_field_mapping_button)
+        mapping_actions.addWidget(self.refresh_field_preview_button)
+        mapping_actions.addStretch(1)
+        field_mapping_layout.addLayout(mapping_actions)
+        self.field_preview_table = QTableWidget(0, 3, self)
+        self.field_preview_table.setHorizontalHeaderLabels(["Field", "Export Name", "Example"])
+        field_mapping_layout.addWidget(self.field_preview_table)
+        run_export_layout.addWidget(field_mapping_box)
         layout.addWidget(run_export_box)
 
         hosting_box = self._section_box("Hosted Mockups", content)
@@ -335,6 +370,8 @@ class SmartleadHandoffPage(QWidget):
             controller.pilot_pause_changed.connect(self.show_pilot_pause)
         if hasattr(controller, "run_export_result_changed"):
             controller.run_export_result_changed.connect(self.set_run_export_result)
+        if hasattr(controller, "field_mapping_changed"):
+            controller.field_mapping_changed.connect(self.set_field_mapping)
         if not self._action_signals_connected:
             self.test_connection_button.clicked.connect(self._on_test_connection)
             self.refresh_campaigns_button.clicked.connect(self._on_refresh_campaigns)
@@ -361,12 +398,17 @@ class SmartleadHandoffPage(QWidget):
             self.export_run_button.clicked.connect(self._on_export_run)
             self.open_export_folder_button.clicked.connect(self._on_open_export_folder)
             self.open_export_file_button.clicked.connect(self._on_open_export_file)
+            self.save_field_mapping_button.clicked.connect(self._on_save_field_mapping)
+            self.restore_field_mapping_button.clicked.connect(self._on_restore_field_mapping)
+            self.refresh_field_preview_button.clicked.connect(self._refresh_field_preview)
             self.pilot_recipient_list.itemSelectionChanged.connect(self._update_pilot_buttons)
             self.target_mode_combo.currentTextChanged.connect(self._sync_target_mode)
             self.campaign_combo.currentIndexChanged.connect(self._update_activation_button_state)
             self.live_checkbox.toggled.connect(self._update_activation_button_state)
             self._action_signals_connected = True
         self._sync_target_mode(self.target_mode_combo.currentText())
+        if hasattr(controller, "get_export_field_mapping"):
+            controller.get_export_field_mapping()
 
     def set_summary(self, summary: object) -> None:
         if isinstance(summary, dict) and "total_members" in summary:
@@ -529,6 +571,69 @@ class SmartleadHandoffPage(QWidget):
         self.run_export_status_label.setText("\n".join(lines))
         self.show_status("\n".join(lines))
         self._update_run_export_controls()
+        self._refresh_field_preview()
+
+    def set_field_mapping(self, mapping: object) -> None:
+        items = list(mapping or [])
+        if not items:
+            items = default_personalization_mapping()
+        self._field_mapping = items
+        self.field_mapping_table.setRowCount(len(items))
+        for row, item in enumerate(items):
+            definition = FIELD_DEFINITIONS_BY_KEY.get(getattr(item, "field_key", ""))
+            export_name = str(getattr(item, "export_name", "") or "")
+            is_core = export_name in DEFAULT_REQUIRED_EXPORT_COLUMNS
+
+            include = QTableWidgetItem("")
+            include.setCheckState(Qt.CheckState.Checked if getattr(item, "enabled", False) else Qt.CheckState.Unchecked)
+            if is_core:
+                include.setFlags(include.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.field_mapping_table.setItem(row, 0, include)
+            self.field_mapping_table.setItem(row, 1, QTableWidgetItem(definition.label if definition else getattr(item, "field_key", "")))
+            export_item = QTableWidgetItem(export_name)
+            if is_core:
+                export_item.setFlags(export_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.field_mapping_table.setItem(row, 2, export_item)
+            self.field_mapping_table.setItem(row, 3, QTableWidgetItem("Core" if is_core else "Optional"))
+        self._refresh_field_preview()
+
+    def _collect_field_mapping(self) -> list[PersonalizationFieldMapping]:
+        collected: list[PersonalizationFieldMapping] = []
+        for row, original in enumerate(self._field_mapping):
+            include = self.field_mapping_table.item(row, 0)
+            export = self.field_mapping_table.item(row, 2)
+            export_name = export.text().strip() if export is not None else getattr(original, "export_name", "")
+            enabled = bool(getattr(original, "enabled", False))
+            if include is not None and export_name not in DEFAULT_REQUIRED_EXPORT_COLUMNS:
+                enabled = include.checkState() == Qt.CheckState.Checked
+            collected.append(
+                PersonalizationFieldMapping(
+                    field_key=getattr(original, "field_key", ""),
+                    export_name=export_name,
+                    enabled=enabled,
+                    position=row,
+                )
+            )
+        return collected
+
+    def _on_save_field_mapping(self) -> None:
+        if self._controller is not None and hasattr(self._controller, "save_export_field_mapping"):
+            self._controller.save_export_field_mapping(self._collect_field_mapping())
+
+    def _on_restore_field_mapping(self) -> None:
+        if self._controller is not None and hasattr(self._controller, "restore_default_export_field_mapping"):
+            self._controller.restore_default_export_field_mapping()
+
+    def _refresh_field_preview(self) -> None:
+        preview = []
+        if self._controller is not None and hasattr(self._controller, "preview_export_field_mapping"):
+            preview = list(self._controller.preview_export_field_mapping() or [])
+        self.field_preview_table.setRowCount(len(preview[:8]))
+        for row, item in enumerate(preview[:8]):
+            definition = FIELD_DEFINITIONS_BY_KEY.get(str(item.get("field_key", "")))
+            self.field_preview_table.setItem(row, 0, QTableWidgetItem(definition.label if definition else str(item.get("field_key", ""))))
+            self.field_preview_table.setItem(row, 1, QTableWidgetItem(str(item.get("export_name", ""))))
+            self.field_preview_table.setItem(row, 2, QTableWidgetItem(str(item.get("example", ""))))
 
     def _update_run_export_controls(self) -> None:
         has_run = self._run_context is not None
@@ -537,6 +642,10 @@ class SmartleadHandoffPage(QWidget):
         self.open_export_file_button.setEnabled(has_run)
         self.browse_export_dest_button.setEnabled(has_run)
         self.run_export_dest_edit.setEnabled(has_run)
+        self.field_mapping_table.setEnabled(has_run)
+        self.save_field_mapping_button.setEnabled(has_run)
+        self.restore_field_mapping_button.setEnabled(has_run)
+        self.refresh_field_preview_button.setEnabled(has_run)
 
     def _on_browse_export_destination(self) -> None:
         start = self.run_export_dest_edit.text().strip()

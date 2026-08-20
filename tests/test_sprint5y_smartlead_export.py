@@ -10,6 +10,7 @@ from gui.models.campaign_run import CampaignRunStore
 from gui.models.hosted_asset import HostedMockupAsset
 from gui.models.hosted_asset_store import HostedAssetStore
 from gui.models.mockup_concept import MockupConcept
+from gui.models.personalization_field_catalog import PersonalizationFieldMappingStore
 from gui.models.project_store import ProjectStore
 from gui.models.prospect import Prospect
 from gui.models.prospect_generation import OpportunityGenerationContext, ProspectGenerationJob
@@ -74,6 +75,7 @@ def _runtime(tmp_path):
     components["export_svc"] = SmartleadRunExportService(
         run_handoff_service=components["run_handoff"],
         hosted_asset_store=components["hosted_store"],
+        mapping_store=PersonalizationFieldMappingStore(path=os.path.join(root, "field_mapping.json")),
         export_root=os.path.join(root, "smartlead_exports"),
     )
     return components

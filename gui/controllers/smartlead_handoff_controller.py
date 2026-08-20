@@ -38,6 +38,7 @@ class SmartleadHandoffController(QObject):
     pilot_pause_changed = Signal(object)
     run_context_changed = Signal(object)
     run_export_result_changed = Signal(object)
+    field_mapping_changed = Signal(object)
 
     def __init__(
         self,
@@ -458,6 +459,46 @@ class SmartleadHandoffController(QObject):
         else:
             self.error_message.emit(result.message)
         return result
+
+    def get_export_field_mapping(self) -> object:
+        if self._run_export_service is None or not hasattr(self._run_export_service, "get_field_mapping"):
+            return []
+        mapping = self._run_export_service.get_field_mapping()
+        self.field_mapping_changed.emit(mapping)
+        return mapping
+
+    def save_export_field_mapping(self, mapping: object) -> object:
+        if self._run_export_service is None or not hasattr(self._run_export_service, "save_field_mapping"):
+            self.error_message.emit("Run export field mapping service is not available.")
+            return []
+        try:
+            saved = self._run_export_service.save_field_mapping(list(mapping or []))
+        except ValueError as exc:
+            self.error_message.emit(str(exc))
+            return []
+        self.field_mapping_changed.emit(saved)
+        self.status_message.emit("Smartlead export field mapping saved.")
+        if self._active_run_id:
+            self.refresh_run_export()
+        return saved
+
+    def restore_default_export_field_mapping(self) -> object:
+        if self._run_export_service is None or not hasattr(self._run_export_service, "restore_default_field_mapping"):
+            self.error_message.emit("Run export field mapping service is not available.")
+            return []
+        saved = self._run_export_service.restore_default_field_mapping()
+        self.field_mapping_changed.emit(saved)
+        self.status_message.emit("Smartlead export field mapping restored to defaults.")
+        if self._active_run_id:
+            self.refresh_run_export()
+        return saved
+
+    def preview_export_field_mapping(self) -> object:
+        if self._run_export_service is None or not self._active_run_id:
+            return []
+        if not hasattr(self._run_export_service, "preview_field_mapping"):
+            return []
+        return self._run_export_service.preview_field_mapping(self._active_run_id)
 
     def open_run_export_folder(self) -> None:
         receipt = self._latest_run_export()
