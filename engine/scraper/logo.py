@@ -82,7 +82,7 @@ def score_svg_element(svg_tag, base_url):
     return None
 
 
-def pick_best_logo(html, base_url):
+def logo_candidates(html, base_url):
     soup = BeautifulSoup(html, "lxml")
     candidates = []
 
@@ -97,6 +97,11 @@ def pick_best_logo(html, base_url):
             candidates.append(result)
 
     candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates
+
+
+def pick_best_logo(html, base_url):
+    candidates = logo_candidates(html, base_url)
 
     if candidates:
         top_score, top_logo = candidates[0]

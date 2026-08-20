@@ -40,7 +40,8 @@ def _apply_opportunity_context(ctx: RenderContext, request: MockupRequest) -> Re
         return ctx
     merged = RenderContext.from_dict(ctx.to_dict())
     merged.scene_template = opportunity.scene_template or merged.scene_template or "cart_corral"
-    merged.opportunity_context = opportunity.to_dict()
+    existing = dict(merged.opportunity_context or {})
+    merged.opportunity_context = {**opportunity.to_dict(), **existing}
     return merged
 
 
@@ -165,6 +166,12 @@ def generate(
             logger.warning("ScreenshotValidationError: %s", e)
             result.elapsed_time = time.time() - start
             return result
+
+        if isinstance(data, dict) and isinstance(request.options, dict):
+            person_context = request.options.get("person_context")
+            if isinstance(person_context, dict) and person_context:
+                data = dict(data)
+                data["person_context"] = dict(person_context)
 
         template_name = request.template or "contractor"
         render_context = build_render_context(

@@ -39,6 +39,96 @@ def _theme_from_template(template: str) -> dict[str, Any]:
     return theme
 
 
+def _asset_exists(path: str) -> bool:
+    if not path:
+        return False
+    try:
+        import os
+
+        return os.path.isfile(path)
+    except OSError:
+        return False
+
+
+def _select_visual_assets(profile: Any) -> tuple[str, str, dict[str, Any]]:
+    """Choose hero/background paths from a BrandProfile with person-aware rules."""
+    from engine.brand_profile import (
+        ROLE_GENERIC_HERO,
+        ROLE_PERSON_HEADER,
+        ROLE_PERSON_PROFILE,
+        ROLE_PROPERTY_LISTING,
+    )
+
+    screenshot = str(profile.screenshot_path or "")
+    diagnostics = dict(profile.source_metadata.get("asset_selection_diagnostics") or {})
+    person_oriented = bool(diagnostics.get("person_oriented"))
+    assets = list(profile.assets or [])
+
+    usable = [a for a in assets if _asset_exists(str(a.path or "")) and int(a.width or 0) >= 120 and int(a.height or 0) >= 120]
+    person_profiles = [a for a in usable if a.role == ROLE_PERSON_PROFILE and a.person_relevance_score >= 95]
+    person_headers = [a for a in usable if a.role == ROLE_PERSON_HEADER and a.person_relevance_score >= 85]
+    generic_heroes = [a for a in usable if a.role == ROLE_GENERIC_HERO]
+    # Backward compatibility: historical BrandProfile.hero_assets paths were
+    # treated as authoritative render paths, including in offline/synthetic
+    # tests that do not create actual files.  Keep that behavior for the legacy
+    # hero field; person-aware candidates from profile.assets still require a
+    # real file so failed downloads fall back safely to screenshot.
+    legacy_heroes = [a for a in profile.hero_assets or [] if str(a.path or "")]
+
+    def key(asset: Any) -> tuple[float, float, str]:
+        return (
+            float(asset.person_relevance_score or 0),
+            float(asset.selection_score or 0),
+            str(asset.source_url or asset.path or ""),
+        )
+
+    selected_reason = "screenshot_fallback"
+    if person_oriented and person_profiles:
+        hero = sorted(person_profiles, key=key, reverse=True)[0]
+        hero_path = hero.path
+        selected_reason = "person_profile_preferred"
+    elif person_oriented and person_headers:
+        hero = sorted(person_headers, key=key, reverse=True)[0]
+        hero_path = hero.path
+        selected_reason = "person_header_preferred"
+    elif legacy_heroes:
+        hero = legacy_heroes[0]
+        hero_path = hero.path
+        selected_reason = "legacy_hero_asset"
+    elif generic_heroes:
+        hero = sorted(generic_heroes, key=key, reverse=True)[0]
+        hero_path = hero.path
+        selected_reason = "generic_hero_asset"
+    else:
+        hero = None
+        hero_path = screenshot
+
+    if person_oriented and person_headers:
+        background = sorted(person_headers, key=key, reverse=True)[0]
+        background_path = background.path
+        background_reason = "person_header_background"
+    elif generic_heroes:
+        background = sorted(generic_heroes, key=key, reverse=True)[0]
+        background_path = background.path
+        background_reason = "generic_hero_background"
+    else:
+        background = None
+        background_path = screenshot or hero_path
+        background_reason = "screenshot_background_fallback"
+
+    diagnostics.update({
+        "selected_hero": hero_path or "",
+        "selected_hero_role": getattr(hero, "role", "SCREENSHOT" if hero_path == screenshot else ""),
+        "selected_hero_reason": selected_reason,
+        "selected_background": background_path or "",
+        "selected_background_role": getattr(background, "role", "SCREENSHOT" if background_path == screenshot else ""),
+        "selected_background_reason": background_reason,
+        "screenshot_path": screenshot,
+        "property_listing_candidates": len([a for a in assets if a.role == ROLE_PROPERTY_LISTING]),
+    })
+    return str(hero_path or ""), str(background_path or ""), diagnostics
+
+
 @dataclass
 class RenderContext:
     """Versioned, complete inputs required to paint a billboard."""
@@ -115,15 +205,8 @@ class RenderContext:
                 profile.source_metadata.get("legacy_logo_path") or ""
             )
 
-        # --- Hero path ---
-        hero_path = ""
-        if profile.hero_assets:
-            hero_path = profile.hero_assets[0].path
-        if not hero_path:
-            hero_path = profile.screenshot_path
-
-        # --- Screenshot / background ---
-        screenshot = profile.screenshot_path
+        # --- Hero / background paths ---
+        hero_path, background_path, asset_selection_diagnostics = _select_visual_assets(profile)
 
         # --- Colors ---
         brand_colors = list(profile.colors)
@@ -152,8 +235,8 @@ class RenderContext:
             subtitle=str(subtitle or ""),
             template=template_name,
             logo_image=str(logo_path or ""),
-            hero_image=str(hero_path or screenshot or ""),
-            background_image=str(screenshot or hero_path or ""),
+            hero_image=str(hero_path or ""),
+            background_image=str(background_path or hero_path or ""),
             primary_color=str(primary),
             secondary_color=str(secondary),
             accent_color=str(theme.get("accent_color") or "#1F77B4"),
@@ -169,6 +252,7 @@ class RenderContext:
             source_url=str(profile.website or ""),
             brand_colors=[str(c) for c in brand_colors],
             scene_template="cart_corral",
+            opportunity_context={"asset_selection": asset_selection_diagnostics},
         )
 
     @classmethod
@@ -254,11 +338,13 @@ class RenderContext:
         if not isinstance(brand_colors, list):
             brand_colors = []
         opportunity_raw = raw.get("opportunity_context")
-        opportunity_context = (
-            OpportunityGenerationContext.from_dict(opportunity_raw).to_dict()
-            if isinstance(opportunity_raw, dict)
-            else {}
-        )
+        if isinstance(opportunity_raw, dict):
+            opportunity_context = dict(opportunity_raw)
+            opportunity_context.update(
+                OpportunityGenerationContext.from_dict(opportunity_raw).to_dict()
+            )
+        else:
+            opportunity_context = {}
 
         secondary = raw.get("secondary_color") or theme.get("background_color") or "#FFFFFF"
 

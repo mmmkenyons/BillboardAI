@@ -132,6 +132,30 @@ def test_success_associates_correct_prospect(tmp_path) -> None:
     assert updated_b is not None and not updated_b.metadata.get("project_id")
 
 
+def test_generation_request_carries_person_context(tmp_path) -> None:
+    prospect_store, job_store, project_store = _stores(tmp_path)
+    prospect = _seed_prospect(
+        prospect_store,
+        contact_name="Jane Smith",
+        contact_title="Agent",
+        resolved_profile_url="https://example.com/agent/jane-smith/",
+        resolution_status="RESOLVED",
+        resolution_confidence="HIGH",
+        category="real estate",
+    )
+    seen = {}
+
+    def fake_generate(request):
+        seen.update(request.options.get("person_context") or {})
+        return MockupResult(success=True, website=request.url, output_path=request.output_path, preview_path=request.output_path)
+
+    service = ProspectGenerationService(prospect_store=prospect_store, job_store=job_store, generation_callable=fake_generate, default_output_root=str(tmp_path), project_store=project_store)
+    created = service.create_job(prospect.prospect_id)
+    service.run_job(created.job.id)
+    assert seen["contact_name"] == "Jane Smith"
+    assert seen["resolved_profile_url"] == "https://example.com/agent/jane-smith/"
+
+
 def test_failure_does_not_overwrite_prior_success(tmp_path) -> None:
     prospect_store, job_store, project_store = _stores(tmp_path)
     prospect = _seed_prospect(prospect_store)

@@ -218,12 +218,24 @@ class ProspectGenerationService:
 
     def _invoke_generation(self, job: ProspectGenerationJob) -> MockupResult:
         project = self._ensure_project(job)
+        prospect = self._prospect_store.get(job.prospect_id)
+        person_context = {}
+        if prospect is not None:
+            person_context = {
+                "contact_name": prospect.contact_name,
+                "contact_title": prospect.contact_title,
+                "resolved_profile_url": prospect.resolved_profile_url,
+                "manual_profile_url": prospect.manual_profile_url,
+                "resolution_status": prospect.resolution_status,
+                "resolution_confidence": prospect.resolution_confidence,
+            }
         output_path = os.path.join(project.image_path, project.next_concept_filename())
         request = MockupRequest(
             url=job.website,
             template=job.template,
             output_folder=project.root_dir,
             output_path=output_path,
+            options={"person_context": person_context} if person_context else {},
             opportunity_context=job.opportunity_context,
         )
         return self._generate(request)

@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+import os
+import re
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +57,9 @@ class BrandAsset:
     quality_score: float = 0.0
     selection_score: float = 0.0
     confidence: float = 1.0
+    role: str = "OTHER"
+    person_relevance_score: float = 0.0
+    evidence: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a plain dictionary for JSON output."""
@@ -67,6 +72,152 @@ class BrandAsset:
         known = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in known}
         return cls(**filtered)
+
+
+ROLE_PERSON_PROFILE = "PERSON_PROFILE"
+ROLE_PERSON_HEADER = "PERSON_HEADER"
+ROLE_BUSINESS_LOGO = "BUSINESS_LOGO"
+ROLE_PROPERTY_LISTING = "PROPERTY_LISTING"
+ROLE_GENERIC_HERO = "GENERIC_HERO"
+ROLE_SCREENSHOT = "SCREENSHOT"
+ROLE_ICON = "ICON"
+ROLE_OTHER = "OTHER"
+
+
+def _norm_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _name_tokens(name: str) -> list[str]:
+    return [part for part in _norm_text(name).split() if len(part) > 1]
+
+
+def _contains_full_name(text: str, name: str) -> bool:
+    tokens = _name_tokens(name)
+    if len(tokens) < 2:
+        return False
+    norm = f" {_norm_text(text)} "
+    return f" {' '.join(tokens)} " in norm
+
+
+def _looks_like_person_profile_url(url: str) -> bool:
+    text = _norm_text(url)
+    return any(marker in text.split() for marker in ("agent", "profile", "person", "provider", "attorney", "advisor", "realtor", "team"))
+
+
+def _quality_bucket(asset: BrandAsset) -> str:
+    if asset.width < 120 or asset.height < 120:
+        return "too_small"
+    if asset.width < 180 or asset.height < 180:
+        return "marginal"
+    return "usable"
+
+
+def classify_brand_assets(
+    assets: list[BrandAsset],
+    *,
+    contact_name: str = "",
+    page_url: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assign lightweight roles and person relevance evidence to image assets.
+
+    This is deterministic metadata scoring only; it never identifies a face from
+    pixels.  It uses source URL/path/alt-like URL text, dimensions, page title,
+    and explicit prospect contact context when available.
+    """
+    meta = metadata if isinstance(metadata, dict) else {}
+    title_text = " ".join(
+        str(v or "")
+        for v in (
+            meta.get("title"),
+            meta.get("description"),
+            (meta.get("og") or {}).get("og:title") if isinstance(meta.get("og"), dict) else "",
+            (meta.get("twitter") or {}).get("twitter:title") if isinstance(meta.get("twitter"), dict) else "",
+        )
+    )
+    person_context = bool(contact_name and (_contains_full_name(title_text, contact_name) or _looks_like_person_profile_url(page_url)))
+
+    diagnostics: list[dict[str, Any]] = []
+    for asset in assets:
+        existing_evidence = [str(item) for item in (asset.evidence or [])]
+        dom_context = " ".join(
+            item.split(":", 1)[1]
+            for item in existing_evidence
+            if item.startswith("dom_context:") and ":" in item
+        )
+        text = " ".join([asset.source_url or "", asset.path or "", asset.asset_type or "", dom_context])
+        norm = _norm_text(text)
+        evidence: list[str] = []
+        role = ROLE_OTHER
+        score = 0.0
+
+        if asset.asset_type == "logo" or "logo" in norm:
+            role = ROLE_BUSINESS_LOGO
+            evidence.append("logo_text")
+        elif asset.width < 120 or asset.height < 120 or any(word in norm.split() for word in ("icon", "favicon", "sprite")):
+            role = ROLE_ICON
+            evidence.append("icon_or_tiny")
+        elif any(word in norm.split() for word in ("listing", "mls", "property", "homes", "house", "gallery")):
+            role = ROLE_PROPERTY_LISTING
+            evidence.append("property_listing_text")
+        elif any(word in norm.split() for word in ("hero", "header", "banner", "cover")):
+            role = ROLE_GENERIC_HERO
+            evidence.append("hero_header_text")
+
+        if contact_name and _contains_full_name(text, contact_name):
+            score += 70
+            evidence.append("source_path_or_dom_contains_full_contact_name")
+        if contact_name and _contains_full_name(title_text, contact_name):
+            score += 20
+            evidence.append("page_title_contains_contact_name")
+        if _looks_like_person_profile_url(page_url):
+            score += 15
+            evidence.append("profile_page_url")
+        if any(word in norm.split() for word in ("agent", "profile", "headshot", "photo", "portrait", "person", "provider", "attorney", "advisor", "realtor", "owner")):
+            score += 35
+            evidence.append("person_role_text")
+
+        aspect = asset.aspect_ratio or (asset.width / asset.height if asset.height else 0)
+        if 0.65 <= aspect <= 1.35:
+            score += 15
+            evidence.append("square_or_portrait_ratio")
+        elif 1.35 < aspect <= 2.4 and any(word in norm.split() for word in ("header", "banner", "cover", "hero")):
+            score += 8
+            evidence.append("person_header_ratio")
+
+        if _quality_bucket(asset) == "too_small":
+            score = min(score, 10)
+            evidence.append("below_person_minimum")
+        if role == ROLE_PROPERTY_LISTING:
+            score = min(score, 25)
+            evidence.append("property_images_not_person_focal")
+        if score >= 95 and 0.65 <= aspect <= 1.35 and _quality_bucket(asset) != "too_small" and role != ROLE_PROPERTY_LISTING:
+            role = ROLE_PERSON_PROFILE
+        elif score >= 85 and role != ROLE_PROPERTY_LISTING and _quality_bucket(asset) != "too_small":
+            role = ROLE_PERSON_HEADER if aspect > 1.35 else ROLE_PERSON_PROFILE
+        elif role == ROLE_OTHER and asset.width >= 300 and asset.height >= 180:
+            role = ROLE_GENERIC_HERO
+
+        asset.role = role
+        asset.person_relevance_score = round(score, 3)
+        asset.selection_score = round(score + min(asset.width * asset.height / 20000, 40), 3)
+        asset.evidence = sorted(set(evidence))
+        diagnostics.append({
+            "path": os.path.basename(asset.path or ""),
+            "source_url": asset.source_url,
+            "role": asset.role,
+            "person_relevance_score": asset.person_relevance_score,
+            "selection_score": asset.selection_score,
+            "dimensions": f"{asset.width}x{asset.height}",
+            "evidence": list(asset.evidence),
+        })
+    return {
+        "person_oriented": bool(person_context),
+        "target_contact_name": contact_name or "",
+        "candidate_count": len(assets),
+        "candidates": diagnostics,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +479,20 @@ class BrandProfileBuilder:
         source_metadata: Dict[str, Any] = (
             dict(meta_raw) if isinstance(meta_raw, dict) else {}
         )
+        person_context_raw = data.get("person_context")
+        person_context = dict(person_context_raw) if isinstance(person_context_raw, dict) else {}
+        contact_name = str(person_context.get("contact_name") or "")
+        if contact_name:
+            source_metadata.setdefault("person_context", person_context)
+
+        asset_diagnostics = classify_brand_assets(
+            assets,
+            contact_name=contact_name,
+            page_url=url,
+            metadata=source_metadata,
+        )
+        if contact_name or asset_diagnostics.get("person_oriented"):
+            source_metadata["asset_selection_diagnostics"] = asset_diagnostics
 
         # Preserve legacy paths in source_metadata for backward compatibility
         legacy_logo_path = str(data.get("logo_path") or "")

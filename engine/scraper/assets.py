@@ -92,6 +92,35 @@ def discover_assets(html, base_url):
     return sorted(urls)
 
 
+def discover_asset_contexts(html, base_url):
+    """Return compact DOM text context keyed by normalized image URL."""
+    soup = BeautifulSoup(html, "lxml")
+    contexts = {}
+    for tag in soup.find_all(["img", "source"]):
+        pieces = [
+            tag.get("alt") or "",
+            tag.get("title") or "",
+            " ".join(tag.get("class") or []),
+            tag.get("id") or "",
+            tag.get("aria-label") or "",
+        ]
+        parent = tag.parent
+        if parent is not None:
+            pieces.extend([
+                " ".join(parent.get("class") or []),
+                parent.get("id") or "",
+                parent.get_text(" ", strip=True)[:300],
+            ])
+        context = " ".join(str(p) for p in pieces if p)[:800]
+        for candidate in _collect_image_srcs(tag):
+            if not candidate or candidate.lower().startswith("data:"):
+                continue
+            normalized = _normalize_url(base_url, candidate)
+            if normalized and context:
+                contexts.setdefault(normalized, context)
+    return contexts
+
+
 def save_asset(url, folder, downloader):
     if not url:
         return None
