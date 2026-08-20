@@ -19,10 +19,12 @@ from gui.models.prospect import Prospect
 from gui.models.prospect_store import ProspectStore
 from gui.services.campaign_export import (
     EXPORT_STATUS_BLOCKED,
+    EXPORT_STATUS_WARNING,
     CampaignExportRow,
     CampaignExportService,
 )
 from gui.services.campaign_package import CampaignPackageService
+from gui.services.copy_quality import QUALITY_BLOCKED, QUALITY_WARNING, assess_copy_quality, assess_profile_quality
 
 
 REVIEW_FILTER_ALL = "ALL"
@@ -165,6 +167,29 @@ class CampaignReviewService:
                 technical_status = EXPORT_STATUS_BLOCKED
             else:
                 technical_status = eligibility.status
+            copy_quality = assess_copy_quality(
+                prospect=prospect,
+                concept=resolved.concept,
+                project=resolved.project,
+                row=row,
+            )
+            messages = tuple(reason.message for reason in copy_quality.reasons)
+            if copy_quality.status == QUALITY_BLOCKED:
+                technical_reasons = tuple(list(technical_reasons) + list(messages))
+                technical_status = EXPORT_STATUS_BLOCKED
+            elif copy_quality.status == QUALITY_WARNING:
+                technical_warnings = tuple(list(technical_warnings) + list(messages))
+                if technical_status != EXPORT_STATUS_BLOCKED:
+                    technical_status = EXPORT_STATUS_WARNING
+            profile_quality = assess_profile_quality(prospect)
+            profile_messages = tuple(reason.message for reason in profile_quality.reasons)
+            if profile_quality.status == QUALITY_BLOCKED:
+                technical_reasons = tuple(list(technical_reasons) + list(profile_messages))
+                technical_status = EXPORT_STATUS_BLOCKED
+            elif profile_quality.status == QUALITY_WARNING:
+                technical_warnings = tuple(list(technical_warnings) + list(profile_messages))
+                if technical_status != EXPORT_STATUS_BLOCKED:
+                    technical_status = EXPORT_STATUS_WARNING
         else:
             technical_status = eligibility.status
         return CampaignReviewRow(

@@ -502,6 +502,9 @@ class BrandProfileBuilder:
         source_metadata: Dict[str, Any] = (
             dict(meta_raw) if isinstance(meta_raw, dict) else {}
         )
+        capture_diagnostics = data.get("capture_diagnostics")
+        if isinstance(capture_diagnostics, dict) and capture_diagnostics:
+            source_metadata.setdefault("capture_diagnostics", dict(capture_diagnostics))
         person_context_raw = data.get("person_context")
         person_context = dict(person_context_raw) if isinstance(person_context_raw, dict) else {}
         contact_name = str(person_context.get("contact_name") or "")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import os
+import time
 
 import pytest
 
@@ -41,6 +42,24 @@ from gui.services.profile_resolver import (
 )
 
 PARENT = "https://pinnaclerealtyia.com"
+
+
+def test_bounded_resolution_total_timeout_cannot_hang_indefinitely() -> None:
+    calls = []
+
+    def slow_fetch(url: str) -> str:
+        calls.append(url)
+        time.sleep(0.02)
+        return "<urlset><url><loc>https://pinnaclerealtyia.com/agent/meridith-hoffman</loc></url></urlset>"
+
+    service = ProfileResolverService(fetcher=slow_fetch, total_timeout=0.001)
+    started = time.monotonic()
+    result = service.resolve("Meridith Hoffman", PARENT)
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0
+    assert result.status == RESOLUTION_ERROR
+    assert result.diagnostics.get("timeout_reason")
+    assert result.diagnostics.get("bounded_limits", {}).get("total_timeout_seconds") == 0.001
 
 
 class _BrowserPage:

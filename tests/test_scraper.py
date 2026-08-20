@@ -204,7 +204,9 @@ def test_automatic_regeneration_on_weak_quality(tmp_path, monkeypatch):
         assert result["regenerated"] is False
 
 
-# New test for blank image case (keeps expecting ScreenshotValidationError)
+# Blank captures are diagnosed by WebsiteScraper without aborting an otherwise
+# usable scrape. ScreenshotCaptureService itself still raises after all fallback
+# attempts fail; WebsiteScraper records that failure and proceeds with HTML data.
 def test_blank_image_raises_validation_error(tmp_path, monkeypatch):
     test_url = "https://example.com"
     output_dir = tmp_path / "output"
@@ -272,11 +274,11 @@ def test_blank_image_raises_validation_error(tmp_path, monkeypatch):
     monkeypatch.setattr("engine.scraper.site.pick_hero_image", lambda page: None)
     monkeypatch.setattr("engine.scraper.site.discover_assets", lambda html, base_url: [])
 
-    # This should raise ScreenshotValidationError as per revised requirements
-    try:
-        result = scraper.run()
-        assert False, "Expected ScreenshotValidationError for blank image"
-    except ScreenshotValidationError:
-        pass  # Expected behavior
-    except Exception as e:
-        assert False, f"Expected ScreenshotValidationError, got {type(e).__name__}: {e}"
+    result = scraper.run()
+
+    assert result["screenshot_path"] is None
+    assert result["screenshot_file"] is None
+    assert result["capture_diagnostics"]["status"] == "SCREENSHOT_FAILED"
+    assert result["capture_diagnostics"]["reason"] == "SCREENSHOT_VALIDATION_FAILURE"
+    assert result["capture_diagnostics"]["quality_reason"] == "blank_or_low_information"
+    assert len(result["capture_diagnostics"].get("attempts", [])) == 5

@@ -27,6 +27,12 @@ from gui.models.campaign_assembly import (
 from gui.models.campaign_review import CAMPAIGN_REVIEW_STATUS_APPROVED, CAMPAIGN_REVIEW_STATUS_EXCLUDED
 from gui.models.personalization_field_catalog import enabled_mappings_in_order, mapping_fingerprint
 from gui.services.campaign_export import EXPORT_STATUS_BLOCKED, EXPORT_STATUS_READY, EXPORT_STATUS_WARNING
+from gui.services.copy_quality import (
+    QUALITY_BLOCKED,
+    QUALITY_WARNING,
+    assess_copy_quality,
+    assess_profile_quality,
+)
 from gui.services.personalization_field_values import PersonalizationFieldContext, get_personalization_field_value
 
 
@@ -43,6 +49,8 @@ REASON_OPERATOR_EXCLUDED = "OPERATOR_EXCLUDED"
 REASON_NOT_APPROVED = "NOT_APPROVED"
 REASON_OPTIONAL_FIELD_BLANK = "OPTIONAL_PERSONALIZATION_FIELD_BLANK"
 REASON_WARNING = "WARNING"
+REASON_COPY_QUALITY_PREFIX = "COPY_QUALITY_"
+REASON_PROFILE_QUALITY_PREFIX = "PROFILE_QUALITY_"
 
 
 def _clean(value: object) -> str:
@@ -269,6 +277,32 @@ class CampaignAssemblyService:
                 blocking.append(CampaignAssemblyReason(REASON_MISSING_CTA, "Missing CTA."))
             if not _clean(row.mockup_path) or not os.path.isfile(os.path.abspath(row.mockup_path)):
                 blocking.append(CampaignAssemblyReason(REASON_MISSING_MOCKUP, "Rendered mockup file is missing."))
+        if prospect is not None and row is not None and resolved is not None:
+            copy_quality = assess_copy_quality(
+                prospect=prospect,
+                concept=getattr(resolved, "concept", None),
+                project=getattr(resolved, "project", None),
+                row=row,
+            )
+            for reason in copy_quality.reasons:
+                assembly_reason = CampaignAssemblyReason(
+                    f"{REASON_COPY_QUALITY_PREFIX}{reason.code}",
+                    reason.message,
+                )
+                if copy_quality.status == QUALITY_BLOCKED:
+                    blocking.append(assembly_reason)
+                elif copy_quality.status == QUALITY_WARNING:
+                    warnings.append(assembly_reason)
+            profile_quality = assess_profile_quality(prospect)
+            for reason in profile_quality.reasons:
+                assembly_reason = CampaignAssemblyReason(
+                    f"{REASON_PROFILE_QUALITY_PREFIX}{reason.code}",
+                    reason.message,
+                )
+                if profile_quality.status == QUALITY_BLOCKED:
+                    blocking.append(assembly_reason)
+                elif profile_quality.status == QUALITY_WARNING:
+                    warnings.append(assembly_reason)
         warnings.extend(CampaignAssemblyReason(REASON_WARNING, warning) for warning in eligibility.warnings)
         status = ASSEMBLY_STATUS_BLOCKED if blocking else (ASSEMBLY_STATUS_WARNING if warnings or eligibility.status == EXPORT_STATUS_WARNING else ASSEMBLY_STATUS_READY)
         return self._result_from_parts(prospect_id, status, prospect, row, resolved, tuple(blocking), tuple(warnings))

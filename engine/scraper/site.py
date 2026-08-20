@@ -73,6 +73,7 @@ class WebsiteScraper:
         self.logo_score = 0
         self.screenshot_path = None
         self.metadata = {}
+        self.capture_diagnostics = {}
         self.brand_colors = []
         self.last_data = None
 
@@ -107,14 +108,30 @@ class WebsiteScraper:
                     )
                     result = capture_screenshot(page, self.filename_base)
                     self.screenshot_path = result.path
+                    self.capture_diagnostics = {
+                        "status": "OK",
+                        "strategy_used": result.strategy_used,
+                        "retry_count": result.retries,
+                        "quality_reason": result.quality.reason or "",
+                    }
                     if config.DEBUG:
                         print(f"[DEBUG] Screenshot captured with strategy: {result.strategy_used} (score: {result.quality.score}, variance: {result.quality.variance})")
                 except ScreenshotValidationError as e:
                     print(f"[ERROR] Screenshot capture failed for {self.url}: {e}")
+                    self.screenshot_path = None
+                    reason = e.quality.reason if e.quality else "SCREENSHOT_CAPTURE_FAILURE"
+                    self.capture_diagnostics = {
+                        "status": "SCREENSHOT_FAILED",
+                        "reason": "SCREENSHOT_VALIDATION_FAILURE" if e.quality else "SCREENSHOT_CAPTURE_FAILURE",
+                        "quality_reason": reason or "",
+                        "attempts": list(getattr(e, "diagnostics", {}).get("attempts", []) or []),
+                    }
                     if config.DEBUG and e.quality:
                         print(f"  Diagnostics: {e.quality.diagnostics}")
-                    raise
-                self.brand_colors = extract_brand_colors(self.screenshot_path)
+                if self.screenshot_path:
+                    self.brand_colors = extract_brand_colors(self.screenshot_path)
+                else:
+                    self.brand_colors = []
             finally:
                 logger.info("Closing browser")
                 try:
@@ -355,6 +372,7 @@ class WebsiteScraper:
             "screenshot_path": self.screenshot_path,
             "asset_urls": self.asset_urls,
             "metadata": self.metadata,
+            "capture_diagnostics": dict(self.capture_diagnostics or {}),
         }
 
         _report(40, "Analyzing Brand", "analyze")

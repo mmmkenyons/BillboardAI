@@ -36,6 +36,7 @@ import gzip
 import json
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -64,6 +65,7 @@ logger = logging.getLogger(__name__)
 # Centralized bounds / constants (testable)
 # ---------------------------------------------------------------------------
 DEFAULT_TIMEOUT = 15.0           # seconds for a single resolver HTTP request
+DEFAULT_TOTAL_TIMEOUT = 45.0     # deterministic total resolver operation bound
 MAX_SITEMAP_DEPTH = 1            # sitemap-index recursion depth
 MAX_CHILD_SITEMAPS = 25          # child sitemap <urlset> fetches per index
 MAX_SITEMAP_URLS = 20000         # total distinct sitemap URLs consumed
@@ -592,6 +594,7 @@ class ProfileResolverService:
         max_candidates_verify: int = MAX_CANDIDATES_VERIFY,
         max_browser_links_scanned: int = MAX_BROWSER_LINKS_SCANNED,
         max_browser_candidate_verify: int = MAX_BROWSER_CANDIDATE_VERIFY,
+        total_timeout: float = DEFAULT_TOTAL_TIMEOUT,
     ) -> None:
         self._fetcher = fetcher or default_fetcher(timeout=timeout)
         self._browser_fetcher = browser_fetcher
@@ -604,6 +607,7 @@ class ProfileResolverService:
         self.max_candidates_verify = max_candidates_verify
         self.max_browser_links_scanned = max_browser_links_scanned
         self.max_browser_candidate_verify = max_browser_candidate_verify
+        self.total_timeout = max(0.001, float(total_timeout or DEFAULT_TOTAL_TIMEOUT))
 
     def _validate_input(self, person_name: str, parent_website: str):
         parent = parent_origin(parent_website)
@@ -624,6 +628,7 @@ class ProfileResolverService:
         if isinstance(_require, ResolutionResult):
             return _require
         person, parent = _require
+        started = time.monotonic()
 
         seen: Dict[str, ResolutionCandidate] = {}
         candidates: List[ResolutionCandidate] = []
@@ -649,7 +654,29 @@ class ProfileResolverService:
             "candidate_diagnostics": [],
             "final_decision_reason": "",
             "sitemap_diagnostics": [],
+            "bounded_limits": {
+                "http_request_timeout_seconds": self._timeout,
+                "max_child_sitemaps": self.max_child_sitemaps,
+                "max_sitemap_urls": self.max_sitemap_urls,
+                "max_directory_pages": self.max_directory_pages,
+                "max_homepage_links": self.max_homepage_links,
+                "max_links_scanned": self.max_links_scanned,
+                "max_candidates_verify": self.max_candidates_verify,
+                "max_browser_links_scanned": self.max_browser_links_scanned,
+                "max_browser_candidate_verify": self.max_browser_candidate_verify,
+                "total_timeout_seconds": self.total_timeout,
+            },
+            "timeout_reason": "",
         }
+
+        def _timed_out(stage: str) -> bool:
+            elapsed = time.monotonic() - started
+            diagnostics["elapsed_seconds"] = round(elapsed, 3)
+            if elapsed <= self.total_timeout:
+                return False
+            diagnostics["timeout_reason"] = f"TOTAL_RESOLUTION_TIMEOUT:{stage}"
+            diagnostics["final_decision_reason"] = "resolution timed out before completing all bounded stages"
+            return True
 
         def _add_candidate(c: ResolutionCandidate) -> None:
             diagnostics["candidate_count_before_filtering"] += 1
@@ -671,9 +698,13 @@ class ProfileResolverService:
 
         # Stage 1/2: robots-declared sitemaps + conventional sitemap endpoints.
         sitemap_urls = self._collect_sitemap_urls(parent)
+        if _timed_out("collect_sitemaps"):
+            return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", diagnostics=diagnostics)
         diagnostics["robots_fetched"] = getattr(self, "_last_robots_fetched", False)
         diagnostics["sitemap_urls_examined"] = sitemap_urls[:10]
         for sm in sitemap_urls:
+            if _timed_out("sitemap_discovery"):
+                return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=candidates, diagnostics=diagnostics)
             diagnostics["sitemap_count_attempted"] += 1
             sm_record: Dict[str, Any] = {"url": sm, "gzip_url": _looks_gzip_sitemap_url(sm)}
             try:
@@ -725,6 +756,8 @@ class ProfileResolverService:
         diagnostics["directory_pages_examined"] = self._discover_from_homepage(
             person, parent, candidates, _add_candidate
         )
+        if _timed_out("directory_discovery"):
+            return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=candidates, diagnostics=diagnostics)
 
         # Stage 5: verify the best-bounded candidates by fetching their pages.
         verified: List[ResolutionCandidate] = []
@@ -740,6 +773,8 @@ class ProfileResolverService:
             person,
             browser_verify_count,
         )
+        if _timed_out("candidate_verification"):
+            return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=verified or candidates, diagnostics=diagnostics)
 
         usable = [c for c in verified if self._is_usable_http_candidate(c, parent)]
         diagnostics["http_candidates_usable"] = len(usable)
@@ -748,6 +783,8 @@ class ProfileResolverService:
         if self._should_use_browser_fallback(diagnostics):
             before_browser = len(candidates)
             self._discover_from_browser(person, parent, candidates, seen, diagnostics, _add_candidate)
+            if _timed_out("browser_fallback"):
+                return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=verified or candidates, diagnostics=diagnostics)
             browser_added = candidates[before_browser:]
             if browser_added:
                 browser_verify_count = self._verify_ranked_candidates(
