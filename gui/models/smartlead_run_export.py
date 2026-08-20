@@ -10,7 +10,7 @@ carried on these records.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 # Export-time readiness statuses. These mirror the Smartlead handoff preflight
@@ -96,7 +96,9 @@ class SmartleadRunExportReceipt:
     excluded: int = 0
     with_public_url: int = 0
     local_fallback: int = 0
+
     fingerprint: str = ""
+    exported_statuses: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -128,6 +130,7 @@ class SmartleadRunExportReceipt:
             with_public_url=_int("with_public_url"),
             local_fallback=_int("local_fallback"),
             fingerprint=_clean(raw.get("fingerprint")),
+            exported_statuses={str(k): _clean(v) for k, v in dict(raw.get("exported_statuses") or {}).items()},
         )
 
 
@@ -158,3 +161,14 @@ class SmartleadRunExportResult:
     excluded: int = 0
     with_public_url: int = 0
     local_fallback: int = 0
+
+    def __post_init__(self) -> None:
+        if self.receipt is None or self.receipt.exported_statuses:
+            return
+        exported_statuses = {
+            row.prospect_id: row.status
+            for row in self.rows
+            if row.exportable and row.prospect_id
+        }
+        if exported_statuses:
+            object.__setattr__(self, "receipt", replace(self.receipt, exported_statuses=exported_statuses))

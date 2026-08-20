@@ -38,6 +38,7 @@ import logging
 import re
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import urljoin, urlparse
@@ -678,6 +679,62 @@ class ProfileResolverService:
             diagnostics["final_decision_reason"] = "resolution timed out before completing all bounded stages"
             return True
 
+        def _remaining_budget(stage: str) -> float:
+            remaining = self.total_timeout - (time.monotonic() - started)
+            diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            if remaining <= 0:
+                diagnostics["timeout_reason"] = f"TOTAL_RESOLUTION_TIMEOUT:{stage}"
+                diagnostics["final_decision_reason"] = "resolution timed out before starting next bounded operation"
+                raise TimeoutError(diagnostics["timeout_reason"])
+            return max(0.001, remaining)
+
+        def _fetch_with_budget(url: str, stage: str) -> str:
+            budget = _remaining_budget(stage)
+            diagnostics["timeout_stage"] = stage
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="profile-resolver-fetch")
+            future = executor.submit(self._fetcher, url)
+            try:
+                return future.result(timeout=budget)
+            except FutureTimeoutError as exc:
+                future.cancel()
+                diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+                diagnostics["timeout_reason"] = f"TOTAL_RESOLUTION_TIMEOUT:{stage}"
+                diagnostics["final_decision_reason"] = "blocking fetch exceeded remaining resolver budget"
+                raise TimeoutError(diagnostics["timeout_reason"]) from exc
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+        def _safe_fetch_with_budget(url: str, stage: str) -> Optional[str]:
+            if not is_safe_url(url):
+                return None
+            try:
+                return _fetch_with_budget(url, stage)
+            except TimeoutError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one fetch must not kill resolution
+                logger.debug("resolver fetch failed for %s: %s", url, exc)
+                return None
+
+        def _browser_fetch_with_budget(url: str, stage: str) -> BrowserHtmlResult:
+            budget = _remaining_budget(stage)
+            diagnostics["timeout_stage"] = stage
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="profile-resolver-browser")
+            future = executor.submit(self._browser_fetch, url)
+            try:
+                return future.result(timeout=budget)
+            except FutureTimeoutError as exc:
+                future.cancel()
+                diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+                diagnostics["timeout_reason"] = f"TOTAL_RESOLUTION_TIMEOUT:{stage}"
+                diagnostics["final_decision_reason"] = "blocking browser operation exceeded remaining resolver budget"
+                raise TimeoutError(diagnostics["timeout_reason"]) from exc
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+        def _timeout_result(stage: str, current: Optional[List[ResolutionCandidate]] = None) -> ResolutionResult:
+            _timed_out(stage)
+            return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=current or candidates, diagnostics=diagnostics)
+
         def _add_candidate(c: ResolutionCandidate) -> None:
             diagnostics["candidate_count_before_filtering"] += 1
             if not c.url:
@@ -697,18 +754,23 @@ class ProfileResolverService:
                 diagnostics["candidate_count_after_filtering"] = len(candidates)
 
         # Stage 1/2: robots-declared sitemaps + conventional sitemap endpoints.
-        sitemap_urls = self._collect_sitemap_urls(parent)
+        try:
+            sitemap_urls = self._collect_sitemap_urls(parent, fetcher=lambda url: _safe_fetch_with_budget(url, "collect_sitemaps"))
+        except TimeoutError:
+            return _timeout_result("collect_sitemaps")
         if _timed_out("collect_sitemaps"):
-            return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", diagnostics=diagnostics)
+            return _timeout_result("collect_sitemaps")
         diagnostics["robots_fetched"] = getattr(self, "_last_robots_fetched", False)
         diagnostics["sitemap_urls_examined"] = sitemap_urls[:10]
         for sm in sitemap_urls:
             if _timed_out("sitemap_discovery"):
-                return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=candidates, diagnostics=diagnostics)
+                return _timeout_result("sitemap_discovery", candidates)
             diagnostics["sitemap_count_attempted"] += 1
             sm_record: Dict[str, Any] = {"url": sm, "gzip_url": _looks_gzip_sitemap_url(sm)}
             try:
-                body = self._fetcher(sm)
+                body = _fetch_with_budget(sm, "sitemap_discovery")
+            except TimeoutError:
+                return _timeout_result("sitemap_discovery", candidates)
             except Exception as exc:  # noqa: BLE001 - one sitemap must not kill resolution
                 sm_record.update({
                     "fetch": SITEMAP_FETCH_FAILED,
@@ -732,7 +794,9 @@ class ProfileResolverService:
                         diagnostics["sitemap_urls_examined"].append(child)
                     child_record: Dict[str, Any] = {"url": child, "gzip_url": _looks_gzip_sitemap_url(child)}
                     try:
-                        child_body = self._fetcher(child)
+                        child_body = _fetch_with_budget(child, "sitemap_discovery")
+                    except TimeoutError:
+                        return _timeout_result("sitemap_discovery", candidates)
                     except Exception as exc:  # noqa: BLE001
                         child_record.update({
                             "fetch": SITEMAP_FETCH_FAILED,
@@ -753,11 +817,14 @@ class ProfileResolverService:
                 _append_sitemap_diagnostic(diagnostics, sm_record)
 
         # Stage 4: homepage + a bounded set of directory pages.
-        diagnostics["directory_pages_examined"] = self._discover_from_homepage(
-            person, parent, candidates, _add_candidate
-        )
+        try:
+            diagnostics["directory_pages_examined"] = self._discover_from_homepage(
+                person, parent, candidates, _add_candidate, fetcher=lambda url: _safe_fetch_with_budget(url, "directory_discovery")
+            )
+        except TimeoutError:
+            return _timeout_result("directory_discovery")
         if _timed_out("directory_discovery"):
-            return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=candidates, diagnostics=diagnostics)
+            return _timeout_result("directory_discovery")
 
         # Stage 5: verify the best-bounded candidates by fetching their pages.
         verified: List[ResolutionCandidate] = []
@@ -765,14 +832,19 @@ class ProfileResolverService:
         http_candidates = list(candidates)
         diagnostics["http_candidates_discovered"] = len(http_candidates)
         ranked = self._rank_candidates(http_candidates, person)
-        browser_verify_count = self._verify_ranked_candidates(
+        try:
+            browser_verify_count = self._verify_ranked_candidates(
             ranked,
             verified,
             diagnostics,
             parent,
             person,
             browser_verify_count,
+            fetcher=lambda url: _safe_fetch_with_budget(url, "candidate_verification"),
+            browser_fetcher=lambda url: _browser_fetch_with_budget(url, "candidate_browser_verification"),
         )
+        except TimeoutError:
+            return _timeout_result("candidate_verification", verified or candidates)
         if _timed_out("candidate_verification"):
             return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=verified or candidates, diagnostics=diagnostics)
 
@@ -782,19 +854,27 @@ class ProfileResolverService:
 
         if self._should_use_browser_fallback(diagnostics):
             before_browser = len(candidates)
-            self._discover_from_browser(person, parent, candidates, seen, diagnostics, _add_candidate)
+            try:
+                self._discover_from_browser(person, parent, candidates, seen, diagnostics, _add_candidate, browser_fetcher=lambda url: _browser_fetch_with_budget(url, "browser_fallback"))
+            except TimeoutError:
+                return _timeout_result("browser_fallback", verified or candidates)
             if _timed_out("browser_fallback"):
                 return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=verified or candidates, diagnostics=diagnostics)
             browser_added = candidates[before_browser:]
             if browser_added:
-                browser_verify_count = self._verify_ranked_candidates(
+                try:
+                    browser_verify_count = self._verify_ranked_candidates(
                     self._rank_candidates(browser_added, person),
                     verified,
                     diagnostics,
                     parent,
                     person,
                     browser_verify_count,
-                )
+                    fetcher=lambda url: _safe_fetch_with_budget(url, "candidate_verification"),
+                    browser_fetcher=lambda url: _browser_fetch_with_budget(url, "candidate_browser_verification"),
+                    )
+                except TimeoutError:
+                    return _timeout_result("candidate_verification", verified or candidates)
 
         result = self._decision(verified, person)
         diagnostics["final_decision_reason"] = result.evidence
@@ -809,9 +889,13 @@ class ProfileResolverService:
         parent: str,
         person: str,
         browser_verify_count: int,
+        *,
+        fetcher: Optional[Fetcher] = None,
+        browser_fetcher: Optional[Callable[[str], BrowserHtmlResult]] = None,
     ) -> int:
+        fetch = fetcher or (lambda url: _fetch_or_none(self._fetcher, url))
         for cand in ranked[: self.max_candidates_verify]:
-            body = _fetch_or_none(self._fetcher, cand.url)
+            body = fetch(cand.url)
             if body is not None:
                 cand.http_fetch_ok = True
             if body is None:
@@ -819,7 +903,7 @@ class ProfileResolverService:
                 cand.http_failure_reason = "candidate page fetch failed"
             if body is None and cand.method in {"browser_directory", "browser_homepage"} and self._browser_fetcher is not None:
                 try:
-                    rendered = self._browser_fetch(cand.url)
+                    rendered = (browser_fetcher or self._browser_fetch)(cand.url)
                 except Exception:  # noqa: BLE001
                     rendered = None
                 if rendered is not None and is_within_parent(rendered.final_url, parent):
@@ -844,7 +928,7 @@ class ProfileResolverService:
             if self._should_browser_verify_candidate(cand, person) and browser_verify_count < self.max_browser_candidate_verify:
                 browser_verify_count += 1
                 diagnostics["browser_candidate_verifications_attempted"] = browser_verify_count
-                self._try_browser_verify_candidate(cand, parent, person)
+                self._try_browser_verify_candidate(cand, parent, person, browser_fetcher=browser_fetcher)
             self._append_candidate_diagnostic(diagnostics, cand)
             verified.append(cand)
         return browser_verify_count
@@ -940,7 +1024,7 @@ class ProfileResolverService:
     # Discovery internals (bounded, deterministic)
     # ------------------------------------------------------------------
 
-    def _collect_sitemap_urls(self, parent: str) -> List[str]:
+    def _collect_sitemap_urls(self, parent: str, *, fetcher: Optional[Callable[[str], Optional[str]]] = None) -> List[str]:
         """robots-declared sitemaps + conventional endpoints (bounded)."""
         urls: List[str] = []
         seen = set()
@@ -954,7 +1038,8 @@ class ProfileResolverService:
                 seen.add(url)
                 urls.append(url)
 
-        robots = _fetch_or_none(self._fetcher, urljoin(parent, "/robots.txt"))
+        fetch = fetcher or (lambda url: _fetch_or_none(self._fetcher, url))
+        robots = fetch(urljoin(parent, "/robots.txt"))
         if robots is not None:
             self._last_robots_fetched = True
             for sm in parse_robots_sitemaps(robots):
@@ -1018,8 +1103,11 @@ class ProfileResolverService:
         parent: str,
         candidates: List[ResolutionCandidate],
         add: Callable[[ResolutionCandidate], None],
+        *,
+        fetcher: Optional[Callable[[str], Optional[str]]] = None,
     ) -> int:
-        home_body = _fetch_or_none(self._fetcher, parent)
+        fetch = fetcher or (lambda url: _fetch_or_none(self._fetcher, url))
+        home_body = fetch(parent)
         if home_body is None:
             return 0
         directory_pages: List[str] = []
@@ -1041,7 +1129,7 @@ class ProfileResolverService:
                 seen_dir.add(url)
                 directory_pages.append(url)
         for url in directory_pages[: self.max_directory_pages]:
-            body = _fetch_or_none(self._fetcher, url)
+            body = fetch(url)
             if body is None:
                 continue
             for profile_url in self._links_from_directory_page(body, parent, person):
@@ -1128,24 +1216,27 @@ class ProfileResolverService:
         seen: Dict[str, ResolutionCandidate],
         diagnostics: Dict[str, Any],
         add: Callable[[ResolutionCandidate], None],
+        *,
+        browser_fetcher: Optional[Callable[[str], BrowserHtmlResult]] = None,
     ) -> None:
         diagnostics["browser_fallback_attempted"] = True
         initial_candidate_count = len(candidates)
         try:
-            homepage = self._browser_fetch(parent)
+            fetch = browser_fetcher or self._browser_fetch
+            rendered_home = fetch(parent)
         except Exception as exc:  # noqa: BLE001
             diagnostics["browser_homepage_status"] = "FETCH_FAILED"
             diagnostics["browser_failure_reason"] = _bounded_failure_reason(exc)
             return
-        if not is_within_parent(homepage.final_url, parent):
+        if not is_within_parent(rendered_home.final_url, parent):
             diagnostics["browser_homepage_status"] = "REDIRECT_REJECTED"
-            diagnostics["browser_failure_reason"] = f"redirect outside parent domain: {homepage.final_url}"[:160]
+            diagnostics["browser_failure_reason"] = f"redirect outside parent domain: {rendered_home.final_url}"[:160]
             return
         diagnostics["browser_homepage_status"] = "OK"
-        directory_pages = self._browser_directory_pages(homepage.html, homepage.final_url, parent, person, diagnostics, add)
-        for url in directory_pages[: self.max_directory_pages]:
+        directory_pages = self._browser_directory_pages(rendered_home.html, rendered_home.final_url, parent, person, diagnostics, add)
+        for directory_url in directory_pages[: self.max_directory_pages]:
             try:
-                rendered = self._browser_fetch(url)
+                rendered = fetch(directory_url)
             except Exception as exc:  # noqa: BLE001
                 diagnostics["browser_failure_reason"] = _bounded_failure_reason(exc)
                 continue
@@ -1232,10 +1323,17 @@ class ProfileResolverService:
             return False
         return bool(name_in_url_slug(person, cand.url))
 
-    def _try_browser_verify_candidate(self, cand: ResolutionCandidate, parent: str, person: str) -> None:
+    def _try_browser_verify_candidate(
+        self,
+        cand: ResolutionCandidate,
+        parent: str,
+        person: str,
+        *,
+        browser_fetcher: Optional[Callable[[str], BrowserHtmlResult]] = None,
+    ) -> None:
         cand.browser_verification_attempted = True
         try:
-            rendered = self._browser_fetch(cand.url)
+            rendered = (browser_fetcher or self._browser_fetch)(cand.url)
         except Exception as exc:  # noqa: BLE001
             cand.browser_failure_reason = _bounded_failure_reason(exc)
             return

@@ -32,6 +32,8 @@ MAX_HEADLINE_CHARS = 42
 MAX_HEADLINE_WORDS = 7
 MAX_CTA_CHARS = 18
 
+UNRESOLVED_PERSON_STATUSES = {"AMBIGUOUS", "NOT_FOUND", "ERROR", "TIMEOUT"}
+
 
 @dataclass
 class PersonFact:
@@ -288,12 +290,15 @@ def extract_person_facts(data: Dict[str, Any]) -> PersonFacts:
     soup = BeautifulSoup(html, "lxml") if html else None
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     person_context = data.get("person_context") if isinstance(data.get("person_context"), dict) else {}
+    resolution_status = _clean(person_context.get("resolution_status") or "")
+    intended_person = bool(_clean(person_context.get("contact_name") or ""))
+    unresolved_person = intended_person and resolution_status in UNRESOLVED_PERSON_STATUSES
 
     facts = PersonFacts(
-        contact_name=_clean(person_context.get("contact_name") or ""),
-        professional_title=_clean(person_context.get("contact_title") or person_context.get("title") or ""),
+        contact_name="" if unresolved_person else _clean(person_context.get("contact_name") or ""),
+        professional_title="" if unresolved_person else _clean(person_context.get("contact_title") or person_context.get("title") or ""),
         company_name=_clean(data.get("company") or person_context.get("company_name") or ""),
-        profile_url=_clean(person_context.get("resolved_profile_url") or person_context.get("manual_profile_url") or data.get("url") or ""),
+        profile_url="" if unresolved_person else _clean(person_context.get("resolved_profile_url") or person_context.get("manual_profile_url") or data.get("url") or ""),
     )
     prov: Dict[str, List[str]] = {}
 
@@ -303,6 +308,20 @@ def extract_person_facts(data: Dict[str, Any]) -> PersonFacts:
         prov.setdefault(field_name, [])
         if evidence and evidence not in prov[field_name]:
             prov[field_name].append(evidence)
+
+    if unresolved_person:
+        facts.provenance = {
+            "unresolved_person_fallback": [
+                f"intended person identity unresolved: {resolution_status}",
+                "person-specific extraction suppressed for parent-site fallback",
+            ]
+        }
+        return facts
+
+    if facts.contact_name:
+        add("contact_name", facts.contact_name, _compact_evidence("prospect person context", facts.contact_name))
+    if facts.profile_url:
+        add("profile_url", facts.profile_url, _compact_evidence("resolved profile URL", facts.profile_url))
 
     for item in _jsonld_items(soup):
         if not _is_person_jsonld(item):
@@ -476,6 +495,13 @@ def personalize_scrape_data(data: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(data or {})
     bi = out.get("business_intel") if isinstance(out.get("business_intel"), dict) else {}
     result = choose_personalization(out, categories=bi.get("categories") or [])
+    if result.person_facts.provenance.get("unresolved_person_fallback"):
+        out.setdefault("generation_diagnostics", {})
+        if isinstance(out["generation_diagnostics"], dict):
+            out["generation_diagnostics"].update({
+                "intended_person_unresolved": True,
+                "person_specific_creative_suppressed": True,
+            })
     if result.person_facts.has_person_context():
         payload = result.to_dict()
         out["person_facts"] = payload["person_facts"]

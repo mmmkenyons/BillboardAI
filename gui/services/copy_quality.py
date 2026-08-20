@@ -38,6 +38,8 @@ UNSUPPORTED_SUPERLATIVE = "UNSUPPORTED_SUPERLATIVE"
 UNSUPPORTED_NUMERIC_CLAIM = "UNSUPPORTED_NUMERIC_CLAIM"
 PERSON_NAME_MISMATCH = "PERSON_NAME_MISMATCH"
 COMPANY_NAME_MISMATCH = "COMPANY_NAME_MISMATCH"
+MISSING_HEADLINE = "MISSING_HEADLINE"
+MISSING_CTA = "MISSING_CTA"
 
 _SUPERLATIVE_TERMS = (
     "fastest", "best", "#1", "number one", "top-rated", "top rated",
@@ -153,6 +155,11 @@ def assess_copy_quality(*, prospect: Any, concept: Any, project: Any, row: Any) 
 
     blocking: list[CopyQualityReason] = []
     warnings: list[CopyQualityReason] = []
+
+    if not headline:
+        blocking.append(CopyQualityReason(MISSING_HEADLINE, "Generated billboard creative is missing a headline."))
+    if row is not None and hasattr(row, "cta") and not cta:
+        blocking.append(CopyQualityReason(MISSING_CTA, "Generated billboard creative is missing a CTA."))
 
     if len(headline) > 72:
         warnings.append(CopyQualityReason(HEADLINE_TOO_LONG, "Headline is unusually long for outreach creative.", headline[:120]))

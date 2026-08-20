@@ -85,9 +85,62 @@ ROLE_SCREENSHOT = "SCREENSHOT"
 ROLE_ICON = "ICON"
 ROLE_OTHER = "OTHER"
 
+UNRESOLVED_PERSON_STATUSES = {"AMBIGUOUS", "NOT_FOUND", "ERROR", "TIMEOUT"}
+
 
 def _norm_text(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _clean_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _seo_title_like(value: str) -> bool:
+    text = _clean_text(value)
+    low = text.lower()
+    return bool(
+        any(sep in text for sep in (" | ", " - ", " – ", " — ", "::"))
+        or re.search(r"\bfind\s+.+\s+near\s+you\b", low)
+        or len(text.split()) > 9
+    )
+
+
+def _service_noun_from_context(company: str, categories: list[str], services: list[str], headline: str, ad_copy: str) -> str:
+    text = " ".join([company, headline, ad_copy, *categories, *services]).lower()
+    if "dent" in text:
+        return "Dentist"
+    if "roof" in text:
+        return "Roofing Team"
+    if "plumb" in text:
+        return "Plumber"
+    if "real estate" in text or "realtor" in text:
+        return "Real Estate Guide"
+    return "Local Team"
+
+
+def rewrite_seo_title_headline(headline: str, *, company: str = "", categories: list[str] | None = None, services: list[str] | None = None, ad_copy: str = "") -> tuple[str, bool]:
+    """Convert obvious page-title strings to concise, supported billboard copy.
+
+    This is deterministic and conservative: it only rewrites SEO/title-shaped
+    strings and uses business category/service context already present in the
+    scrape/profile rather than inventing comparative claims.
+    """
+    original = _clean_text(headline)
+    if not original or not _seo_title_like(original):
+        return original, False
+    cats = categories or []
+    svcs = services or []
+    noun = _service_noun_from_context(company, cats, svcs, original, ad_copy)
+    if noun == "Dentist":
+        return "Find Your Local Dentist", True
+    if noun == "Roofing Team":
+        return "Roof Repair Made Simple", True
+    if noun == "Plumber":
+        return "Local Plumbing Help", True
+    if noun == "Real Estate Guide":
+        return "Find Your Next Move", True
+    return f"Work With Your {noun}", True
 
 
 def _name_tokens(name: str) -> list[str]:
@@ -129,6 +182,12 @@ def classify_brand_assets(
     and explicit prospect contact context when available.
     """
     meta = metadata if isinstance(metadata, dict) else {}
+    person_context_raw = meta.get("person_context") if isinstance(meta.get("person_context"), dict) else {}
+    unresolved_person = bool(
+        contact_name
+        and str(person_context_raw.get("resolution_status") or "").strip() in UNRESOLVED_PERSON_STATUSES
+        and not str(person_context_raw.get("resolved_profile_url") or person_context_raw.get("manual_profile_url") or "").strip()
+    )
     title_text = " ".join(
         str(v or "")
         for v in (
@@ -138,7 +197,7 @@ def classify_brand_assets(
             (meta.get("twitter") or {}).get("twitter:title") if isinstance(meta.get("twitter"), dict) else "",
         )
     )
-    person_context = bool(contact_name and (_contains_full_name(title_text, contact_name) or _looks_like_person_profile_url(page_url)))
+    person_context = bool(contact_name and not unresolved_person and (_contains_full_name(title_text, contact_name) or _looks_like_person_profile_url(page_url)))
 
     diagnostics: list[dict[str, Any]] = []
     for asset in assets:
@@ -167,16 +226,16 @@ def classify_brand_assets(
             role = ROLE_GENERIC_HERO
             evidence.append("hero_header_text")
 
-        if contact_name and _contains_full_name(text, contact_name):
+        if not unresolved_person and contact_name and _contains_full_name(text, contact_name):
             score += 70
             evidence.append("source_path_or_dom_contains_full_contact_name")
-        if contact_name and _contains_full_name(title_text, contact_name):
+        if not unresolved_person and contact_name and _contains_full_name(title_text, contact_name):
             score += 20
             evidence.append("page_title_contains_contact_name")
-        if _looks_like_person_profile_url(page_url):
+        if not unresolved_person and _looks_like_person_profile_url(page_url):
             score += 15
             evidence.append("profile_page_url")
-        if any(word in norm.split() for word in ("agent", "profile", "headshot", "photo", "portrait", "person", "provider", "attorney", "advisor", "realtor", "owner")):
+        if not unresolved_person and any(word in norm.split() for word in ("agent", "profile", "headshot", "photo", "portrait", "person", "provider", "attorney", "advisor", "realtor", "owner")):
             score += 35
             evidence.append("person_role_text")
 
@@ -194,6 +253,11 @@ def classify_brand_assets(
         if role == ROLE_PROPERTY_LISTING:
             score = min(score, 25)
             evidence.append("property_images_not_person_focal")
+        if unresolved_person:
+            score = 0.0
+            if role in {ROLE_PERSON_PROFILE, ROLE_PERSON_HEADER}:
+                role = ROLE_GENERIC_HERO if asset.width >= 300 and asset.height >= 180 else ROLE_OTHER
+            evidence.append("unresolved_person_identity_suppressed")
         if score >= 95 and 0.65 <= aspect <= 1.35 and _quality_bucket(asset) != "too_small" and role != ROLE_PROPERTY_LISTING:
             role = ROLE_PERSON_PROFILE
         elif score >= 85 and role != ROLE_PROPERTY_LISTING and _quality_bucket(asset) != "too_small":
@@ -217,6 +281,8 @@ def classify_brand_assets(
     return {
         "person_oriented": bool(person_context),
         "target_contact_name": contact_name or "",
+        "intended_person_unresolved": bool(unresolved_person),
+        "person_specific_assets_suppressed": bool(unresolved_person),
         "candidate_count": len(assets),
         "candidates": diagnostics,
     }
@@ -572,6 +638,23 @@ class BrandProfileBuilder:
         certifications = [str(s) for s in bi.get("certifications") or []]
         guarantees = [str(s) for s in bi.get("guarantees") or []]
         years_in_business = str(bi.get("years_in_business") or "")
+
+        rewritten_headline, seo_rewritten = rewrite_seo_title_headline(
+            ad_copy or headline,
+            company=company,
+            categories=categories,
+            services=services,
+            ad_copy=ad_copy,
+        )
+        if seo_rewritten:
+            ad_copy = rewritten_headline
+            source_metadata.setdefault("copy_generation_diagnostics", {})
+            if isinstance(source_metadata["copy_generation_diagnostics"], dict):
+                source_metadata["copy_generation_diagnostics"].update({
+                    "seo_title_rewritten": True,
+                    "seo_title_source": (data.get("ad_copy") or data.get("headline") or "")[:120],
+                    "seo_title_rewrite": rewritten_headline,
+                })
 
         return BrandProfile(
             version=BRAND_PROFILE_VERSION,

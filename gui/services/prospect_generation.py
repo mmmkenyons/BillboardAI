@@ -260,6 +260,9 @@ class ProspectGenerationService:
         if job.placement_id:
             project.metadata["placement_id"] = job.placement_id
         if isinstance(result.extra, dict):
+            brand_profile = result.extra.get("brand_profile")
+            if isinstance(brand_profile, dict):
+                project.brand_profile = dict(brand_profile)
             render_context = result.extra.get("render_context")
             if isinstance(render_context, dict):
                 project.set_render_context(dict(render_context))

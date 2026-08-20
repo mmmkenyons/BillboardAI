@@ -200,6 +200,7 @@ class SmartleadRunExportService:
             self._write_export_csv(csv_path, columns, csv_rows)
 
         fingerprint = self._fingerprint(exportable, mapping)
+        exported_statuses = {row.prospect_id: row.status for row in exportable if row.prospect_id}
         receipt = SmartleadRunExportReceipt(
             campaign_run_id=record.campaign_run_id,
             package_id=_clean(record.package_id),
@@ -217,6 +218,7 @@ class SmartleadRunExportService:
             with_public_url=counts["with_public_url"],
             local_fallback=counts["local_fallback"],
             fingerprint=fingerprint,
+            exported_statuses=exported_statuses,
         )
         self._write_export_manifest(manifest_path, receipt, rows, columns, mapping)
         self._persist_receipt(record, receipt)

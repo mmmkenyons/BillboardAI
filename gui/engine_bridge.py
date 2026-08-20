@@ -110,6 +110,11 @@ def build_render_context(
     return ctx.to_dict()
 
 
+def build_brand_profile(data: dict[str, Any]) -> dict[str, Any]:
+    """Build the existing serializable BrandProfile snapshot from scraper data."""
+    return BrandProfileBuilder.from_scrape_data(data if isinstance(data, dict) else {}).to_dict()
+
+
 def render_from_context(
     context: dict[str, Any] | RenderContext,
     output_path: str,
@@ -174,6 +179,7 @@ def generate(
                 data["person_context"] = dict(person_context)
 
         template_name = request.template or "contractor"
+        brand_profile_snapshot = build_brand_profile(data if isinstance(data, dict) else {})
         render_context = build_render_context(
             data,
             template=template_name,
@@ -219,6 +225,7 @@ def generate(
         result.extra = {
             "template": ctx_obj.template,
             "render_context": ctx_obj.to_dict(),
+            "brand_profile": brand_profile_snapshot,
             "hero_path": ctx_obj.hero_image,
             "screenshot_path": ctx_obj.background_image,
             "brand_colors": list(ctx_obj.brand_colors or []),
