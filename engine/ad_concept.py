@@ -122,6 +122,10 @@ class AdConcept:
 
     source_strategy: Optional[MessageStrategy] = None
 
+    person_facts: Dict[str, Any] = field(default_factory=dict)
+    personalization_angle: str = ""
+    personalization_basis: List[str] = field(default_factory=list)
+
     # ------------------------------------------------------------------
     # Serialization (forward-compatible, same pattern as BrandProfile)
     # ------------------------------------------------------------------
@@ -154,6 +158,9 @@ class AdConcept:
             "source_strategy": (
                 self.source_strategy.to_dict() if self.source_strategy else None
             ),
+            "person_facts": dict(self.person_facts),
+            "personalization_angle": self.personalization_angle,
+            "personalization_basis": list(self.personalization_basis),
         }
 
     @classmethod
@@ -227,6 +234,11 @@ class AdConcept:
             except Exception:
                 source_strategy = None
 
+        person_facts_raw = data.get("person_facts")
+        person_facts = dict(person_facts_raw) if isinstance(person_facts_raw, dict) else {}
+        personalization_basis_raw = data.get("personalization_basis")
+        personalization_basis = [str(v) for v in personalization_basis_raw] if isinstance(personalization_basis_raw, list) else []
+
         return cls(
             concept_id=concept_id,
             composition_family=composition_family,
@@ -247,6 +259,9 @@ class AdConcept:
             score=score,
             confidence=confidence,
             source_strategy=source_strategy,
+            person_facts=person_facts,
+            personalization_angle=_str("personalization_angle"),
+            personalization_basis=personalization_basis,
         )
 
 
@@ -798,13 +813,16 @@ def _build_concept(
     confidence = _compute_concept_confidence(strategy, family, logo, hero)
     rationale = _build_rationale(strategy, family, logo, hero, proof)
 
+    headline = profile.personalized_headline or strategy.primary_message
+    cta = profile.personalized_cta or strategy.cta
+
     return AdConcept(
         concept_id="",
         composition_family=family,
         strategy_type=strategy.strategy_type,
-        headline=strategy.primary_message,
+        headline=headline,
         supporting_proof=list(proof),
-        cta=strategy.cta,
+        cta=cta,
         logo_role=logo_role,
         hero_role=hero_role,
         headline_role=roles["headline"],
@@ -818,6 +836,9 @@ def _build_concept(
         score=score,
         confidence=confidence,
         source_strategy=strategy,
+        person_facts=profile.person_facts.to_dict(),
+        personalization_angle=profile.personalization_angle,
+        personalization_basis=list(profile.personalization_basis),
     )
 
 

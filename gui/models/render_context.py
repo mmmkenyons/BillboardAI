@@ -218,7 +218,7 @@ class RenderContext:
 
         primary = theme.get("primary_color") or "#222222"
 
-        cta = theme.get("cta_text") or "Learn More"
+        cta = profile.personalized_cta or theme.get("cta_text") or "Learn More"
         font_family = theme.get("font_family") or "arial.ttf"
         layout_style = theme.get("layout_style") or "classic"
 
@@ -230,7 +230,7 @@ class RenderContext:
         return cls(
             version=RENDER_CONTEXT_VERSION,
             company_name=str(profile.company_name or ""),
-            headline=str(profile.ad_copy or profile.headline or ""),
+            headline=str(profile.personalized_headline or profile.ad_copy or profile.headline or ""),
             cta=str(cta or ""),
             subtitle=str(subtitle or ""),
             template=template_name,
@@ -252,7 +252,15 @@ class RenderContext:
             source_url=str(profile.website or ""),
             brand_colors=[str(c) for c in brand_colors],
             scene_template="cart_corral",
-            opportunity_context={"asset_selection": asset_selection_diagnostics},
+            opportunity_context={
+                "asset_selection": asset_selection_diagnostics,
+                "person_facts": profile.person_facts.to_dict(),
+                "personalization_angle": profile.personalization_angle,
+                "personalization_basis": list(profile.personalization_basis),
+                "personalized_headline": profile.personalized_headline,
+                "personalized_cta": profile.personalized_cta,
+                "profile_summary": profile.profile_summary,
+            },
         )
 
     @classmethod

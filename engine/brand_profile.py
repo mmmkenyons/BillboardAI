@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 import os
 import re
 
+from .person_personalization import PersonFacts, choose_personalization
+
 
 # ---------------------------------------------------------------------------
 # BrandAsset (Sprint 2A — unchanged)
@@ -277,6 +279,15 @@ class BrandProfile:
     guarantees: List[str] = field(default_factory=list)
     years_in_business: str = ""
 
+    # --- Person-aware personalization (Sprint 5AB) ---
+    # Source facts are evidence-backed; derived/generated copy lives separately.
+    person_facts: PersonFacts = field(default_factory=PersonFacts)
+    personalization_angle: str = ""
+    personalization_basis: List[str] = field(default_factory=list)
+    personalized_headline: str = ""
+    personalized_cta: str = ""
+    profile_summary: str = ""
+
     # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
@@ -315,6 +326,12 @@ class BrandProfile:
             "certifications": list(self.certifications),
             "guarantees": list(self.guarantees),
             "years_in_business": self.years_in_business,
+            "person_facts": self.person_facts.to_dict(),
+            "personalization_angle": self.personalization_angle,
+            "personalization_basis": list(self.personalization_basis),
+            "personalized_headline": self.personalized_headline,
+            "personalized_cta": self.personalized_cta,
+            "profile_summary": self.profile_summary,
         }
 
     @classmethod
@@ -398,6 +415,12 @@ class BrandProfile:
             certifications=_list_str("certifications"),
             guarantees=_list_str("guarantees"),
             years_in_business=_str("years_in_business"),
+            person_facts=PersonFacts.from_dict(raw.get("person_facts")),
+            personalization_angle=_str("personalization_angle"),
+            personalization_basis=_list_str("personalization_basis"),
+            personalized_headline=_str("personalized_headline"),
+            personalized_cta=_str("personalized_cta"),
+            profile_summary=_str("profile_summary"),
         )
 
 
@@ -485,6 +508,15 @@ class BrandProfileBuilder:
         if contact_name:
             source_metadata.setdefault("person_context", person_context)
 
+        # --- Person-aware personalization (Sprint 5AB) ---
+        personalization = choose_personalization(data)
+        if personalization.person_facts.has_person_context():
+            source_metadata.setdefault("person_facts", personalization.person_facts.to_dict())
+            source_metadata.setdefault(
+                "personalization",
+                personalization.to_dict(),
+            )
+
         asset_diagnostics = classify_brand_assets(
             assets,
             contact_name=contact_name,
@@ -566,6 +598,12 @@ class BrandProfileBuilder:
             certifications=certifications,
             guarantees=guarantees,
             years_in_business=years_in_business,
+            person_facts=personalization.person_facts,
+            personalization_angle=personalization.personalization_angle,
+            personalization_basis=personalization.personalization_basis,
+            personalized_headline=personalization.headline,
+            personalized_cta=personalization.cta,
+            profile_summary=personalization.profile_summary,
         )
 
     @staticmethod
