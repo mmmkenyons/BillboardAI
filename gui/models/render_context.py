@@ -158,6 +158,9 @@ class RenderContext:
     cta: str = ""
     subtitle: str = ""
     template: str = "contractor"
+    selected_phone: str = ""
+    business_classification: str = ""
+    location: str = ""
 
     # --- Assets (prefer project-local paths after ingest) ---
     logo_image: str = ""
@@ -236,6 +239,8 @@ class RenderContext:
         primary = theme.get("primary_color") or "#222222"
 
         cta = profile.personalized_cta or theme.get("cta_text") or "Learn More"
+        if profile.phone and not profile.personalized_cta:
+            cta = f"Call {profile.phone}"
         font_family = theme.get("font_family") or "arial.ttf"
         layout_style = theme.get("layout_style") or "classic"
 
@@ -244,6 +249,12 @@ class RenderContext:
         if subtitle and subtitle == profile.headline:
             subtitle = ""
 
+        canonical = profile.source_metadata.get("canonical_prospect_intelligence") if isinstance(profile.source_metadata, dict) else {}
+        canonical = canonical if isinstance(canonical, dict) else {}
+        classification = canonical.get("classification") if isinstance(canonical.get("classification"), dict) else {}
+        selected_phone = canonical.get("selected_phone") if isinstance(canonical.get("selected_phone"), dict) else {}
+        location_ctx = canonical.get("location") if isinstance(canonical.get("location"), dict) else {}
+
         return cls(
             version=RENDER_CONTEXT_VERSION,
             company_name=str(profile.company_name or ""),
@@ -251,6 +262,9 @@ class RenderContext:
             cta=str(cta or ""),
             subtitle=str(subtitle or ""),
             template=template_name,
+            selected_phone=str(profile.phone or selected_phone.get("phone") or ""),
+            business_classification=str(classification.get("label") or (profile.categories[0] if profile.categories else "")),
+            location=str(profile.location or location_ctx.get("label") or ""),
             logo_image=str(logo_path or ""),
             hero_image=str(hero_path or ""),
             background_image=str(background_path or hero_path or ""),
@@ -277,6 +291,13 @@ class RenderContext:
                 "personalized_headline": profile.personalized_headline,
                 "personalized_cta": profile.personalized_cta,
                 "profile_summary": profile.profile_summary,
+                "canonical_prospect_intelligence": canonical,
+                "creative_company_name_source": canonical.get("company_name", {}).get("source_field") if isinstance(canonical.get("company_name"), dict) else "",
+                "creative_phone_source": selected_phone.get("source_field", ""),
+                "business_classification_source": classification.get("basis", ""),
+                "website_enrichment_status": profile.source_metadata.get("website_enrichment_status", ""),
+                "canonical_fallback_used": bool(profile.source_metadata.get("canonical_fallback_used", False)),
+                "canonical_fields_used": list(profile.source_metadata.get("canonical_fields_used") or []),
             },
         )
 
@@ -381,6 +402,9 @@ class RenderContext:
             cta=str(cta or ""),
             subtitle=str(subtitle or ""),
             template=str(template),
+            selected_phone=str(raw.get("selected_phone") or ""),
+            business_classification=str(raw.get("business_classification") or ""),
+            location=str(raw.get("location") or ""),
             logo_image=str(raw.get("logo_image") or ""),
             hero_image=str(raw.get("hero_image") or ""),
             background_image=str(raw.get("background_image") or ""),

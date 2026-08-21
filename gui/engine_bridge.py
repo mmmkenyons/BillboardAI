@@ -27,6 +27,7 @@ from engine.scraper.site import WebsiteScraper, ScreenshotValidationError
 from gui.models.mockup_request import MockupRequest
 from gui.models.mockup_result import MockupResult
 from gui.models.render_context import RenderContext, ensure_render_context
+from gui.services.canonical_prospect_intelligence import merge_canonical_with_scrape
 
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,54 @@ def build_brand_profile(data: dict[str, Any]) -> dict[str, Any]:
     return BrandProfileBuilder.from_scrape_data(data if isinstance(data, dict) else {}).to_dict()
 
 
+def _canonical_fallback_data(request: MockupRequest, status: str) -> dict[str, Any]:
+    canonical = request.options.get("canonical_prospect_intelligence") if isinstance(request.options, dict) else {}
+    canonical = dict(canonical) if isinstance(canonical, dict) else {}
+    classification = canonical.get("classification") if isinstance(canonical.get("classification"), dict) else {}
+    selected_phone = canonical.get("selected_phone") if isinstance(canonical.get("selected_phone"), dict) else {}
+    location = canonical.get("location") if isinstance(canonical.get("location"), dict) else {}
+    contact = canonical.get("contact") if isinstance(canonical.get("contact"), dict) else {}
+    label = str(classification.get("label") or "")
+    keywords = [str(k) for k in classification.get("keywords") or [] if str(k).strip()]
+    services = ([label] if label else []) + [k for k in keywords if k != label]
+    return {
+        "url": request.url or "",
+        "company": str(canonical.get("display_company_name") or canonical.get("legal_company_name") or ""),
+        "headline": label,
+        "ad_copy": label,
+        "brand_colors": [],
+        "metadata": {
+            "canonical_prospect_intelligence": canonical,
+            "website_enrichment_status": status,
+            "canonical_fallback_used": True,
+            "canonical_fields_used": list(canonical.get("canonical_fields_used") or []),
+            "description": label,
+        },
+        "business_intel": {
+            "phone": str(selected_phone.get("phone") or ""),
+            "location": str(location.get("label") or ""),
+            "services": services,
+            "categories": [label] if label else [],
+            "differentiators": [],
+            "trust_signals": [],
+            "awards": [],
+            "certifications": [],
+            "guarantees": [],
+            "years_in_business": "",
+        },
+        "person_context": contact,
+    }
+
+
+def _has_canonical_fallback(request: MockupRequest) -> bool:
+    if not isinstance(request.options, dict) or not request.options.get("allow_canonical_fallback"):
+        return False
+    canonical = request.options.get("canonical_prospect_intelligence")
+    if not isinstance(canonical, dict):
+        return False
+    return bool(canonical.get("display_company_name") or canonical.get("legal_company_name"))
+
+
 def render_from_context(
     context: dict[str, Any] | RenderContext,
     output_path: str,
@@ -160,23 +209,42 @@ def generate(
         logger.info("Starting generation for %s → %s", request.url, request.output_path)
         _report(progress_callback, 0, "Starting...", "start")
 
-        scraper = WebsiteScraper(request.url)
-        try:
-            data = scraper.run(progress_callback=progress_callback)
-        except ScreenshotValidationError as e:
-            result.success = False
-            result.message = f"Unable to capture a usable screenshot from this website. {str(e)}"
-            result.capture_error = str(e)
-            result.warnings.append("Screenshot validation failed - invalid/blank capture (uniform color or low variance). Try a different site or enable debug for diagnostics.")
-            logger.warning("ScreenshotValidationError: %s", e)
-            result.elapsed_time = time.time() - start
-            return result
+        scraper = None
+        data: dict[str, Any]
+        if request.url:
+            scraper = WebsiteScraper(request.url)
+            try:
+                data = scraper.run(progress_callback=progress_callback)
+            except ScreenshotValidationError as e:
+                if not _has_canonical_fallback(request):
+                    result.success = False
+                    result.message = f"Unable to capture a usable screenshot from this website. {str(e)}"
+                    result.capture_error = str(e)
+                    result.warnings.append("Screenshot validation failed - invalid/blank capture (uniform color or low variance). Try a different site or enable debug for diagnostics.")
+                    logger.warning("ScreenshotValidationError: %s", e)
+                    result.elapsed_time = time.time() - start
+                    return result
+                result.capture_error = str(e)
+                result.warnings.append(str(e))
+                data = _canonical_fallback_data(request, "screenshot_validation_failed_canonical_fallback")
+            except Exception as e:  # noqa: BLE001 - canonical fallback keeps safe generation available
+                if not _has_canonical_fallback(request):
+                    raise
+                result.warnings.append(str(e))
+                data = _canonical_fallback_data(request, "website_fetch_failed_canonical_fallback")
+        else:
+            if not _has_canonical_fallback(request):
+                raise ValueError("url is required unless canonical prospect intelligence fallback is available")
+            data = _canonical_fallback_data(request, "not_attempted_no_website")
 
         if isinstance(data, dict) and isinstance(request.options, dict):
             person_context = request.options.get("person_context")
             if isinstance(person_context, dict) and person_context:
                 data = dict(data)
                 data["person_context"] = dict(person_context)
+            canonical = request.options.get("canonical_prospect_intelligence")
+            if isinstance(canonical, dict) and canonical:
+                data = merge_canonical_with_scrape(dict(data), dict(canonical))
 
         template_name = request.template or "contractor"
         brand_profile_snapshot = build_brand_profile(data if isinstance(data, dict) else {})
@@ -203,7 +271,7 @@ def generate(
 
         # If engine quality gate historically swapped templates, keep request
         # template as source of truth for the contract (GUI chose it).
-        if isinstance(scraper.last_data, dict):
+        if scraper is not None and isinstance(scraper.last_data, dict):
             # Merge any quality fields from analysis into context.
             render_context = dict(render_context)
             if scraper.last_data.get("quality_score") is not None:
@@ -233,7 +301,7 @@ def generate(
             "hero_path": ctx_obj.hero_image,
             "screenshot_path": ctx_obj.background_image,
             "brand_colors": list(ctx_obj.brand_colors or []),
-            "filename_base": getattr(scraper, "filename_base", ""),
+            "filename_base": getattr(scraper, "filename_base", "") if scraper is not None else "",
         }
         _report(progress_callback, 100, "Complete", "done")
         logger.info("Generation finished: %s", rendered_path)

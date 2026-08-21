@@ -604,6 +604,17 @@ class Prospect:
                 return contact
         return self.contacts[0] if self.contacts else None
 
+    @property
+    def preferred_display_company_name(self) -> str:
+        """Creative-facing company name without mutating legal/source identity."""
+        meta = self.metadata if isinstance(self.metadata, dict) else {}
+        return (
+            collapse_whitespace(self.company_name_for_ads)
+            or collapse_whitespace(str(meta.get("verified_brand_display_name") or ""))
+            or collapse_whitespace(str(meta.get("normalized_source_company_name") or ""))
+            or collapse_whitespace(self.company_name)
+        )
+
     def is_ready_for_research(self) -> bool:
         """True when a usable website/domain exists (Sprint 5A rule)."""
         return bool(self.domain or self.website)

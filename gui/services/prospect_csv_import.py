@@ -52,6 +52,11 @@ from gui.models.prospect import (
     normalize_website,
 )
 from gui.models.prospect_store import ProspectStore
+from gui.services.canonical_prospect_intelligence import (
+    business_classification,
+    preferred_display_company_name,
+    select_creative_phone as _select_canonical_creative_phone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -319,42 +324,18 @@ def normalize_keyword_list(value: Any) -> List[str]:
 
 def select_creative_company_name(prospect: Prospect) -> str:
     """Deterministic creative company-name precedence."""
-    meta = prospect.metadata if isinstance(prospect.metadata, dict) else {}
-    return (
-        _clean_import_value(prospect.company_name_for_ads)
-        or _clean_import_value(meta.get("verified_brand_display_name"))
-        or _clean_import_value(meta.get("normalized_source_company_name"))
-        or _clean_import_value(prospect.company_name)
-    )
+    return preferred_display_company_name(prospect)
 
 
 def select_creative_phone(prospect: Prospect) -> Dict[str, str]:
     """Prefer business/company phone for billboard creative; document fallback."""
-    candidates = (
-        ("company_phone", prospect.company_phone, "company phone preferred for billboard creative"),
-        ("phone", prospect.phone if not prospect.mobile_phone or prospect.phone != prospect.mobile_phone else "", "legacy business phone fallback"),
-        ("work_direct_phone", prospect.work_direct_phone, "no company phone; work direct fallback"),
-        ("other_phone", prospect.other_phone, "no company/work phone; other phone fallback"),
-        ("mobile_phone", prospect.mobile_phone, "no business phone available; mobile fallback"),
-    )
-    for field_name, value, reason in candidates:
-        normalized = normalize_phone(value)
-        if normalized:
-            return {"phone": normalized, "source_field": field_name, "reason": reason}
-    return {"phone": "", "source_field": "", "reason": "no usable phone supplied"}
+    selected = _select_canonical_creative_phone(prospect)
+    return {str(k): v for k, v in selected.items()}
 
 
 def classification_evidence(prospect: Prospect) -> Dict[str, Any]:
     """NAICS > keywords > industry > website-derived > fallback."""
-    if prospect.naics_codes:
-        return {"basis": "naics_codes", "value": list(prospect.naics_codes)}
-    if prospect.company_keywords:
-        return {"basis": "company_keywords", "value": list(prospect.company_keywords)}
-    if prospect.industry:
-        return {"basis": "industry", "value": prospect.industry}
-    if prospect.category:
-        return {"basis": "website_or_category", "value": prospect.category}
-    return {"basis": "generic_fallback", "value": ""}
+    return business_classification(prospect)
 
 
 # ---------------------------------------------------------------------------

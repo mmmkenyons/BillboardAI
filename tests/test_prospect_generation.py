@@ -58,6 +58,15 @@ def test_eligibility_missing_website(tmp_path) -> None:
     prospect = _seed_prospect(prospect_store, website="")
     service = ProspectGenerationService(prospect_store=prospect_store, job_store=job_store, project_store=project_store)
     result = service.check_eligibility(prospect.prospect_id)
+    assert result.eligible is True
+    assert "Missing website" not in result.reasons
+
+
+def test_eligibility_missing_website_and_no_canonical_intelligence(tmp_path) -> None:
+    prospect_store, job_store, project_store = _stores(tmp_path)
+    prospect = _seed_prospect(prospect_store, website="", category="")
+    service = ProspectGenerationService(prospect_store=prospect_store, job_store=job_store, project_store=project_store)
+    result = service.check_eligibility(prospect.prospect_id)
     assert result.eligible is False
     assert "Missing website" in result.reasons
 

@@ -278,7 +278,11 @@ def main() -> int:
     check("subsequent low-value inventory bounded after no target", large_no_target_bounded, counts, large_no_target_end_reason or large_no_target.status)
 
     huge_urls = [f"{PARENT}/agents/person-{i}" for i in range(9999)] + [f"{PARENT}/agents/alex-kahn"] + [f"{PARENT}/agents/person-extra-{i}" for i in range(10000)]
-    huge = resolver({"/robots.txt": f"User-agent: *\nSitemap: {PARENT}/sitemaps/agent-pages.xml\n", "/sitemaps/agent-pages.xml": sitemap(*huge_urls), "/agents/alex-kahn": profile()}, total_timeout=10.0).resolve("Alex Kahn", PARENT)
+    huge = resolver(
+        {"/robots.txt": f"User-agent: *\nSitemap: {PARENT}/sitemaps/agent-pages.xml\n", "/sitemaps/agent-pages.xml": sitemap(*huge_urls), "/agents/alex-kahn": profile()},
+        total_timeout=10.0,
+        monotonic_clock=lambda: 0.0,
+    ).resolve("Alex Kahn", PARENT)
     check("large legitimate person sitemap with target works", huge.status == RESOLUTION_RESOLVED and huge.resolved_url.endswith("/agents/alex-kahn"), counts, huge.status)
 
     missing_site = LargeSite()

@@ -26,6 +26,11 @@ from gui.models.prospect_generation import (
 from gui.models.prospect_generation_store import ProspectGenerationStore
 from gui.models.prospect_store import ProspectStore
 from gui.services.profile_resolver import effective_scrape_url
+from gui.services.canonical_prospect_intelligence import (
+    business_classification,
+    canonical_context,
+    has_generation_intelligence,
+)
 from gui.services.prospect_opportunity_workspace import ProspectOpportunityWorkspaceService
 
 
@@ -101,10 +106,13 @@ class ProspectGenerationService:
             return GenerationEligibility(False, ["Prospect not found"])
         website = (prospect.website or "").strip()
         reasons: list[str] = []
+        canonical_usable = has_generation_intelligence(prospect)
         if not website:
-            reasons.append("Missing website")
+            if not canonical_usable:
+                reasons.append("Missing website")
         elif not is_valid_website(website):
-            reasons.append("Invalid website")
+            if not canonical_usable:
+                reasons.append("Invalid website")
         resolved_template = self.resolve_template(prospect, explicit_template=template)
         if not resolved_template:
             reasons.append("No supported template")
@@ -121,8 +129,19 @@ class ProspectGenerationService:
         if explicit_template:
             explicit = explicit_template.strip().lower()
             return explicit if explicit in SUPPORTED_TEMPLATES else ""
-        category = (prospect.category or "").strip().lower()
-        return CATEGORY_TEMPLATE_MAP.get(category, "")
+        evidence = business_classification(prospect)
+        candidates = [
+            prospect.category,
+            str(evidence.get("label") or ""),
+            str(evidence.get("value") or ""),
+            " ".join(str(k) for k in evidence.get("keywords") or []),
+            prospect.industry,
+        ]
+        source = " ".join(c for c in candidates if c).lower()
+        for key, template in CATEGORY_TEMPLATE_MAP.items():
+            if key in source:
+                return template
+        return ""
 
     def create_job(
         self,
@@ -161,6 +180,8 @@ class ProspectGenerationService:
             opportunity_context=opportunity_context,
             metadata={
                 "company_name": prospect.company_name,
+                "creative_company_name": prospect.preferred_display_company_name,
+                "canonical_fallback_eligible": has_generation_intelligence(prospect),
                 "opportunity_label": self._format_opportunity_label(opportunity_context),
             },
         )
@@ -220,6 +241,7 @@ class ProspectGenerationService:
         project = self._ensure_project(job)
         prospect = self._prospect_store.get(job.prospect_id)
         person_context = {}
+        canonical = {}
         if prospect is not None:
             person_context = {
                 "contact_name": prospect.contact_name,
@@ -229,13 +251,20 @@ class ProspectGenerationService:
                 "resolution_status": prospect.resolution_status,
                 "resolution_confidence": prospect.resolution_confidence,
             }
+            canonical = canonical_context(prospect)
         output_path = os.path.join(project.image_path, project.next_concept_filename())
+        options = {}
+        if person_context:
+            options["person_context"] = person_context
+        if canonical:
+            options["canonical_prospect_intelligence"] = canonical
+            options["allow_canonical_fallback"] = True
         request = MockupRequest(
             url=job.website,
             template=job.template,
             output_folder=project.root_dir,
             output_path=output_path,
-            options={"person_context": person_context} if person_context else {},
+            options=options,
             opportunity_context=job.opportunity_context,
         )
         return self._generate(request)
