@@ -16,6 +16,7 @@ from gui.models.prospect import (
     RESOLUTION_ERROR,
     RESOLUTION_NOT_FOUND,
     RESOLUTION_RESOLVED,
+    RESOLUTION_TIMEOUT,
     CONFIDENCE_HIGH,
     CONFIDENCE_MEDIUM,
 )
@@ -208,7 +209,7 @@ def assess_profile_quality(prospect: Any) -> CopyQualityAssessment:
     resolved_url = _clean(getattr(prospect, "resolved_profile_url", ""))
     if has_manual or (status == RESOLUTION_RESOLVED and resolved_url and confidence in {CONFIDENCE_HIGH, CONFIDENCE_MEDIUM}):
         return CopyQualityAssessment(QUALITY_PASS, ())
-    if status not in {RESOLUTION_NOT_FOUND, RESOLUTION_AMBIGUOUS, RESOLUTION_ERROR}:
+    if status not in {RESOLUTION_NOT_FOUND, RESOLUTION_AMBIGUOUS, RESOLUTION_TIMEOUT, RESOLUTION_ERROR}:
         return CopyQualityAssessment(QUALITY_PASS, ())
     return CopyQualityAssessment(
         QUALITY_WARNING,

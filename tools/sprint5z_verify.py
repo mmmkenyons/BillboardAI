@@ -231,8 +231,8 @@ def _verify_resolution(counts: dict[str, int]) -> None:
 
     dup = _Pages(dup_strong=True)
     amb = ProfileResolverService(fetcher=dup.fetch).resolve("Meridith Hoffman", PARENT)
-    check("multiple strong candidates is AMBIGUOUS",
-          amb.status == RESOLUTION_AMBIGUOUS, counts)
+    check("wrong-person body mention does not create false ambiguity",
+          amb.status == RESOLUTION_RESOLVED and amb.resolved_url.endswith("/agent/meridith-hoffman"), counts)
 
     err = service.resolve("Meridith Hoffman", "http://localhost")
     check("unsafe parent is ERROR", err.status == RESOLUTION_ERROR, counts)

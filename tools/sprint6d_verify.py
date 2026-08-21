@@ -21,7 +21,7 @@ if ROOT not in sys.path:
 from engine.brand_profile import BrandProfileBuilder  # noqa: E402
 from gui.models.mockup_concept import MockupConcept  # noqa: E402
 from gui.models.project import Project  # noqa: E402
-from gui.models.prospect import RESOLUTION_AMBIGUOUS, RESOLUTION_ERROR, Prospect  # noqa: E402
+from gui.models.prospect import RESOLUTION_AMBIGUOUS, RESOLUTION_ERROR, RESOLUTION_TIMEOUT, Prospect  # noqa: E402
 from gui.models.smartlead_run_export import (  # noqa: E402
     SMARTLEAD_EXPORT_BLOCKED,
     SMARTLEAD_EXPORT_CONFLICT,
@@ -88,7 +88,7 @@ def verify_resolver_deadline(counts: dict[str, int]) -> None:
     result = service.resolve("Jane Smith", PARENT)
     elapsed = time.monotonic() - started
     check("resolver returns within total deadline", elapsed < 0.15, counts, f"elapsed={elapsed:.3f}s")
-    check("resolver timeout is safe error", result.status == RESOLUTION_ERROR and result.url == "", counts, result.status)
+    check("resolver timeout is distinct safe timeout", result.status == RESOLUTION_TIMEOUT and result.url == "", counts, result.status)
     check("resolver timeout diagnostics present", str(result.diagnostics.get("timeout_reason", "")).startswith("TOTAL_RESOLUTION_TIMEOUT:"), counts)
 
 

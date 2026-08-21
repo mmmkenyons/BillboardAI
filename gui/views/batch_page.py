@@ -207,7 +207,7 @@ class BatchPage(QWidget):
             status_item = QTableWidgetItem(status_display)
             if resolution_status == "RESOLVED":
                 status_item.setForeground(Qt.GlobalColor.darkGreen)
-            elif resolution_status in ("AMBIGUOUS", "ERROR"):
+            elif resolution_status in ("AMBIGUOUS", "TIMEOUT", "ERROR"):
                 status_item.setForeground(Qt.GlobalColor.darkRed)
             self.prospect_table.setItem(row, self.COL_PROFILE_STATUS, status_item)
 

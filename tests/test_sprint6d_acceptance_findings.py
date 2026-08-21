@@ -15,6 +15,7 @@ from gui.models.prospect import (
     RESOLUTION_ERROR,
     RESOLUTION_NOT_FOUND,
     RESOLUTION_RESOLVED,
+    RESOLUTION_TIMEOUT,
     Prospect,
 )
 from gui.models.smartlead_run_export import (
@@ -98,7 +99,7 @@ def test_resolver_total_deadline_interrupts_blocking_fetch_and_stays_safe() -> N
 
     assert elapsed < 0.15
     assert calls
-    assert result.status == RESOLUTION_ERROR
+    assert result.status == RESOLUTION_TIMEOUT
     assert result.url == ""
     assert result.diagnostics["bounded_limits"]["total_timeout_seconds"] == 0.03
     assert result.diagnostics["timeout_reason"].startswith("TOTAL_RESOLUTION_TIMEOUT:")

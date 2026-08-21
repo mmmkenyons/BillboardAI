@@ -21,6 +21,7 @@ from gui.models.prospect import (
     RESOLUTION_NOT_ATTEMPTED,
     RESOLUTION_NOT_FOUND,
     RESOLUTION_RESOLVED,
+    RESOLUTION_TIMEOUT,
     Prospect,
 )
 from gui.models.prospect_store import ProspectStore
@@ -57,7 +58,7 @@ def test_bounded_resolution_total_timeout_cannot_hang_indefinitely() -> None:
     result = service.resolve("Meridith Hoffman", PARENT)
     elapsed = time.monotonic() - started
     assert elapsed < 1.0
-    assert result.status == RESOLUTION_ERROR
+    assert result.status == RESOLUTION_TIMEOUT
     assert result.diagnostics.get("timeout_reason")
     assert result.diagnostics.get("bounded_limits", {}).get("total_timeout_seconds") == 0.001
 
@@ -786,11 +787,11 @@ class TestResolution:
         assert result.resolved_url == "https://pinnaclerealtyia.com/agent/alex-kahn"
         assert result.confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM)
 
-    def test_ambiguous_when_multiple_strong_candidates(self) -> None:
+    def test_wrong_person_body_mention_does_not_create_false_ambiguity(self) -> None:
         service, _ = _service(dup_strong=True)
         result = service.resolve("Meridith Hoffman", PARENT)
-        assert result.status == RESOLUTION_AMBIGUOUS
-        assert result.resolved_url == ""
+        assert result.status == RESOLUTION_RESOLVED
+        assert result.resolved_url == "https://pinnaclerealtyia.com/agent/meridith-hoffman"
 
     def test_static_assets_are_not_profile_candidates(self) -> None:
         class StaticSite(_Pages):

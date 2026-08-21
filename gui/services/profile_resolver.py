@@ -57,6 +57,7 @@ from gui.models.prospect import (
     RESOLUTION_ERROR,
     RESOLUTION_NOT_FOUND,
     RESOLUTION_RESOLVED,
+    RESOLUTION_TIMEOUT,
     Prospect,
 )
 
@@ -79,11 +80,29 @@ MAX_CANDIDATES_VERIFY = 8        # candidates whose pages we actually fetch
 MAX_SITEMAP_DIAGNOSTICS = 20     # compact per-sitemap observability cap
 MAX_BROWSER_LINKS_SCANNED = 200  # per rendered page anchor scan cap
 MAX_BROWSER_CANDIDATE_VERIFY = 4 # bounded browser verification retries for weak candidates
+VERIFICATION_RESERVE_FRACTION = 0.25  # preserve part of total budget for candidate fetches
+MIN_VERIFICATION_RESERVE_SECONDS = 5.0
+MAX_LOW_VALUE_SITEMAP_URLS_SCANNED = 1200
+LOW_VALUE_SITEMAP_DISCOVERY_FRACTION = 0.18
+MIN_POST_SITEMAP_RESERVE_SECONDS = 6.0
+MAX_LOW_VALUE_SITEMAPS_ATTEMPTED = 6
+
+SITEMAP_TIER_HIGH_VALUE_PERSON = "HIGH_VALUE_PERSON"
+SITEMAP_TIER_GENERAL = "GENERAL"
+SITEMAP_TIER_LOW_VALUE_CONTENT = "LOW_VALUE_CONTENT"
+SITEMAP_END_HIGH_VALUE_CANDIDATE_FOUND = "HIGH_VALUE_CANDIDATE_FOUND"
+SITEMAP_END_DISCOVERY_BUDGET_REACHED = "DISCOVERY_BUDGET_REACHED"
+SITEMAP_END_LOW_VALUE_BUDGET_REACHED = "LOW_VALUE_BUDGET_REACHED"
+SITEMAP_END_VERIFICATION_RESERVE_REACHED = "VERIFICATION_RESERVE_REACHED"
+SITEMAP_END_SITEMAPS_EXHAUSTED = "SITEMAPS_EXHAUSTED"
+SITEMAP_END_TOTAL_TIMEOUT = "TOTAL_TIMEOUT"
 
 # Path token indicators that a URL is likely an individual/agent profile.
 PROFILE_PATH_TOKENS = (
     "agent", "agents", "realtor", "realtors", "team", "staff", "member",
-    "members", "directory", "bio", "profile", "people", "about",
+    "members", "directory", "bio", "profile", "profiles", "people", "person",
+    "persons", "advisor", "advisors", "broker", "brokers", "associate",
+    "associates", "about",
 )
 # Path tokens that a page is a directory/home (not itself a profile candidate).
 DIRECTORY_PATH_TOKENS = (
@@ -102,6 +121,24 @@ STATIC_PROFILE_EXTENSIONS = frozenset({
     ".css", ".js", ".ico", ".zip", ".gz",
 })
 GENERIC_PROFILE_ROOTS = frozenset({"agent", "agents", "profile", "profiles", "team", "staff"})
+HIGH_VALUE_SITEMAP_TOKENS = frozenset({
+    "agent", "agents", "people", "person", "persons", "profile", "profiles",
+    "team", "teams", "staff", "advisor", "advisors", "broker", "brokers",
+    "realtor", "realtors", "associate", "associates", "member", "members",
+})
+LOW_VALUE_SITEMAP_TOKENS = frozenset({
+    "property", "properties", "listing", "listings", "home", "homes", "sale",
+    "rent", "rental", "rentals", "sold", "pending", "off", "market",
+    "offmarket", "ldp", "pdp", "detail", "details", "inventory", "search",
+    "community", "communities", "neighborhood", "neighborhoods",
+    "blog", "blogs", "post", "posts", "article", "articles", "news", "press",
+    "image", "images", "video", "videos", "product", "products", "building",
+    "buildings", "static", "assets", "office", "offices", "location", "locations",
+})
+EXPLICIT_PERSON_SITEMAP_TOKENS = frozenset({
+    "pages", "profiles", "profile", "people", "person", "persons", "team", "teams",
+    "staff", "realtors", "brokers", "advisors", "associates",
+})
 
 # ---------------------------------------------------------------------------
 # Fetching abstraction (injectable for deterministic tests)
@@ -440,15 +477,26 @@ def _append_sitemap_diagnostic(diag: Dict[str, Any], record: Dict[str, Any]) -> 
     records = diag.setdefault("sitemap_diagnostics", [])
     if not isinstance(records, list) or len(records) >= MAX_SITEMAP_DIAGNOSTICS:
         return
+    url = str(record.get("url") or "")
+    semantic_tier = str(record.get("semantic_tier") or _sitemap_semantic_tier(url))
     compact = {
-        "url": str(record.get("url") or "")[:240],
+        "url": url[:240],
         "fetch": str(record.get("fetch") or "")[:40],
         "parse": str(record.get("parse") or "")[:40],
         "gzip_url": bool(record.get("gzip_url")),
         "loc_count": int(record.get("loc_count") or 0),
+        "urls_scanned_count": int(record.get("urls_scanned_count") or 0),
         "target_name_loc_count": int(record.get("target_name_loc_count") or 0),
         "candidate_admitted_count": int(record.get("candidate_admitted_count") or 0),
+        "relevance_score": int(record.get("relevance_score") or 0),
+        "semantic_tier": semantic_tier,
+        "low_value_sitemap": bool(record.get("low_value_sitemap")) or semantic_tier == SITEMAP_TIER_LOW_VALUE_CONTENT,
+        "high_value_sitemap": bool(record.get("high_value_sitemap")) or semantic_tier == SITEMAP_TIER_HIGH_VALUE_PERSON,
+        "skipped_by_relevance_cap": int(record.get("skipped_by_relevance_cap") or 0),
     }
+    prioritized = record.get("prioritized_child_urls") or []
+    if isinstance(prioritized, list) and prioritized:
+        compact["prioritized_child_urls"] = [str(url)[:240] for url in prioritized[:5]]
     reason = str(record.get("failure_reason") or "")[:160]
     if reason:
         compact["failure_reason"] = reason
@@ -475,7 +523,8 @@ def _extract_loc_urls(xml_text: str, cap: int) -> List[str]:
 
 
 def _sitemaps_from_index(index_text: str, cap: int) -> List[str]:
-    return _extract_loc_urls(index_text, cap)
+    discovered = _extract_loc_urls(index_text, max(cap * 4, cap))
+    return _prioritize_sitemap_urls(discovered)[:cap]
 
 
 def _urls_from_sitemap(sitemap_text: str, cap: int) -> List[str]:
@@ -485,6 +534,97 @@ def _urls_from_sitemap(sitemap_text: str, cap: int) -> List[str]:
 def _looks_like_index(body: str) -> bool:
     low = (body or "").lower()
     return "<sitemapindex" in low
+
+
+def _path_tokens(url: str) -> set[str]:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return set()
+    text = " ".join([parsed.path or "", parsed.query or ""]).lower()
+    return {t.strip().strip("._-") for t in re.split(r"[/\-_\s=&?]+", text) if t.strip()}
+
+
+def _sitemap_relevance_score(url: str) -> int:
+    """Generic semantic priority for sitemap traversal (higher first)."""
+    tokens = _path_tokens(url)
+    high = len(tokens & HIGH_VALUE_SITEMAP_TOKENS)
+    low = len(tokens & LOW_VALUE_SITEMAP_TOKENS)
+    if _is_property_by_person_sitemap(url):
+        low += 3
+        high = 0
+    score = high * 20 - low * 8
+    low_url = (url or "").lower()
+    if "sitemap" in low_url:
+        score += 1
+    if _looks_gzip_sitemap_url(url):
+        score += 1
+    return score
+
+
+def _sitemap_semantic_tier(url: str) -> str:
+    """Classify sitemap families into bounded discovery tiers.
+
+    Property/listing/content semantics dominate mixed names such as
+    ``for-sale-by-agent`` unless explicit profile/person-page context exists.
+    """
+    tokens = _path_tokens(url)
+    has_low = bool(tokens & LOW_VALUE_SITEMAP_TOKENS)
+    has_high = bool(tokens & HIGH_VALUE_SITEMAP_TOKENS)
+    explicit_profile = bool(tokens & EXPLICIT_PERSON_SITEMAP_TOKENS) or _looks_agent_profile_sitemap(url)
+    if _is_property_by_person_sitemap(url) or (has_low and not explicit_profile):
+        return SITEMAP_TIER_LOW_VALUE_CONTENT
+    if has_high or explicit_profile:
+        return SITEMAP_TIER_HIGH_VALUE_PERSON
+    return SITEMAP_TIER_GENERAL
+
+
+def _prioritize_sitemap_urls(urls: Sequence[str]) -> List[str]:
+    indexed = list(enumerate(urls))
+    return [
+        url
+        for _, url in sorted(
+            indexed,
+            key=lambda item: (-_sitemap_relevance_score(item[1]), item[0], item[1]),
+        )
+    ]
+
+
+def _is_low_value_sitemap(url: str) -> bool:
+    return _sitemap_semantic_tier(url) == SITEMAP_TIER_LOW_VALUE_CONTENT
+
+
+def _is_high_value_sitemap(url: str) -> bool:
+    return _sitemap_semantic_tier(url) == SITEMAP_TIER_HIGH_VALUE_PERSON
+
+
+def _is_property_by_person_sitemap(url: str) -> bool:
+    """True for listing/property sitemap families segmented by person/agent."""
+    tokens = _path_tokens(url)
+    has_listing_context = bool(tokens & LOW_VALUE_SITEMAP_TOKENS)
+    has_person_token = bool(tokens & HIGH_VALUE_SITEMAP_TOKENS)
+    has_explicit_profile_context = bool(tokens & EXPLICIT_PERSON_SITEMAP_TOKENS)
+    return has_listing_context and has_person_token and not has_explicit_profile_context and not _looks_agent_profile_sitemap(url)
+
+
+def _url_person_relevance_score(url: str, person: str) -> int:
+    score = 0
+    if name_in_url_slug(person, url):
+        score += 100
+    if _looks_profile_path(url):
+        score += 40
+    if _looks_directory_path(url):
+        score -= 15
+    if _looks_article_path(url):
+        score -= 25
+    if _is_static_profile_candidate(url):
+        score -= 100
+    tokens = _path_tokens(url)
+    score += 6 * len(tokens & HIGH_VALUE_SITEMAP_TOKENS)
+    score -= 5 * len(tokens & LOW_VALUE_SITEMAP_TOKENS)
+    if _is_property_by_person_sitemap(url):
+        score -= 30
+    return score
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +660,9 @@ class ResolutionCandidate:
     browser_evidence_summary: str = ""
     browser_confidence: str = ""
     browser_failure_reason: str = ""
+    canonical_url: str = ""
+    final_url: str = ""
+    structured_names: List[str] = field(default_factory=list)
 
     def plausibility_score(self) -> int:
         score = 0
@@ -655,6 +798,20 @@ class ProfileResolverService:
             "candidate_diagnostics": [],
             "final_decision_reason": "",
             "sitemap_diagnostics": [],
+            "sitemap_prioritization_applied": False,
+            "sitemap_low_value_skipped_after_candidate": 0,
+            "sitemap_url_entries_skipped_by_relevance_cap": 0,
+            "sitemap_high_value_count_attempted": 0,
+            "sitemap_general_count_attempted": 0,
+            "sitemap_low_value_count_attempted": 0,
+            "sitemap_low_value_budget_reached": False,
+            "sitemap_discovery_budget_reached": False,
+            "post_sitemap_budget_preserved": False,
+            "sitemap_remaining_budget_seconds": 0.0,
+            "sitemap_discovery_end_reason": "",
+            "verification_reserve_seconds": round(min(self.total_timeout * VERIFICATION_RESERVE_FRACTION, max(MIN_VERIFICATION_RESERVE_SECONDS, self.total_timeout * 0.1)), 3),
+            "verification_reserve_reached": False,
+            "verification_reserve_consumed": False,
             "bounded_limits": {
                 "http_request_timeout_seconds": self._timeout,
                 "max_child_sitemaps": self.max_child_sitemaps,
@@ -666,6 +823,10 @@ class ProfileResolverService:
                 "max_browser_links_scanned": self.max_browser_links_scanned,
                 "max_browser_candidate_verify": self.max_browser_candidate_verify,
                 "total_timeout_seconds": self.total_timeout,
+                "max_low_value_sitemap_urls_scanned": MAX_LOW_VALUE_SITEMAP_URLS_SCANNED,
+                "max_low_value_sitemaps_attempted": MAX_LOW_VALUE_SITEMAPS_ATTEMPTED,
+                "post_sitemap_reserve_seconds": round(min(self.total_timeout * 0.35, max(MIN_POST_SITEMAP_RESERVE_SECONDS, self.total_timeout * 0.2)), 3),
+                "low_value_sitemap_discovery_seconds": round(max(0.25, self.total_timeout * LOW_VALUE_SITEMAP_DISCOVERY_FRACTION), 3),
             },
             "timeout_reason": "",
         }
@@ -687,6 +848,83 @@ class ProfileResolverService:
                 diagnostics["final_decision_reason"] = "resolution timed out before starting next bounded operation"
                 raise TimeoutError(diagnostics["timeout_reason"])
             return max(0.001, remaining)
+
+        def _remaining_seconds() -> float:
+            remaining = self.total_timeout - (time.monotonic() - started)
+            diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            return max(0.0, remaining)
+
+        def _has_high_value_candidate() -> bool:
+            return any(name_in_url_slug(person, c.url) and _looks_profile_path(c.url) for c in candidates)
+
+        def _verification_reserve_seconds() -> float:
+            return float(diagnostics.get("verification_reserve_seconds") or 0.0)
+
+        def _post_sitemap_reserve_seconds() -> float:
+            limits = diagnostics.get("bounded_limits") or {}
+            return float(limits.get("post_sitemap_reserve_seconds") or 0.0)
+
+        def _sitemap_low_value_budget_seconds() -> float:
+            limits = diagnostics.get("bounded_limits") or {}
+            return float(limits.get("low_value_sitemap_discovery_seconds") or 0.0)
+
+        def _note_sitemap_attempt(url: str) -> str:
+            tier = _sitemap_semantic_tier(url)
+            if tier == SITEMAP_TIER_HIGH_VALUE_PERSON:
+                diagnostics["sitemap_high_value_count_attempted"] += 1
+            elif tier == SITEMAP_TIER_LOW_VALUE_CONTENT:
+                diagnostics["sitemap_low_value_count_attempted"] += 1
+            else:
+                diagnostics["sitemap_general_count_attempted"] += 1
+            return tier
+
+        def _finish_sitemap_discovery(reason: str) -> None:
+            diagnostics["sitemap_discovery_end_reason"] = reason
+            remaining = _remaining_seconds()
+            diagnostics["sitemap_remaining_budget_seconds"] = round(remaining, 3)
+            diagnostics["post_sitemap_budget_preserved"] = remaining >= min(
+                _post_sitemap_reserve_seconds(),
+                max(0.0, self.total_timeout - 0.001),
+            )
+
+        def _should_stop_sitemap_for_budget(next_sitemap_url: str) -> bool:
+            tier = _sitemap_semantic_tier(next_sitemap_url)
+            remaining = _remaining_seconds()
+            if remaining <= _verification_reserve_seconds():
+                diagnostics["verification_reserve_reached"] = True
+                _finish_sitemap_discovery(SITEMAP_END_VERIFICATION_RESERVE_REACHED)
+                return True
+            if tier == SITEMAP_TIER_LOW_VALUE_CONTENT:
+                elapsed = time.monotonic() - started
+                low_count = int(diagnostics.get("sitemap_low_value_count_attempted") or 0)
+                if low_count >= MAX_LOW_VALUE_SITEMAPS_ATTEMPTED or elapsed >= _sitemap_low_value_budget_seconds():
+                    diagnostics["sitemap_low_value_budget_reached"] = True
+                    _finish_sitemap_discovery(SITEMAP_END_LOW_VALUE_BUDGET_REACHED)
+                    return True
+                if remaining <= _post_sitemap_reserve_seconds():
+                    diagnostics["sitemap_discovery_budget_reached"] = True
+                    _finish_sitemap_discovery(SITEMAP_END_DISCOVERY_BUDGET_REACHED)
+                    return True
+            return False
+
+        def _should_stop_sitemap_for_verification(next_sitemap_url: str = "") -> bool:
+            if not _has_high_value_candidate():
+                return False
+            if next_sitemap_url:
+                diagnostics["verification_reserve_reached"] = True
+                _finish_sitemap_discovery(SITEMAP_END_HIGH_VALUE_CANDIDATE_FOUND)
+                return True
+            reserve = _verification_reserve_seconds()
+            remaining = _remaining_seconds()
+            if remaining <= reserve:
+                diagnostics["verification_reserve_reached"] = True
+                _finish_sitemap_discovery(SITEMAP_END_VERIFICATION_RESERVE_REACHED)
+                return True
+            if next_sitemap_url and _is_low_value_sitemap(next_sitemap_url) and remaining <= reserve * 1.5:
+                diagnostics["verification_reserve_reached"] = True
+                _finish_sitemap_discovery(SITEMAP_END_VERIFICATION_RESERVE_REACHED)
+                return True
+            return False
 
         def _fetch_with_budget(url: str, stage: str) -> str:
             budget = _remaining_budget(stage)
@@ -733,7 +971,9 @@ class ProfileResolverService:
 
         def _timeout_result(stage: str, current: Optional[List[ResolutionCandidate]] = None) -> ResolutionResult:
             _timed_out(stage)
-            return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=current or candidates, diagnostics=diagnostics)
+            if stage == "sitemap_discovery":
+                _finish_sitemap_discovery(SITEMAP_END_TOTAL_TIMEOUT)
+            return ResolutionResult(status=RESOLUTION_TIMEOUT, evidence="resolution timeout", candidates=current or candidates, diagnostics=diagnostics)
 
         def _add_candidate(c: ResolutionCandidate) -> None:
             diagnostics["candidate_count_before_filtering"] += 1
@@ -761,12 +1001,23 @@ class ProfileResolverService:
         if _timed_out("collect_sitemaps"):
             return _timeout_result("collect_sitemaps")
         diagnostics["robots_fetched"] = getattr(self, "_last_robots_fetched", False)
-        diagnostics["sitemap_urls_examined"] = sitemap_urls[:10]
-        for sm in sitemap_urls:
+        generated_fallbacks = set(getattr(self, "_last_generated_sitemap_fallbacks", set()))
+        primary_sitemap_urls = [url for url in sitemap_urls if url not in generated_fallbacks]
+        fallback_sitemap_urls = [url for url in sitemap_urls if url in generated_fallbacks]
+        prioritized_sitemap_urls = _prioritize_sitemap_urls(primary_sitemap_urls) + _prioritize_sitemap_urls(fallback_sitemap_urls)
+        diagnostics["sitemap_prioritization_applied"] = prioritized_sitemap_urls != sitemap_urls
+        diagnostics["sitemap_urls_examined"] = prioritized_sitemap_urls[:10]
+        for sm in prioritized_sitemap_urls:
             if _timed_out("sitemap_discovery"):
                 return _timeout_result("sitemap_discovery", candidates)
+            if _should_stop_sitemap_for_verification(sm):
+                diagnostics["sitemap_low_value_skipped_after_candidate"] += 1
+                break
+            if _should_stop_sitemap_for_budget(sm):
+                break
             diagnostics["sitemap_count_attempted"] += 1
-            sm_record: Dict[str, Any] = {"url": sm, "gzip_url": _looks_gzip_sitemap_url(sm)}
+            sm_tier = _note_sitemap_attempt(sm)
+            sm_record: Dict[str, Any] = {"url": sm, "gzip_url": _looks_gzip_sitemap_url(sm), "relevance_score": _sitemap_relevance_score(sm), "semantic_tier": sm_tier}
             try:
                 body = _fetch_with_budget(sm, "sitemap_discovery")
             except TimeoutError:
@@ -781,18 +1032,28 @@ class ProfileResolverService:
                 continue
             sm_record["fetch"] = "OK"
             if _looks_like_index(body):
-                child_urls = _sitemaps_from_index(body, self.max_child_sitemaps)
+                raw_child_urls = _extract_loc_urls(body, max(self.max_child_sitemaps * 4, self.max_child_sitemaps))
+                child_urls = _prioritize_sitemap_urls(raw_child_urls)[: self.max_child_sitemaps]
+                if child_urls != raw_child_urls[: self.max_child_sitemaps]:
+                    diagnostics["sitemap_prioritization_applied"] = True
                 sm_record.update({
                     "parse": SITEMAP_PARSED_WITH_LOCS if child_urls else SITEMAP_PARSED_ZERO_LOCS,
                     "loc_count": len(child_urls),
                     "target_name_loc_count": sum(1 for u in child_urls if name_in_url_slug(person, u)),
+                    "prioritized_child_urls": child_urls[:5],
                 })
                 _append_sitemap_diagnostic(diagnostics, sm_record)
                 for child in child_urls:
+                    if _should_stop_sitemap_for_verification(child):
+                        diagnostics["sitemap_low_value_skipped_after_candidate"] += 1
+                        break
+                    if _should_stop_sitemap_for_budget(child):
+                        break
                     diagnostics["sitemap_count_attempted"] += 1
+                    child_tier = _note_sitemap_attempt(child)
                     if len(diagnostics["sitemap_urls_examined"]) < 10:
                         diagnostics["sitemap_urls_examined"].append(child)
-                    child_record: Dict[str, Any] = {"url": child, "gzip_url": _looks_gzip_sitemap_url(child)}
+                    child_record: Dict[str, Any] = {"url": child, "gzip_url": _looks_gzip_sitemap_url(child), "relevance_score": _sitemap_relevance_score(child), "semantic_tier": child_tier}
                     try:
                         child_body = _fetch_with_budget(child, "sitemap_discovery")
                     except TimeoutError:
@@ -806,15 +1067,59 @@ class ProfileResolverService:
                         _append_sitemap_diagnostic(diagnostics, child_record)
                         continue
                     child_record["fetch"] = "OK"
-                    diagnostics["sitemap_count_parsed"] += 1
-                    child_record.update(
-                        self._add_from_urlset(child, child_body, person, parent, _add_candidate)
-                    )
-                    _append_sitemap_diagnostic(diagnostics, child_record)
+                    if _looks_like_index(child_body):
+                        raw_grandchild_urls = _extract_loc_urls(child_body, max(self.max_child_sitemaps * 4, self.max_child_sitemaps))
+                        grandchild_urls = _prioritize_sitemap_urls(raw_grandchild_urls)[: self.max_child_sitemaps]
+                        if grandchild_urls != raw_grandchild_urls[: self.max_child_sitemaps]:
+                            diagnostics["sitemap_prioritization_applied"] = True
+                        child_record.update({
+                            "parse": SITEMAP_PARSED_WITH_LOCS if grandchild_urls else SITEMAP_PARSED_ZERO_LOCS,
+                            "loc_count": len(grandchild_urls),
+                            "target_name_loc_count": sum(1 for u in grandchild_urls if name_in_url_slug(person, u)),
+                            "prioritized_child_urls": grandchild_urls[:5],
+                        })
+                        _append_sitemap_diagnostic(diagnostics, child_record)
+                        for grandchild in grandchild_urls:
+                            if _should_stop_sitemap_for_verification(grandchild):
+                                diagnostics["sitemap_low_value_skipped_after_candidate"] += 1
+                                break
+                            if _should_stop_sitemap_for_budget(grandchild):
+                                break
+                            diagnostics["sitemap_count_attempted"] += 1
+                            grandchild_tier = _note_sitemap_attempt(grandchild)
+                            if len(diagnostics["sitemap_urls_examined"]) < 10:
+                                diagnostics["sitemap_urls_examined"].append(grandchild)
+                            grandchild_record: Dict[str, Any] = {"url": grandchild, "gzip_url": _looks_gzip_sitemap_url(grandchild), "relevance_score": _sitemap_relevance_score(grandchild), "semantic_tier": grandchild_tier}
+                            try:
+                                grandchild_body = _fetch_with_budget(grandchild, "sitemap_discovery")
+                            except TimeoutError:
+                                return _timeout_result("sitemap_discovery", candidates)
+                            except Exception as exc:  # noqa: BLE001
+                                grandchild_record.update({
+                                    "fetch": SITEMAP_FETCH_FAILED,
+                                    "parse": "NOT_ATTEMPTED",
+                                    "failure_reason": _bounded_failure_reason(exc),
+                                })
+                                _append_sitemap_diagnostic(diagnostics, grandchild_record)
+                                continue
+                            grandchild_record["fetch"] = "OK"
+                            diagnostics["sitemap_count_parsed"] += 1
+                            grandchild_record.update(self._add_from_urlset(grandchild, grandchild_body, person, parent, _add_candidate))
+                            diagnostics["sitemap_url_entries_skipped_by_relevance_cap"] += int(grandchild_record.get("skipped_by_relevance_cap") or 0)
+                            _append_sitemap_diagnostic(diagnostics, grandchild_record)
+                    else:
+                        diagnostics["sitemap_count_parsed"] += 1
+                        child_record.update(self._add_from_urlset(child, child_body, person, parent, _add_candidate))
+                        diagnostics["sitemap_url_entries_skipped_by_relevance_cap"] += int(child_record.get("skipped_by_relevance_cap") or 0)
+                        _append_sitemap_diagnostic(diagnostics, child_record)
             else:
                 diagnostics["sitemap_count_parsed"] += 1
                 sm_record.update(self._add_from_urlset(sm, body, person, parent, _add_candidate))
+                diagnostics["sitemap_url_entries_skipped_by_relevance_cap"] += int(sm_record.get("skipped_by_relevance_cap") or 0)
                 _append_sitemap_diagnostic(diagnostics, sm_record)
+
+        if not diagnostics.get("sitemap_discovery_end_reason"):
+            _finish_sitemap_discovery(SITEMAP_END_SITEMAPS_EXHAUSTED)
 
         # Stage 4: homepage + a bounded set of directory pages.
         try:
@@ -832,6 +1137,7 @@ class ProfileResolverService:
         http_candidates = list(candidates)
         diagnostics["http_candidates_discovered"] = len(http_candidates)
         ranked = self._rank_candidates(http_candidates, person)
+        diagnostics["verification_reserve_consumed"] = _remaining_seconds() <= _verification_reserve_seconds()
         try:
             browser_verify_count = self._verify_ranked_candidates(
             ranked,
@@ -846,7 +1152,7 @@ class ProfileResolverService:
         except TimeoutError:
             return _timeout_result("candidate_verification", verified or candidates)
         if _timed_out("candidate_verification"):
-            return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=verified or candidates, diagnostics=diagnostics)
+            return ResolutionResult(status=RESOLUTION_TIMEOUT, evidence="resolution timeout", candidates=verified or candidates, diagnostics=diagnostics)
 
         usable = [c for c in verified if self._is_usable_http_candidate(c, parent)]
         diagnostics["http_candidates_usable"] = len(usable)
@@ -859,7 +1165,7 @@ class ProfileResolverService:
             except TimeoutError:
                 return _timeout_result("browser_fallback", verified or candidates)
             if _timed_out("browser_fallback"):
-                return ResolutionResult(status=RESOLUTION_ERROR, evidence="resolution timeout", candidates=verified or candidates, diagnostics=diagnostics)
+                return ResolutionResult(status=RESOLUTION_TIMEOUT, evidence="resolution timeout", candidates=verified or candidates, diagnostics=diagnostics)
             browser_added = candidates[before_browser:]
             if browser_added:
                 try:
@@ -977,7 +1283,7 @@ class ProfileResolverService:
             raise ValueError("prospect required")
         resolution = result.status if result else RESOLUTION_ERROR
         if resolution not in (RESOLUTION_RESOLVED, RESOLUTION_AMBIGUOUS,
-                              RESOLUTION_NOT_FOUND, RESOLUTION_ERROR):
+                              RESOLUTION_NOT_FOUND, RESOLUTION_TIMEOUT, RESOLUTION_ERROR):
             resolution = RESOLUTION_ERROR
         resolved = resolution == RESOLUTION_RESOLVED and bool(result and result.url)
         prospect.resolution_status = resolution
@@ -1029,6 +1335,7 @@ class ProfileResolverService:
         urls: List[str] = []
         seen = set()
         self._last_robots_fetched = False
+        self._last_generated_sitemap_fallbacks = set()
 
         def _consider(raw: str) -> None:
             url = urljoin(parent, raw) if not _URL_SCHEME_RE.match(raw) else raw
@@ -1048,6 +1355,7 @@ class ProfileResolverService:
         _consider("/sitemap_index.xml")
         for existing in list(urls):
             for fallback in _profile_sitemap_fallbacks(existing):
+                self._last_generated_sitemap_fallbacks.add(fallback)
                 _consider(fallback)
         return urls
 
@@ -1061,20 +1369,28 @@ class ProfileResolverService:
     ) -> Dict[str, Any]:
         page_urls = _urls_from_sitemap(body, self.max_sitemap_urls)
         target_name_loc_count = sum(1 for url in page_urls if name_in_url_slug(person, url))
+        original_loc_count = len(page_urls)
+        low_value_sitemap = _is_low_value_sitemap(sitemap_url)
+        high_value_sitemap = _is_high_value_sitemap(sitemap_url) or _looks_agent_profile_sitemap(sitemap_url)
+        semantic_tier = _sitemap_semantic_tier(sitemap_url)
+        ranked_urls = sorted(
+            enumerate(page_urls),
+            key=lambda item: (-_url_person_relevance_score(item[1], person), item[0], item[1]),
+        )
+        skipped_by_relevance_cap = 0
+        if low_value_sitemap and not target_name_loc_count:
+            skipped_by_relevance_cap = max(0, len(ranked_urls) - MAX_LOW_VALUE_SITEMAP_URLS_SCANNED)
+            ranked_urls = ranked_urls[:MAX_LOW_VALUE_SITEMAP_URLS_SCANNED]
+        page_urls = [url for _, url in ranked_urls]
         admitted = 0
-        if _looks_agent_profile_sitemap(sitemap_url):
-            page_urls = sorted(
-                page_urls,
-                key=lambda u: (0 if name_in_url_slug(person, u) else 1, u),
-            )
         for url in page_urls:
             if not url or not is_within_parent(url, parent):
                 continue
             if _is_static_profile_candidate(url):
                 continue
-            if _looks_directory_path(url):
+            if _looks_directory_path(url) and not name_in_url_slug(person, url):
                 continue
-            if _looks_agent_profile_sitemap(sitemap_url) and not name_in_url_slug(person, url):
+            if high_value_sitemap and _looks_agent_profile_sitemap(sitemap_url) and not name_in_url_slug(person, url):
                 continue
             if not _looks_profile_path(url) and not name_in_url_slug(person, url):
                 continue
@@ -1092,9 +1408,15 @@ class ProfileResolverService:
             parse = SITEMAP_TARGET_MATCH_FOUND if target_name_loc_count else SITEMAP_PARSED_WITH_LOCS
         return {
             "parse": parse,
-            "loc_count": len(page_urls),
+            "loc_count": original_loc_count,
+            "urls_scanned_count": len(page_urls),
             "target_name_loc_count": target_name_loc_count,
             "candidate_admitted_count": admitted,
+            "low_value_sitemap": low_value_sitemap,
+            "high_value_sitemap": high_value_sitemap,
+            "semantic_tier": semantic_tier,
+            "relevance_score": _sitemap_relevance_score(sitemap_url),
+            "skipped_by_relevance_cap": skipped_by_relevance_cap,
         }
 
     def _discover_from_homepage(
@@ -1386,6 +1708,9 @@ class ProfileResolverService:
                 "browser_evidence_summary": str(cand.browser_evidence_summary or "")[:160],
                 "browser_confidence": str(cand.browser_confidence or "")[:20],
                 "browser_failure_reason": str(cand.browser_failure_reason or "")[:160],
+                "canonical_url": str(cand.canonical_url or "")[:240],
+                "final_url": str(cand.final_url or "")[:240],
+                "score": cand.plausibility_score(),
             }
         )
 
@@ -1393,13 +1718,25 @@ class ProfileResolverService:
     def _rank_candidates(
         candidates: List[ResolutionCandidate], person: str
     ) -> List[ResolutionCandidate]:
-        def _key(c: ResolutionCandidate) -> int:
+        def _key(c: ResolutionCandidate) -> tuple[int, int, str]:
             score = c.plausibility_score()
-            if c.slug_only:
-                score += 3
+            exact_name_slug = name_in_url_slug(person, c.url)
+            profile_path = _looks_profile_path(c.url)
+            article_path = _looks_article_path(c.url)
+            directory_path = _looks_directory_path(c.url)
+            if exact_name_slug and profile_path:
+                score += 60
+            elif exact_name_slug:
+                score += 45
+            elif profile_path:
+                score += 25
             if c.linked_from_directory:
-                score += 1
-            return -score
+                score += 10
+            if directory_path:
+                score -= 8
+            if article_path:
+                score -= 20
+            return (-score, len(c.url or ""), c.url or "")
 
         return sorted(candidates, key=_key)
 
@@ -1408,6 +1745,7 @@ class ProfileResolverService:
     ) -> ResolutionCandidate:
         title = ""
         soup_text = ""
+        primary_heading = ""
         jsonld_names: List[str] = []
         has_schema = False
         has_contact = False
@@ -1416,7 +1754,14 @@ class ProfileResolverService:
         try:
             soup = BeautifulSoup(body, "lxml")
             title = (soup.title.get_text(" ", strip=True) if soup.title else "") or ""
+            heading = soup.find(["h1", "h2"])
+            primary_heading = (heading.get_text(" ", strip=True) if heading else "") or ""
             soup_text = soup.get_text(" ", strip=True) or ""
+            canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
+            if canonical is not None:
+                href = (canonical.get("href") or "").strip()
+                if href:
+                    cand.canonical_url = normalize_url(urljoin(cand.url, href))
             for script in soup.find_all("script", type="application/ld+json"):
                 try:
                     data = json.loads(script.string or "")
@@ -1435,9 +1780,12 @@ class ProfileResolverService:
         except Exception:  # noqa: BLE001
             return cand
 
-        combined = f"{title}\n{soup_text}"
+        article_like = _looks_article_path(cand.url)
+        structured_mismatch = bool(jsonld_names) and not any(persons_match(person, n) for n in jsonld_names)
+        combined = f"{title}\n{primary_heading}\n{soup_text}"
         cand.title_contains_name = full_name_in_text(person, title)
-        strong_text = full_name_in_text(person, combined)
+        heading_contains_name = full_name_in_text(person, primary_heading)
+        strong_text = cand.title_contains_name or heading_contains_name
         structured_match = any(persons_match(person, n) for n in jsonld_names)
         slug = name_in_url_slug(person, cand.url)
         corroboration = (
@@ -1445,21 +1793,29 @@ class ProfileResolverService:
             or (has_image and has_contact) or cand.title_contains_name
         )
         cand.has_schema = has_schema or bool(jsonld_names)
+        cand.structured_names = [str(name) for name in jsonld_names if str(name or "").strip()]
         cand.has_contact = has_contact
         cand.has_image = has_image
         cand.has_bio = has_bio
-        cand.strong_name = strong_text or structured_match
+        cand.strong_name = (structured_match or strong_text) and not article_like and not structured_mismatch
         generic_root = _is_generic_profile_root(cand.url)
-        cand.strong_slug = bool(slug) and not generic_root and corroboration and not cand.strong_name
-        cand.slug_only = bool(slug) and not generic_root and not cand.strong_slug and not cand.strong_name
+        cand.strong_slug = bool(slug) and not generic_root and not article_like and not structured_mismatch and corroboration and not cand.strong_name
+        cand.slug_only = bool(slug) and not generic_root and not article_like and not structured_mismatch and not cand.strong_slug and not cand.strong_name
+        if article_like and not structured_match and not (heading_contains_name and cand.has_bio):
+            cand.title_contains_name = False
+        if structured_mismatch:
+            cand.has_schema = False
         cand.confidence = _confidence_for(cand)
         cand.reason = _build_reason(cand)
+        if structured_mismatch:
+            cand.reason = "structured data names another person"
+            cand.confidence = ""
         return cand
 
     def _decision(
         self, verified: List[ResolutionCandidate], person: str
     ) -> ResolutionResult:
-        strong = [c for c in verified if c.is_strong()]
+        strong = _collapse_equivalent_candidates([c for c in verified if c.is_strong()], person)
         if len(strong) == 1:
             cand = strong[0]
             if cand.confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM):
@@ -1475,7 +1831,7 @@ class ProfileResolverService:
                 evidence=f"multiple plausible candidates ({len(strong)})\u2014 manual review",
                 candidates=verified,
             )
-        plausible = [c for c in verified if c.plausibility_score() > 0]
+        plausible = [c for c in verified if c.plausibility_score() > 0 and _has_intended_person_evidence(c, person)]
         if len(plausible) > 1:
             return ResolutionResult(status=RESOLUTION_AMBIGUOUS,
                                     evidence="multiple weak candidates\u2014manual review",
@@ -1506,6 +1862,81 @@ def _collect_jsonld_names(data: Any, out: List[str]) -> None:
                 _collect_jsonld_names(value, out)
 
 
+def _normalized_profile_equivalence_url(url: str) -> str:
+    """Return a conservative URL identity key for duplicate profile variants."""
+    try:
+        parsed = urlparse(normalize_url(url))
+    except Exception:  # noqa: BLE001
+        return ""
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = re.sub(r"/+$", "", parsed.path or "/") or "/"
+    # Drop query/fragment only; do not collapse distinct path variants here.
+    return f"{parsed.scheme.lower()}://{host}{path.lower()}"
+
+
+def _has_intended_person_evidence(cand: ResolutionCandidate, person: str) -> bool:
+    """True only for evidence that actually identifies the intended person."""
+    if cand is None:
+        return False
+    if cand.strong_name or cand.strong_slug or cand.title_contains_name:
+        return True
+    if cand.slug_only and name_in_url_slug(person, cand.url):
+        return True
+    if any(persons_match(person, name) for name in cand.structured_names or []):
+        return True
+    return False
+
+
+def _candidate_equivalence_key(cand: ResolutionCandidate, person: str) -> str:
+    """Key demonstrably equivalent representations of the same intended profile."""
+    urls = [cand.canonical_url, cand.final_url, cand.browser_final_url, cand.url]
+    normalized_urls = [_normalized_profile_equivalence_url(url) for url in urls if url]
+    normalized_urls = [url for url in normalized_urls if url]
+    canonical = normalized_urls[0] if normalized_urls else ""
+    structured = [normalize_person_name(name) for name in cand.structured_names or [] if persons_match(person, name)]
+    if structured and canonical:
+        return f"person:{structured[0]}|url:{canonical}"
+    if canonical:
+        return f"url:{canonical}"
+    return f"raw:{cand.url}"
+
+
+def _prefer_candidate(existing: ResolutionCandidate, challenger: ResolutionCandidate) -> ResolutionCandidate:
+    """Keep the strongest representative for an equivalent profile cluster."""
+    existing_score = existing.plausibility_score()
+    challenger_score = challenger.plausibility_score()
+    if challenger_score > existing_score:
+        return challenger
+    if challenger_score < existing_score:
+        return existing
+    # Prefer a canonical-looking URL when scores tie.
+    if challenger.canonical_url and not existing.canonical_url:
+        return challenger
+    if len(challenger.url or "") < len(existing.url or ""):
+        return challenger
+    return existing
+
+
+def _collapse_equivalent_candidates(
+    candidates: List[ResolutionCandidate], person: str
+) -> List[ResolutionCandidate]:
+    """Collapse only demonstrably equivalent strong candidates.
+
+    This does not merge distinct same-name professionals; it only collapses
+    URL/canonical/redirect variants that identify the same intended person.
+    """
+    clusters: Dict[str, ResolutionCandidate] = {}
+    for cand in candidates:
+        if not _has_intended_person_evidence(cand, person):
+            continue
+        key = _candidate_equivalence_key(cand, person)
+        existing = clusters.get(key)
+        clusters[key] = cand if existing is None else _prefer_candidate(existing, cand)
+    return list(clusters.values())
+
+
 def _looks_directory_path(url: str) -> bool:
     try:
         path = (urlparse(url).path or "").strip("/").lower()
@@ -1513,6 +1944,15 @@ def _looks_directory_path(url: str) -> bool:
         return False
     tokens = set(t.strip().strip("._-") for t in re.split(r"[/\-_\s]+", path) if t.strip())
     return bool(tokens & set(DIRECTORY_PATH_TOKENS))
+
+
+def _looks_article_path(url: str) -> bool:
+    try:
+        path = (urlparse(url).path or "").strip("/").lower()
+    except ValueError:
+        return False
+    tokens = set(t.strip().strip("._-") for t in re.split(r"[/\-_\s]+", path) if t.strip())
+    return bool(tokens & {"blog", "blogs", "news", "article", "articles", "press", "stories", "story"})
 
 
 def _is_generic_profile_root(url: str) -> bool:
@@ -1560,6 +2000,23 @@ def _compact_diagnostics(diag: Dict[str, Any]) -> Dict[str, Any]:
         "browser_candidates_discovered": int(diag.get("browser_candidates_discovered") or 0),
         "browser_failure_reason": str(diag.get("browser_failure_reason") or "")[:160],
         "browser_candidate_verifications_attempted": int(diag.get("browser_candidate_verifications_attempted") or 0),
+        "sitemap_prioritization_applied": bool(diag.get("sitemap_prioritization_applied")),
+        "sitemap_low_value_skipped_after_candidate": int(diag.get("sitemap_low_value_skipped_after_candidate") or 0),
+        "sitemap_url_entries_skipped_by_relevance_cap": int(diag.get("sitemap_url_entries_skipped_by_relevance_cap") or 0),
+        "sitemap_high_value_count_attempted": int(diag.get("sitemap_high_value_count_attempted") or 0),
+        "sitemap_general_count_attempted": int(diag.get("sitemap_general_count_attempted") or 0),
+        "sitemap_low_value_count_attempted": int(diag.get("sitemap_low_value_count_attempted") or 0),
+        "sitemap_low_value_budget_reached": bool(diag.get("sitemap_low_value_budget_reached")),
+        "sitemap_discovery_budget_reached": bool(diag.get("sitemap_discovery_budget_reached")),
+        "post_sitemap_budget_preserved": bool(diag.get("post_sitemap_budget_preserved")),
+        "sitemap_remaining_budget_seconds": float(diag.get("sitemap_remaining_budget_seconds") or 0.0),
+        "sitemap_discovery_end_reason": str(diag.get("sitemap_discovery_end_reason") or "")[:80],
+        "verification_reserve_seconds": float(diag.get("verification_reserve_seconds") or 0.0),
+        "verification_reserve_reached": bool(diag.get("verification_reserve_reached")),
+        "verification_reserve_consumed": bool(diag.get("verification_reserve_consumed")),
+        "timeout_stage": str(diag.get("timeout_stage") or "")[:80],
+        "timeout_reason": str(diag.get("timeout_reason") or "")[:160],
+        "elapsed_seconds": float(diag.get("elapsed_seconds") or 0.0),
         "final_decision_reason": str(diag.get("final_decision_reason") or "")[:240],
     }
     sitemap_diag = diag.get("sitemap_diagnostics") or []
