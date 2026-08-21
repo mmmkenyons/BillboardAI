@@ -20,6 +20,16 @@ from engine.config import DEBUG, DEBUG_FOLDER, OUTPUT_DIR
 
 logger = logging.getLogger(__name__)
 
+RENDER_QUALITY_PASS = "PASS"
+RENDER_QUALITY_WARNING = "WARNING"
+RENDER_QUALITY_BLOCKED = "BLOCKED"
+RENDER_HEADLINE_OVERFLOW = "RENDER_HEADLINE_OVERFLOW"
+RENDER_CTA_OVERFLOW = "RENDER_CTA_OVERFLOW"
+RENDER_TEXT_CLIPPED = "RENDER_TEXT_CLIPPED"
+RENDER_TEXT_UNREADABLE = "RENDER_TEXT_UNREADABLE"
+
+_LAST_RENDER_QUALITY: dict[str, Any] = {"status": RENDER_QUALITY_PASS, "reasons": []}
+
 
 def _load_font(font_name: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     try:
@@ -53,6 +63,24 @@ def _fit_text(draw: ImageDraw.ImageDraw, text: str, font_name: str, max_width: i
             return font, lines
     fallback_font = _load_font(font_name, min_size)
     return fallback_font, _wrap_text(draw, text, fallback_font, max_width)
+
+
+def _font_size(font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> int:
+    return int(getattr(font, "size", 0) or 0)
+
+
+def _line_height(draw: ImageDraw.ImageDraw, line: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> int:
+    bbox = draw.textbbox((0, 0), line or "Ag", font=font)
+    return int(bbox[3] - bbox[1])
+
+
+def get_last_render_quality() -> dict[str, Any]:
+    return {"status": _LAST_RENDER_QUALITY.get("status", RENDER_QUALITY_PASS), "reasons": list(_LAST_RENDER_QUALITY.get("reasons", []))}
+
+
+def _set_last_render_quality(status: str, reasons: list[dict[str, Any]]) -> None:
+    global _LAST_RENDER_QUALITY
+    _LAST_RENDER_QUALITY = {"status": status, "reasons": reasons}
 
 
 def _apply_hero_effects(hero: Image.Image) -> Image.Image:
@@ -227,21 +255,37 @@ def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Imag
 
     text_x = card_margin + 30
     text_y = card_top + 30
+    max_text_width = width - 2 * (card_margin + 20)
+    content_bottom = card_bottom - 20
+    quality_reasons: list[dict[str, Any]] = []
+
+    def add_reason(code: str, message: str, severity: str = RENDER_QUALITY_WARNING, **extra: Any) -> None:
+        quality_reasons.append({"code": code, "message": message, "severity": severity, **extra})
 
     draw.text((text_x, text_y), spec.get("company", "Brand"), font=company_font, fill=accent_color)
     company_height = draw.textbbox((0, 0), spec.get("company", "Brand"), font=company_font)[3]
     text_y += company_height + 10
 
     for line in headline_lines:
+        bbox = draw.textbbox((text_x, text_y), line, font=headline_font)
+        if bbox[2] > text_x + max_text_width:
+            add_reason(RENDER_HEADLINE_OVERFLOW, "Rendered headline exceeds its text bounds.", line=line)
         draw.text((text_x, text_y), line, font=headline_font, fill=text_color)
-        text_y += draw.textbbox((0, 0), line, font=headline_font)[3] - draw.textbbox((0, 0), line, font=headline_font)[1] + 8
+        text_y += _line_height(draw, line, headline_font) + 8
+    if headline_lines and _font_size(headline_font) < 24:
+        add_reason(RENDER_TEXT_UNREADABLE, "Headline required an unreadable font size.", RENDER_QUALITY_BLOCKED, font_size=_font_size(headline_font))
 
     if subtitle_lines and any(line.strip() for line in subtitle_lines):
         for line in subtitle_lines:
             draw.text((text_x, text_y), line, font=subtitle_font, fill=text_color)
-            text_y += draw.textbbox((0, 0), line, font=subtitle_font)[3] - draw.textbbox((0, 0), line, font=subtitle_font)[1] + 6
+            text_y += _line_height(draw, line, subtitle_font) + 6
 
     button_box = [text_x, text_y + 15, text_x + 220, text_y + 55]
+    cta_bbox = draw.textbbox((text_x + 20, text_y + 22), cta_text, font=badge_font)
+    if cta_bbox[2] > button_box[2] - 10 or cta_bbox[3] > button_box[3] - 4:
+        add_reason(RENDER_CTA_OVERFLOW, "Rendered CTA exceeds its button bounds.", cta=cta_text)
+    if button_box[3] > content_bottom:
+        add_reason(RENDER_TEXT_CLIPPED, "Rendered text/button extends outside the card bounds.", RENDER_QUALITY_BLOCKED, bottom=button_box[3], limit=content_bottom)
     draw.rectangle(button_box, fill=button_color, outline=None)
     draw.text((text_x + 20, text_y + 22), cta_text, font=badge_font, fill="#FFFFFF")
 
@@ -255,6 +299,8 @@ def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Imag
         except OSError:
             pass
 
+    status = RENDER_QUALITY_BLOCKED if any(r.get("severity") == RENDER_QUALITY_BLOCKED for r in quality_reasons) else (RENDER_QUALITY_WARNING if quality_reasons else RENDER_QUALITY_PASS)
+    _set_last_render_quality(status, quality_reasons)
     return artwork
 
 

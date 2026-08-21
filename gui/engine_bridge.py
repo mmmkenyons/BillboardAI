@@ -21,7 +21,7 @@ from typing import Any, Callable
 from engine.ad_concept import AdConceptEngine
 from engine.brand_profile import BrandProfileBuilder
 from engine.message_strategy import MessageStrategyEngine
-from engine.renderer.renderer import render_billboard
+from engine.renderer.renderer import get_last_render_quality, render_billboard
 from engine.scraper.site import WebsiteScraper, ScreenshotValidationError
 
 from gui.models.mockup_request import MockupRequest
@@ -210,6 +210,9 @@ def generate(
                 render_context["quality_score"] = float(
                     scraper.last_data.get("quality_score") or 0
                 )
+        render_quality = get_last_render_quality()
+        render_context = dict(render_context)
+        render_context["render_quality"] = render_quality
 
         ctx_obj = ensure_render_context(render_context)
 
@@ -226,6 +229,7 @@ def generate(
             "template": ctx_obj.template,
             "render_context": ctx_obj.to_dict(),
             "brand_profile": brand_profile_snapshot,
+            "render_quality": render_quality,
             "hero_path": ctx_obj.hero_image,
             "screenshot_path": ctx_obj.background_image,
             "brand_colors": list(ctx_obj.brand_colors or []),
@@ -313,6 +317,7 @@ def re_render(
             "template": ctx.template,
             "local_rerender": True,
             "render_context": ctx.to_dict(),
+            "render_quality": get_last_render_quality(),
         }
         _report(progress_callback, 100, "Complete", "done")
         logger.info("Re-render finished: %s", rendered_path)

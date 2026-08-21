@@ -16,6 +16,11 @@ class SmartleadRunPackageEntry:
     generation_job_id: str = ""
     email: str = ""
     blocker: str = ""
+    included: bool = False
+    exportable: bool = False
+    exported: bool = False
+    disposition: str = ""
+    disposition_reason: str = ""
 
     def to_dict(self) -> dict[str, str]:
         data = asdict(self)
@@ -31,6 +36,11 @@ class SmartleadRunPackageEntry:
             generation_job_id=str(raw.get("generation_job_id") or "").strip(),
             email=str(raw.get("email") or "").strip(),
             blocker=str(raw.get("blocker") or "").strip(),
+            included=bool(raw.get("included", False)),
+            exportable=bool(raw.get("exportable", False)),
+            exported=bool(raw.get("exported", False)),
+            disposition=str(raw.get("disposition") or "").strip(),
+            disposition_reason=str(raw.get("disposition_reason") or "").strip(),
         )
 
 

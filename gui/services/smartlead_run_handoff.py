@@ -155,17 +155,31 @@ class SmartleadRunHandoffService:
         created_at = getattr(previous, "created_at", "") or getattr(package_result.manifest, "created_at", "")
         entries = []
         row_map = {row.prospect_id: row for row in self._run_service.snapshot(run.id, package_directory=package_result.package_directory).rows}
+        manifest_entries = {item.prospect_id: item for item in getattr(getattr(package_result, "manifest", None), "prospects", ())}
+        included_ids = {pid for pid, item in manifest_entries.items() if item.status in {"READY", "WARNING"}}
         for prospect_id in run.prospect_ids:
             derived = row_map.get(prospect_id)
+            manifest_entry = manifest_entries.get(prospect_id)
             blocker = "; ".join(getattr(derived, "blockers", ()) or ()) if derived is not None else ""
+            if not blocker and manifest_entry is not None:
+                blocker = str(getattr(manifest_entry, "reason", "") or "")
+            included = prospect_id in included_ids
+            status = "READY" if included else "BLOCKED"
+            disposition = "INCLUDED_EXPORTABLE" if included else "EXCLUDED_BLOCKED"
+            disposition_reason = "Included in prepared Smartlead package." if included else (blocker or "Not approved/exportable for prepared Smartlead package.")
             entries.append(
                 SmartleadRunPackageEntry(
                     prospect_id=prospect_id,
-                    status="READY" if prospect_id in {item.prospect_id for item in getattr(package_result.manifest, "prospects", ()) if item.status in {"READY", "WARNING"}} else "BLOCKED",
+                    status=status,
                     project_id=getattr(derived, "project_id", "") if derived is not None else "",
                     generation_job_id=getattr(derived, "generation_job_id", "") if derived is not None else "",
                     email=getattr(derived, "email", "") if derived is not None else "",
                     blocker=blocker,
+                    included=included,
+                    exportable=included,
+                    exported=False,
+                    disposition=disposition,
+                    disposition_reason=disposition_reason,
                 )
             )
         record = SmartleadRunPackageRecord(

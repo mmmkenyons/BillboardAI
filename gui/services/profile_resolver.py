@@ -739,6 +739,7 @@ class ProfileResolverService:
         max_browser_links_scanned: int = MAX_BROWSER_LINKS_SCANNED,
         max_browser_candidate_verify: int = MAX_BROWSER_CANDIDATE_VERIFY,
         total_timeout: float = DEFAULT_TOTAL_TIMEOUT,
+        monotonic_clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self._fetcher = fetcher or default_fetcher(timeout=timeout)
         self._browser_fetcher = browser_fetcher
@@ -752,6 +753,7 @@ class ProfileResolverService:
         self.max_browser_links_scanned = max_browser_links_scanned
         self.max_browser_candidate_verify = max_browser_candidate_verify
         self.total_timeout = max(0.001, float(total_timeout or DEFAULT_TOTAL_TIMEOUT))
+        self._monotonic_clock = monotonic_clock or time.monotonic
 
     def _validate_input(self, person_name: str, parent_website: str):
         parent = parent_origin(parent_website)
@@ -772,7 +774,8 @@ class ProfileResolverService:
         if isinstance(_require, ResolutionResult):
             return _require
         person, parent = _require
-        started = time.monotonic()
+        now = self._monotonic_clock
+        started = now()
 
         seen: Dict[str, ResolutionCandidate] = {}
         candidates: List[ResolutionCandidate] = []
@@ -832,7 +835,7 @@ class ProfileResolverService:
         }
 
         def _timed_out(stage: str) -> bool:
-            elapsed = time.monotonic() - started
+            elapsed = now() - started
             diagnostics["elapsed_seconds"] = round(elapsed, 3)
             if elapsed <= self.total_timeout:
                 return False
@@ -841,8 +844,9 @@ class ProfileResolverService:
             return True
 
         def _remaining_budget(stage: str) -> float:
-            remaining = self.total_timeout - (time.monotonic() - started)
-            diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            elapsed = now() - started
+            remaining = self.total_timeout - elapsed
+            diagnostics["elapsed_seconds"] = round(elapsed, 3)
             if remaining <= 0:
                 diagnostics["timeout_reason"] = f"TOTAL_RESOLUTION_TIMEOUT:{stage}"
                 diagnostics["final_decision_reason"] = "resolution timed out before starting next bounded operation"
@@ -850,8 +854,9 @@ class ProfileResolverService:
             return max(0.001, remaining)
 
         def _remaining_seconds() -> float:
-            remaining = self.total_timeout - (time.monotonic() - started)
-            diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            elapsed = now() - started
+            remaining = self.total_timeout - elapsed
+            diagnostics["elapsed_seconds"] = round(elapsed, 3)
             return max(0.0, remaining)
 
         def _has_high_value_candidate() -> bool:
@@ -895,7 +900,7 @@ class ProfileResolverService:
                 _finish_sitemap_discovery(SITEMAP_END_VERIFICATION_RESERVE_REACHED)
                 return True
             if tier == SITEMAP_TIER_LOW_VALUE_CONTENT:
-                elapsed = time.monotonic() - started
+                elapsed = now() - started
                 low_count = int(diagnostics.get("sitemap_low_value_count_attempted") or 0)
                 if low_count >= MAX_LOW_VALUE_SITEMAPS_ATTEMPTED or elapsed >= _sitemap_low_value_budget_seconds():
                     diagnostics["sitemap_low_value_budget_reached"] = True
@@ -935,7 +940,7 @@ class ProfileResolverService:
                 return future.result(timeout=budget)
             except FutureTimeoutError as exc:
                 future.cancel()
-                diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+                diagnostics["elapsed_seconds"] = round(now() - started, 3)
                 diagnostics["timeout_reason"] = f"TOTAL_RESOLUTION_TIMEOUT:{stage}"
                 diagnostics["final_decision_reason"] = "blocking fetch exceeded remaining resolver budget"
                 raise TimeoutError(diagnostics["timeout_reason"]) from exc
@@ -962,7 +967,7 @@ class ProfileResolverService:
                 return future.result(timeout=budget)
             except FutureTimeoutError as exc:
                 future.cancel()
-                diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+                diagnostics["elapsed_seconds"] = round(now() - started, 3)
                 diagnostics["timeout_reason"] = f"TOTAL_RESOLUTION_TIMEOUT:{stage}"
                 diagnostics["final_decision_reason"] = "blocking browser operation exceeded remaining resolver budget"
                 raise TimeoutError(diagnostics["timeout_reason"]) from exc

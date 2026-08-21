@@ -249,6 +249,7 @@ class ProspectGenerationService:
             cta=result.cta,
             quality_score=result.quality_score,
             company_name=result.company_name or project.company,
+            render_quality=dict(result.extra.get("render_quality") or {}) if isinstance(result.extra, dict) else {},
         )
         project.add_concept(concept)
         project.metadata["prospect_id"] = job.prospect_id

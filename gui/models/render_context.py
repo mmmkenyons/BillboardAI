@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from gui.models.prospect_generation import OpportunityGenerationContext
+from engine.content_safety import is_challenge_content
 
 
 RENDER_CONTEXT_VERSION = 1
@@ -64,7 +65,16 @@ def _select_visual_assets(profile: Any) -> tuple[str, str, dict[str, Any]]:
     person_oriented = bool(diagnostics.get("person_oriented"))
     assets = list(profile.assets or [])
 
-    usable = [a for a in assets if _asset_exists(str(a.path or "")) and int(a.width or 0) >= 120 and int(a.height or 0) >= 120]
+    usable = [
+        a for a in assets
+        if _asset_exists(str(a.path or ""))
+        and int(a.width or 0) >= 120
+        and int(a.height or 0) >= 120
+        and float(getattr(a, "confidence", 1.0) or 0.0) >= 0.5
+        and "conflicting_brand_asset_rejected" not in list(getattr(a, "evidence", []) or [])
+        and "challenge_content_asset_rejected" not in list(getattr(a, "evidence", []) or [])
+        and not is_challenge_content(getattr(a, "source_url", ""), getattr(a, "path", ""))
+    ]
     person_profiles = [a for a in usable if a.role == ROLE_PERSON_PROFILE and a.person_relevance_score >= 95]
     person_headers = [a for a in usable if a.role == ROLE_PERSON_HEADER and a.person_relevance_score >= 85]
     generic_heroes = [a for a in usable if a.role == ROLE_GENERIC_HERO]
@@ -73,7 +83,13 @@ def _select_visual_assets(profile: Any) -> tuple[str, str, dict[str, Any]]:
     # tests that do not create actual files.  Keep that behavior for the legacy
     # hero field; person-aware candidates from profile.assets still require a
     # real file so failed downloads fall back safely to screenshot.
-    legacy_heroes = [a for a in profile.hero_assets or [] if str(a.path or "")]
+    legacy_heroes = [
+        a for a in profile.hero_assets or []
+        if str(a.path or "")
+        and float(getattr(a, "confidence", 1.0) or 0.0) >= 0.5
+        and "conflicting_brand_asset_rejected" not in list(getattr(a, "evidence", []) or [])
+        and not is_challenge_content(getattr(a, "source_url", ""), getattr(a, "path", ""))
+    ]
 
     def key(asset: Any) -> tuple[float, float, str]:
         return (
@@ -125,6 +141,7 @@ def _select_visual_assets(profile: Any) -> tuple[str, str, dict[str, Any]]:
         "selected_background_reason": background_reason,
         "screenshot_path": screenshot,
         "property_listing_candidates": len([a for a in assets if a.role == ROLE_PROPERTY_LISTING]),
+        "rejected_candidates": diagnostics.get("rejected_candidates", []),
     })
     return str(hero_path or ""), str(background_path or ""), diagnostics
 

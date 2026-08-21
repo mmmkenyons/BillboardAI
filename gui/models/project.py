@@ -391,6 +391,7 @@ class Project:
             company_name=result.company_name or self.company,
             name=name,
             source_concept_id=source_id,
+            render_quality=dict(result.extra.get("render_quality") or {}) if isinstance(result.extra, dict) else {},
         )
 
         self.add_concept(concept)

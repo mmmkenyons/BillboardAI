@@ -519,6 +519,25 @@ class SmartleadRunExportService:
         os.replace(tmp, path)
 
     def _persist_receipt(self, record: SmartleadRunPackageRecord, receipt: SmartleadRunExportReceipt) -> None:
-        updated = SmartleadRunPackageRecord.from_dict({**record.to_dict(), "last_export": receipt.to_dict()})
+        exported = set((receipt.exported_statuses or {}).keys())
+        payload = record.to_dict()
+        entries = []
+        for entry in payload.get("entries", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            prospect_id = _clean(entry.get("prospect_id"))
+            is_exported = prospect_id in exported
+            entry = dict(entry)
+            entry["exported"] = is_exported
+            if is_exported:
+                entry["disposition"] = "EXPORTED"
+                entry["disposition_reason"] = "Exported to portable Smartlead CSV."
+            elif entry.get("exportable"):
+                entry["disposition"] = "EXPORTABLE_NOT_EXPORTED"
+                entry["disposition_reason"] = "Exportable member was not written to CSV."
+            entries.append(entry)
+        payload["entries"] = entries
+        payload["last_export"] = receipt.to_dict()
+        updated = SmartleadRunPackageRecord.from_dict(payload)
         self.package_store.upsert(updated)
         self.package_store.save()

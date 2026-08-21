@@ -18,7 +18,15 @@ if ROOT not in sys.path:
 
 from gui.models.prospect import RESOLUTION_AMBIGUOUS, RESOLUTION_NOT_FOUND, RESOLUTION_RESOLVED, RESOLUTION_TIMEOUT, Prospect  # noqa: E402
 from gui.services.copy_quality import PERSON_PROFILE_UNRESOLVED, QUALITY_WARNING, assess_profile_quality  # noqa: E402
-from gui.services.profile_resolver import FetchError, ProfileResolverService, effective_scrape_url  # noqa: E402
+from gui.services.profile_resolver import (  # noqa: E402
+    FetchError,
+    ProfileResolverService,
+    SITEMAP_END_DISCOVERY_BUDGET_REACHED,
+    SITEMAP_END_LOW_VALUE_BUDGET_REACHED,
+    SITEMAP_END_SITEMAPS_EXHAUSTED,
+    SITEMAP_END_VERIFICATION_RESERVE_REACHED,
+    effective_scrape_url,
+)
 
 
 PARENT = "https://example.com"
@@ -155,6 +163,16 @@ def low_value_budget_result(*, directory_target: bool = True):
     return result, site
 
 
+def deterministic_clock_factory(increment: float):
+    elapsed = {"seconds": 0.0}
+
+    def deterministic_clock() -> float:
+        elapsed["seconds"] += increment
+        return elapsed["seconds"]
+
+    return deterministic_clock
+
+
 def main() -> int:
     counts = {"passed": 0, "failed": 0}
 
@@ -233,9 +251,31 @@ def main() -> int:
     }
     for i in range(12):
         large_no_target_pages[f"/xmlsitemaps/ldp/pending_page_{i}_ldp.xml"] = sitemap(*(f"{PARENT}/properties/pending-{i}-{j}" for j in range(1500)))
-    large_no_target = resolver(large_no_target_pages, total_timeout=10.0).resolve("Alex Kahn", PARENT)
+    large_no_target = resolver(
+        large_no_target_pages,
+        total_timeout=10.0,
+        monotonic_clock=deterministic_clock_factory(0.25),
+    ).resolve("Alex Kahn", PARENT)
     check("large legitimate person sitemap without target remains high-value", large_no_target.diagnostics.get("sitemap_high_value_count_attempted", 0) >= 1, counts)
-    check("subsequent low-value inventory bounded after no target", large_no_target.diagnostics.get("sitemap_low_value_budget_reached") and large_no_target.status != "ERROR", counts, large_no_target.status)
+    large_no_target_end_reason = large_no_target.diagnostics.get("sitemap_discovery_end_reason")
+    large_no_target_limits = large_no_target.diagnostics.get("bounded_limits", {})
+    large_no_target_bounded = (
+        large_no_target.status == RESOLUTION_NOT_FOUND
+        and large_no_target.diagnostics.get("post_sitemap_budget_preserved") is True
+        and large_no_target.diagnostics.get("sitemap_low_value_count_attempted", 0) <= large_no_target_limits.get("max_low_value_sitemaps_attempted", 0)
+        and large_no_target.diagnostics.get("sitemap_remaining_budget_seconds", 0.0) >= large_no_target_limits.get("post_sitemap_reserve_seconds", 0.0)
+        and large_no_target_end_reason in {
+            SITEMAP_END_LOW_VALUE_BUDGET_REACHED,
+            SITEMAP_END_DISCOVERY_BUDGET_REACHED,
+            SITEMAP_END_VERIFICATION_RESERVE_REACHED,
+            SITEMAP_END_SITEMAPS_EXHAUSTED,
+        }
+        and (
+            large_no_target_end_reason != SITEMAP_END_LOW_VALUE_BUDGET_REACHED
+            or large_no_target.diagnostics.get("sitemap_low_value_budget_reached") is True
+        )
+    )
+    check("subsequent low-value inventory bounded after no target", large_no_target_bounded, counts, large_no_target_end_reason or large_no_target.status)
 
     huge_urls = [f"{PARENT}/agents/person-{i}" for i in range(9999)] + [f"{PARENT}/agents/alex-kahn"] + [f"{PARENT}/agents/person-extra-{i}" for i in range(10000)]
     huge = resolver({"/robots.txt": f"User-agent: *\nSitemap: {PARENT}/sitemaps/agent-pages.xml\n", "/sitemaps/agent-pages.xml": sitemap(*huge_urls), "/agents/alex-kahn": profile()}, total_timeout=10.0).resolve("Alex Kahn", PARENT)

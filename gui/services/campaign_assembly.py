@@ -214,6 +214,15 @@ class CampaignAssemblyService:
             self._assembly_store.upsert(snapshot)
         return CampaignAssemblyResult(bool(getattr(export_result, "success", False)), getattr(export_result, "message", ""), snapshot, self._summary(snapshot.readiness if snapshot else ()), export_result)
 
+    def export(self, campaign_run_id: str, *, destination: str | None = None) -> CampaignAssemblyResult:
+        """Compatibility wrapper for acceptance scripts.
+
+        The authoritative implementation remains ``export_campaign()``, which
+        prepares the run package via ``SmartleadRunHandoffService`` and delegates
+        portable export to ``SmartleadRunExportService.export_run()``.
+        """
+        return self.export_campaign(campaign_run_id, destination=destination)
+
     def _build_snapshot(self, run: Any, *, persist: bool) -> CampaignAssemblySnapshot:
         previous = self._assembly_store.get(run.id)
         readiness = tuple(self._readiness_for(pid) for pid in _dedupe(run.prospect_ids))

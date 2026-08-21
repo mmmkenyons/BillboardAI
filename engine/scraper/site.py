@@ -30,6 +30,7 @@ from .logo import logo_candidates, pick_best_logo
 from .metadata import extract_metadata
 from .capture import capture_screenshot, ScreenshotValidationError
 from ..brand_profile import BrandAsset
+from ..content_safety import detect_challenge_content
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +353,22 @@ class WebsiteScraper:
             except Exception:
                 logger.debug("Asset normalization skipped for %s", asset_path)
 
+        challenge = detect_challenge_content(
+            self.html,
+            self.metadata.get("title") if isinstance(self.metadata, dict) else "",
+            self.metadata.get("description") if isinstance(self.metadata, dict) else "",
+            self.headline,
+        )
+        if challenge.detected:
+            self.headline = ""
+            self.hero_url = None
+            self.logo_url = None
+            self.logo_path = None
+            logo_asset = None
+            brand_assets = []
+            self.asset_paths = []
+            self.asset_urls = []
+
         data = {
             "url": self.url,
             "html": self.html,
@@ -373,6 +390,10 @@ class WebsiteScraper:
             "asset_urls": self.asset_urls,
             "metadata": self.metadata,
             "capture_diagnostics": dict(self.capture_diagnostics or {}),
+            "content_safety": {
+                "challenge": challenge.to_dict(),
+                "fallback": "challenge_content_suppressed" if challenge.detected else "",
+            },
         }
 
         _report(40, "Analyzing Brand", "analyze")

@@ -475,7 +475,18 @@ def test_sprint6f2_no_person_candidate_preserves_homepage_discovery_budget() -> 
             f"{PARENT}/properties/off-market-{i}-{j}" for j in range(2000)
         ))
     site = Site({**{"/sitemap.xml": "", "/sitemap_index.xml": "", "/team": ""}, **pages})
-    result = ProfileResolverService(fetcher=site, browser_fetcher=None, total_timeout=3.0).resolve("Alex Kahn", PARENT)
+    synthetic_elapsed = {"seconds": 0.0}
+
+    def deterministic_clock() -> float:
+        synthetic_elapsed["seconds"] += 0.05
+        return synthetic_elapsed["seconds"]
+
+    result = ProfileResolverService(
+        fetcher=site,
+        browser_fetcher=None,
+        total_timeout=3.0,
+        monotonic_clock=deterministic_clock,
+    ).resolve("Alex Kahn", PARENT)
     assert result.status == RESOLUTION_RESOLVED
     assert result.method == "directory"
     assert result.diagnostics["directory_pages_examined"] == 1
@@ -490,7 +501,7 @@ def test_sprint6f2_large_real_person_sitemap_with_target_still_discovers_candida
         "/robots.txt": f"User-agent: *\nSitemap: {PARENT}/sitemaps/agent-pages.xml\n",
         "/sitemaps/agent-pages.xml": sitemap(*urls),
         "/agents/alex-kahn": profile(),
-    }, total_timeout=10.0)
+    }, total_timeout=10.0, monotonic_clock=lambda: 0.0)
     result = service.resolve("Alex Kahn", PARENT)
     assert result.status == RESOLUTION_RESOLVED
     assert result.resolved_url == target
@@ -517,7 +528,13 @@ def test_sprint6f2_large_real_person_sitemap_no_target_then_low_value_bounded() 
         pages[f"/xmlsitemaps/ldp/pending_page_{i}_ldp.xml"] = sitemap(*(
             f"{PARENT}/properties/pending-{i}-{j}" for j in range(2000)
         ))
-    result = resolver_for(pages, total_timeout=10.0).resolve("Alex Kahn", PARENT)
+    synthetic_elapsed = {"seconds": 0.0}
+
+    def deterministic_clock() -> float:
+        synthetic_elapsed["seconds"] += 0.25
+        return synthetic_elapsed["seconds"]
+
+    result = resolver_for(pages, total_timeout=10.0, monotonic_clock=deterministic_clock).resolve("Alex Kahn", PARENT)
     assert result.status == RESOLUTION_NOT_FOUND
     assert result.diagnostics["sitemap_high_value_count_attempted"] >= 1
     assert result.diagnostics["post_sitemap_budget_preserved"] is True

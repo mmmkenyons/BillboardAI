@@ -20,6 +20,7 @@ from gui.models.prospect import (
     CONFIDENCE_HIGH,
     CONFIDENCE_MEDIUM,
 )
+from engine.content_safety import CHALLENGE_CONTENT_DETECTED, detect_challenge_content
 
 
 QUALITY_PASS = "PASS"
@@ -41,6 +42,7 @@ PERSON_NAME_MISMATCH = "PERSON_NAME_MISMATCH"
 COMPANY_NAME_MISMATCH = "COMPANY_NAME_MISMATCH"
 MISSING_HEADLINE = "MISSING_HEADLINE"
 MISSING_CTA = "MISSING_CTA"
+RENDER_QUALITY_PREFIX = "RENDER_"
 
 _SUPERLATIVE_TERMS = (
     "fastest", "best", "#1", "number one", "top-rated", "top rated",
@@ -153,10 +155,29 @@ def assess_copy_quality(*, prospect: Any, concept: Any, project: Any, row: Any) 
     body = _clean(getattr(row, "email_body", ""))
     combined = "\n".join(part for part in (headline, cta, subject, body) if part)
     source_texts = _source_texts(prospect, concept, project, row)
-
     blocking: list[CopyQualityReason] = []
     warnings: list[CopyQualityReason] = []
-
+    challenge = detect_challenge_content(headline, cta, subject, body)
+    if challenge.detected:
+        blocking.append(CopyQualityReason(CHALLENGE_CONTENT_DETECTED, "Challenge/interstitial content was used as creative copy.", "; ".join(challenge.indicators)))
+    render_quality = {}
+    extra = getattr(concept, "extra", None)
+    if isinstance(extra, dict):
+        render_quality = extra.get("render_quality") if isinstance(extra.get("render_quality"), dict) else {}
+    if not render_quality and isinstance(getattr(project, "render_context", None), dict):
+        render_quality = project.render_context.get("render_quality") if isinstance(project.render_context.get("render_quality"), dict) else {}
+    for reason in list(render_quality.get("reasons") or []):
+        if not isinstance(reason, dict):
+            continue
+        code = _clean(reason.get("code"))
+        message = _clean(reason.get("message")) or "Rendered creative has a layout quality issue."
+        if not code.startswith(RENDER_QUALITY_PREFIX):
+            continue
+        item = CopyQualityReason(code, message, str(reason)[:160])
+        if _clean(reason.get("severity")) == QUALITY_BLOCKED or render_quality.get("status") == QUALITY_BLOCKED:
+            blocking.append(item)
+        else:
+            warnings.append(item)
     if not headline:
         blocking.append(CopyQualityReason(MISSING_HEADLINE, "Generated billboard creative is missing a headline."))
     if row is not None and hasattr(row, "cta") and not cta:

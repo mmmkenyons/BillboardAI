@@ -17,6 +17,7 @@ import os
 import re
 
 from .person_personalization import PersonFacts, choose_personalization
+from .content_safety import detect_challenge_content, is_challenge_content
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +156,29 @@ def _contains_full_name(text: str, name: str) -> bool:
     return f" {' '.join(tokens)} " in norm
 
 
+def _company_tokens(company: str) -> set[str]:
+    return {token for token in _norm_text(company).split() if len(token) >= 4}
+
+
+def _asset_text(asset: BrandAsset) -> str:
+    return " ".join([str(asset.source_url or ""), str(asset.path or ""), " ".join(asset.evidence or [])])
+
+
+def _is_conflicting_brand_asset(asset: BrandAsset, company: str, page_url: str) -> bool:
+    tokens = _company_tokens(company)
+    if not tokens:
+        return False
+    text = _norm_text(_asset_text(asset))
+    if any(token in text.split() for token in tokens):
+        return False
+    source_host = (urlparse(asset.source_url or "").hostname or "").lower().lstrip("www.")
+    page_host = (urlparse(page_url or "").hostname or "").lower().lstrip("www.")
+    if source_host and page_host and (source_host == page_host or source_host.endswith("." + page_host)):
+        return False
+    foreign_markers = {"service", "services", "roofing", "dental", "dentist", "plumbing", "realty", "hvac"}
+    return any(marker in text.split() for marker in foreign_markers)
+
+
 def _looks_like_person_profile_url(url: str) -> bool:
     text = _norm_text(url)
     return any(marker in text.split() for marker in ("agent", "profile", "person", "provider", "attorney", "advisor", "realtor", "team"))
@@ -174,6 +198,7 @@ def classify_brand_assets(
     contact_name: str = "",
     page_url: str = "",
     metadata: dict[str, Any] | None = None,
+    company_name: str = "",
 ) -> dict[str, Any]:
     """Assign lightweight roles and person relevance evidence to image assets.
 
@@ -200,7 +225,22 @@ def classify_brand_assets(
     person_context = bool(contact_name and not unresolved_person and (_contains_full_name(title_text, contact_name) or _looks_like_person_profile_url(page_url)))
 
     diagnostics: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     for asset in assets:
+        if is_challenge_content(asset.source_url, asset.path):
+            asset.role = ROLE_OTHER
+            asset.confidence = 0.0
+            asset.selection_score = 0.0
+            asset.evidence = sorted(set(list(asset.evidence or []) + ["challenge_content_asset_rejected"]))
+            rejected.append({"path": os.path.basename(asset.path or ""), "source_url": asset.source_url, "reason": "challenge_content_asset"})
+            continue
+        if _is_conflicting_brand_asset(asset, company_name, page_url):
+            asset.role = ROLE_OTHER
+            asset.confidence = min(float(asset.confidence or 0), 0.25)
+            asset.selection_score = 0.0
+            asset.evidence = sorted(set(list(asset.evidence or []) + ["conflicting_brand_asset_rejected"]))
+            rejected.append({"path": os.path.basename(asset.path or ""), "source_url": asset.source_url, "reason": "conflicting_brand_asset"})
+            continue
         existing_evidence = [str(item) for item in (asset.evidence or [])]
         dom_context = " ".join(
             item.split(":", 1)[1]
@@ -285,6 +325,7 @@ def classify_brand_assets(
         "person_specific_assets_suppressed": bool(unresolved_person),
         "candidate_count": len(assets),
         "candidates": diagnostics,
+        "rejected_candidates": rejected,
     }
 
 
@@ -568,6 +609,25 @@ class BrandProfileBuilder:
         source_metadata: Dict[str, Any] = (
             dict(meta_raw) if isinstance(meta_raw, dict) else {}
         )
+        challenge = detect_challenge_content(
+            data.get("html"),
+            headline,
+            ad_copy,
+            company,
+            source_metadata.get("title"),
+            source_metadata.get("description"),
+        )
+        if challenge.detected:
+            source_metadata.setdefault("content_safety", {})
+            if isinstance(source_metadata["content_safety"], dict):
+                source_metadata["content_safety"]["challenge"] = challenge.to_dict()
+                source_metadata["content_safety"]["fallback"] = "challenge_copy_and_assets_suppressed"
+            headline = ""
+            ad_copy = ""
+            logo = None
+            assets = []
+            hero_assets = []
+            hero_url = ""
         capture_diagnostics = data.get("capture_diagnostics")
         if isinstance(capture_diagnostics, dict) and capture_diagnostics:
             source_metadata.setdefault("capture_diagnostics", dict(capture_diagnostics))
@@ -591,8 +651,9 @@ class BrandProfileBuilder:
             contact_name=contact_name,
             page_url=url,
             metadata=source_metadata,
+            company_name=company,
         )
-        if contact_name or asset_diagnostics.get("person_oriented"):
+        if contact_name or asset_diagnostics.get("person_oriented") or asset_diagnostics.get("rejected_candidates"):
             source_metadata["asset_selection_diagnostics"] = asset_diagnostics
 
         # Preserve legacy paths in source_metadata for backward compatibility
