@@ -31,6 +31,7 @@ from gui.services.canonical_prospect_intelligence import (
     canonical_context,
     has_generation_intelligence,
 )
+from gui.services.email_enrichment import enrich_and_persist_prospect_email
 from gui.services.prospect_opportunity_workspace import ProspectOpportunityWorkspaceService
 
 
@@ -222,6 +223,7 @@ class ProspectGenerationService:
         self._save_job(job)
         try:
             result = self._invoke_generation(job)
+            self._enrich_missing_email(job, result)
             if result.success:
                 self._handle_success(job, result)
             else:
@@ -268,6 +270,28 @@ class ProspectGenerationService:
             opportunity_context=job.opportunity_context,
         )
         return self._generate(request)
+
+    def _enrich_missing_email(self, job: ProspectGenerationJob, result: MockupResult) -> None:
+        """Best-effort Sprint 7C email enrichment; never blocks generation."""
+        prospect = self._prospect_store.get(job.prospect_id)
+        if prospect is None:
+            return
+        scrape_data = {}
+        if isinstance(result.extra, dict) and isinstance(result.extra.get("scrape_data"), dict):
+            scrape_data = dict(result.extra.get("scrape_data") or {})
+        try:
+            enrich_and_persist_prospect_email(
+                prospect,
+                prospect_store=self._prospect_store,
+                scrape_data=scrape_data,
+                fetcher=lambda _url: "",
+            )
+        except Exception as exc:  # noqa: BLE001 - enrichment is non-blocking by contract
+            prospect.metadata.setdefault("email_enrichment", {})["email_enrichment_status"] = "ERROR"
+            prospect.metadata.setdefault("email_enrichment", {})["error"] = str(exc)
+            prospect.touch()
+            self._prospect_store.update(prospect)
+            self._prospect_store.save()
 
     def _handle_success(self, job: ProspectGenerationJob, result: MockupResult) -> None:
         project = self._load_project(job)

@@ -297,6 +297,7 @@ def generate(
             "template": ctx_obj.template,
             "render_context": ctx_obj.to_dict(),
             "brand_profile": brand_profile_snapshot,
+            "scrape_data": dict(data) if isinstance(data, dict) else {},
             "render_quality": render_quality,
             "hero_path": ctx_obj.hero_image,
             "screenshot_path": ctx_obj.background_image,
