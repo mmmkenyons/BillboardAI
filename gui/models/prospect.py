@@ -282,7 +282,8 @@ def normalize_website(value: Any) -> str:
     - trims whitespace
     - adds ``https://`` scheme when only a host is given
     - lowercases the host
-    - strips obvious trailing-slash noise (pathless URLs)
+    - strips obvious trailing-slash noise only for pathless URLs
+    - preserves paths, queries, fragments, and subdomains
     """
     text = _clean(value)
     if not text:
@@ -297,7 +298,17 @@ def normalize_website(value: Any) -> str:
     host = (parsed.hostname or "").lower()
     if not host or "." not in host:
         return text
-    return f"{parsed.scheme}://{host}"
+    netloc = host
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    suffix = ""
+    if parsed.path and parsed.path != "/":
+        suffix += parsed.path
+    if parsed.query:
+        suffix += f"?{parsed.query}"
+    if parsed.fragment:
+        suffix += f"#{parsed.fragment}"
+    return f"{parsed.scheme}://{netloc}{suffix}"
 
 
 def normalize_domain(value: Any) -> str:
@@ -505,16 +516,27 @@ class Prospect:
         default_factory=lambda: filesystem_safe_id("prospect")
     )
     company_name: str = ""
+    company_name_for_ads: str = ""
     website: str = ""
     domain: str = ""
 
     phone: str = ""
+    secondary_email: str = ""
+    mobile_phone: str = ""
+    work_direct_phone: str = ""
+    company_phone: str = ""
+    other_phone: str = ""
     email: str = ""
 
     address: str = ""
     city: str = ""
     state: str = ""
     postal_code: str = ""
+    country: str = ""
+    company_address: str = ""
+    company_city: str = ""
+    company_state: str = ""
+    company_country: str = ""
 
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -522,9 +544,18 @@ class Prospect:
 
     category: str = ""
     subcategory: str = ""
+    naics_codes: List[str] = field(default_factory=list)
+    sic_codes: List[str] = field(default_factory=list)
+    company_keywords: List[str] = field(default_factory=list)
+    industry: str = ""
+    employee_count: str = ""
+    annual_revenue: str = ""
+    number_of_retail_locations: str = ""
 
     contact_name: str = ""
     contact_title: str = ""
+    person_linkedin_url: str = ""
+    company_linkedin_url: str = ""
 
     source: str = ""
     source_id: str = ""
@@ -589,21 +620,41 @@ class Prospect:
         return {
             "prospect_id": self.prospect_id,
             "company_name": self.company_name,
+            "company_name_for_ads": self.company_name_for_ads,
             "website": self.website,
             "domain": self.domain,
             "phone": self.phone,
+            "secondary_email": self.secondary_email,
+            "mobile_phone": self.mobile_phone,
+            "work_direct_phone": self.work_direct_phone,
+            "company_phone": self.company_phone,
+            "other_phone": self.other_phone,
             "email": self.email,
             "address": self.address,
             "city": self.city,
             "state": self.state,
             "postal_code": self.postal_code,
+            "country": self.country,
+            "company_address": self.company_address,
+            "company_city": self.company_city,
+            "company_state": self.company_state,
+            "company_country": self.company_country,
             "latitude": self.latitude,
             "longitude": self.longitude,
             "geocode_metadata": dict(self.geocode_metadata),
             "category": self.category,
             "subcategory": self.subcategory,
+            "naics_codes": list(self.naics_codes),
+            "sic_codes": list(self.sic_codes),
+            "company_keywords": list(self.company_keywords),
+            "industry": self.industry,
+            "employee_count": self.employee_count,
+            "annual_revenue": self.annual_revenue,
+            "number_of_retail_locations": self.number_of_retail_locations,
             "contact_name": self.contact_name,
             "contact_title": self.contact_title,
+            "person_linkedin_url": self.person_linkedin_url,
+            "company_linkedin_url": self.company_linkedin_url,
             "source": self.source,
             "source_id": self.source_id,
             "status": self.status,
@@ -650,21 +701,41 @@ class Prospect:
             prospect_id=_clean(data.get("prospect_id"))
             or filesystem_safe_id("prospect"),
             company_name=_clean(data.get("company_name")),
+            company_name_for_ads=_clean(data.get("company_name_for_ads")),
             website=_clean(data.get("website")),
             domain=_clean(data.get("domain")),
             phone=_clean(data.get("phone")),
+            secondary_email=_clean(data.get("secondary_email")),
+            mobile_phone=_clean(data.get("mobile_phone")),
+            work_direct_phone=_clean(data.get("work_direct_phone")),
+            company_phone=_clean(data.get("company_phone")),
+            other_phone=_clean(data.get("other_phone")),
             email=_clean(data.get("email")),
             address=_clean(data.get("address")),
             city=_clean(data.get("city")),
             state=_clean(data.get("state")),
             postal_code=_clean(data.get("postal_code")),
+            country=_clean(data.get("country")),
+            company_address=_clean(data.get("company_address")),
+            company_city=_clean(data.get("company_city")),
+            company_state=_clean(data.get("company_state")),
+            company_country=_clean(data.get("company_country")),
             latitude=_optional_float(data.get("latitude")),
             longitude=_optional_float(data.get("longitude")),
             geocode_metadata=dict(data.get("geocode_metadata") or {}),
             category=_clean(data.get("category")),
             subcategory=_clean(data.get("subcategory")),
+            naics_codes=_string_list(data.get("naics_codes")),
+            sic_codes=_string_list(data.get("sic_codes")),
+            company_keywords=_string_list(data.get("company_keywords")),
+            industry=_clean(data.get("industry")),
+            employee_count=_clean(data.get("employee_count")),
+            annual_revenue=_clean(data.get("annual_revenue")),
+            number_of_retail_locations=_clean(data.get("number_of_retail_locations")),
             contact_name=_clean(data.get("contact_name")),
             contact_title=_clean(data.get("contact_title")),
+            person_linkedin_url=_clean(data.get("person_linkedin_url")),
+            company_linkedin_url=_clean(data.get("company_linkedin_url")),
             source=_clean(data.get("source")),
             source_id=_clean(data.get("source_id")),
             status=status,

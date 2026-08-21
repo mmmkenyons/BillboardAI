@@ -288,6 +288,7 @@ class _ImportDialog(QDialog):
         self.setWindowTitle("Import Prospects CSV")
         self.resize(520, 420)
         self._content: Optional[str] = None
+        self._mapping_widgets: Dict[int, QComboBox] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -320,6 +321,11 @@ class _ImportDialog(QDialog):
         map_heading = QLabel("Recognized Column Mapping", self)
         map_heading.setObjectName("emptyState")
         root.addWidget(map_heading)
+        self.mapping_table = QTableWidget(0, 3, self)
+        self.mapping_table.setHorizontalHeaderLabels(["Source column", "BillboardAI field", "Status"])
+        self.mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        root.addWidget(self.mapping_table, 1)
         self.mapping_label = QLabel("Select a file to preview mapping.", self)
         self.mapping_label.setObjectName("projectMeta")
         self.mapping_label.setWordWrap(True)
@@ -359,26 +365,19 @@ class _ImportDialog(QDialog):
         self._content = _decode_csv(raw)
         self.file_label.setText(path)
         self.result_label.setText("")
-        mapping = self._controller.preview_mapping(self._content)
-        if mapping:
-            lines = [f"{canon}  <-  {hdr}" for canon, hdr in mapping.items()]
-            self.mapping_label.setText("\n".join(lines))
-            self.import_btn.setEnabled("company_name" in mapping)
-            if "company_name" not in mapping:
-                self.mapping_label.setText(
-                    "No company-name column found. "
-                    + ("\n".join(lines) if lines else "")
-                )
-        else:
-            self.mapping_label.setText(
-                "No recognized columns. Check that the CSV has a header row."
-            )
-            self.import_btn.setEnabled(False)
+        details = self._controller.preview_mapping_details(self._content)
+        self._populate_mapping_table(details)
+        mapping = self._selected_mapping()
+        self.import_btn.setEnabled("company_name" in mapping)
+        self.mapping_label.setText(
+            "Review mappings. Unknown columns can remain ignored. Company Name is required."
+            if details else "No recognized columns. Check that the CSV has a header row."
+        )
 
     def _do_import(self) -> None:
         if not self._content:
             return
-        result = self._controller.import_csv(self._content)
+        result = self._controller.import_csv(self._content, mapping=self._selected_mapping())
         if result is None:
             return
         self.result_label.setText(
@@ -388,6 +387,48 @@ class _ImportDialog(QDialog):
         )
         self._content = None
         self.accept()
+
+    def _populate_mapping_table(self, details: List[object]) -> None:
+        from gui.services.prospect_csv_import import CANONICAL_FIELDS, CANONICAL_LABELS
+
+        self._mapping_widgets.clear()
+        self.mapping_table.setRowCount(len(details))
+        for row, detail in enumerate(details):
+            source = getattr(detail, "source_column", "")
+            status = getattr(detail, "status", "")
+            current = getattr(detail, "canonical_field", "")
+            self.mapping_table.setItem(row, 0, QTableWidgetItem(source))
+            combo = QComboBox(self.mapping_table)
+            combo.addItem("Ignore", "")
+            for field_name in CANONICAL_FIELDS:
+                combo.addItem(CANONICAL_LABELS.get(field_name, field_name), field_name)
+            idx = combo.findData(current)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            combo.currentIndexChanged.connect(lambda _idx: self.import_btn.setEnabled("company_name" in self._selected_mapping()))
+            self.mapping_table.setCellWidget(row, 1, combo)
+            self._mapping_widgets[row] = combo
+            self.mapping_table.setItem(row, 2, QTableWidgetItem(status))
+
+    def _selected_mapping(self) -> Dict[str, str]:
+        from gui.services.prospect_csv_import import MERGEABLE_FIELDS
+
+        mapping: Dict[str, str] = {}
+        used: set[str] = set()
+        for row, combo in self._mapping_widgets.items():
+            field_name = combo.currentData()
+            source_item = self.mapping_table.item(row, 0)
+            source = source_item.text() if source_item else ""
+            if not field_name or not source:
+                continue
+            if field_name in mapping and field_name not in MERGEABLE_FIELDS:
+                combo.setCurrentIndex(0)
+                continue
+            if source in used:
+                continue
+            mapping[field_name] = source
+            used.add(source)
+        return mapping
 class ProspectWorkspacePage(QWidget):
     """The prospects workspace: filters + table + actions."""
 

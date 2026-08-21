@@ -359,13 +359,13 @@ class ProspectController(QObject):
     # CSV import
     # ------------------------------------------------------------------
 
-    def import_csv(self, content: str) -> Optional[ProspectImportResult]:
+    def import_csv(self, content: str, mapping: Optional[Dict[str, str]] = None) -> Optional[ProspectImportResult]:
         """Import CSV text content; emit signals and return the result.
 
         Returns None on failure (error already emitted).
         """
         try:
-            result = self._service.import_csv(content)
+            result = self._service.import_csv(content, mapping=mapping)
         except ProspectImportError as exc:
             logger.warning("CSV import failed: %s", exc)
             self.error_message.emit(str(exc))
@@ -410,6 +410,17 @@ class ProspectController(QObject):
             return {}
         headers = imp._extract_headers(rows)
         return imp.detect_mapping(headers)
+
+    def preview_mapping_details(self, content: str) -> List[Any]:
+        """Detect per-column mapping details without importing."""
+        from gui.services import prospect_csv_import as imp
+
+        try:
+            rows = imp._read_all_rows(content)
+        except Exception:  # noqa: BLE001
+            return []
+        headers = imp._extract_headers(rows)
+        return list(imp.detect_mapping_details(headers).columns)
 
     # ------------------------------------------------------------------
     # Internal helpers
