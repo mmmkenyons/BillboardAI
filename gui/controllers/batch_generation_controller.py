@@ -13,13 +13,21 @@ from gui.models.campaign_package import CampaignPackageResult
 from gui.services.campaign_export import CampaignExportService
 from gui.services.campaign_package import CampaignPackageService
 from gui.services.profile_resolver import effective_scrape_url
-from gui.services.prospect_generation import ProspectGenerationService
+from gui.services.prospect_generation import SUPPORTED_TEMPLATES, ProspectGenerationService
 from gui.workers.prospect_generation_worker import ProspectGenerationWorker
 import os
 import subprocess
 import sys
 
 logger = logging.getLogger(__name__)
+
+_ELIGIBILITY_REASON_LABELS = {
+    "GENERIC_FALLBACK_INSUFFICIENT_INTELLIGENCE": "Not enough business information for generic generation.",
+}
+
+
+def _format_eligibility_reasons(reasons: list[str]) -> str:
+    return ", ".join(_ELIGIBILITY_REASON_LABELS.get(reason, reason) for reason in reasons)
 
 
 class BatchGenerationController(QObject):
@@ -216,9 +224,9 @@ class BatchGenerationController(QObject):
                     "company_name": prospect.company_name,
                     "website": prospect.website,
                     "resolved_template": eligibility.resolved_template,
-                    "template_options": ["contractor", "dentist", "realtor"],
+                    "template_options": list(SUPPORTED_TEMPLATES),
                     "opportunity": self._service.recommended_opportunity_label(prospect.prospect_id),
-                    "eligibility": "Ready" if eligibility.eligible else ", ".join(eligibility.reasons),
+                    "eligibility": "Ready" if eligibility.eligible else _format_eligibility_reasons(list(eligibility.reasons)),
                     "export_status": export_eligibility.status.title(),
                     "resolution_status": prospect.resolution_status,
                     "resolution_confidence": prospect.resolution_confidence,

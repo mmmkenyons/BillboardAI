@@ -106,7 +106,38 @@ def select_creative_phone(prospect: Prospect, website_phone: str = "") -> Dict[s
 
 _NAICS_LABELS = {
     "238160": "Roofing Contractors",
+    "484110": "Moving and Logistics",
+    "492110": "Moving and Logistics",
+    "561730": "Landscaping Services",
+    "238220": "Solar Installation",
+    "221114": "Solar Energy",
+    "311811": "Bakery",
+    "445291": "Bakery and Food",
 }
+
+_GENERIC_CLASSIFICATION_BASES = {
+    "naics_codes",
+    "company_keywords",
+    "industry",
+    "website",
+    "category",
+}
+
+_NON_MEANINGFUL_CLASSIFICATION_LABELS = {
+    "",
+    "unknown",
+    "other",
+    "n/a",
+    "na",
+    "none",
+    "uncategorized",
+    "generic",
+}
+
+
+def _meaningful_classification_label(value: Any) -> bool:
+    label = _clean(value).lower()
+    return bool(label and label not in _NON_MEANINGFUL_CLASSIFICATION_LABELS)
 
 
 def _naics_label(codes: Iterable[str]) -> str:
@@ -135,6 +166,75 @@ def business_classification(prospect: Prospect, website_categories: Iterable[str
     if _clean(prospect.category):
         return {"basis": "category", "value": prospect.category, "label": prospect.category, "keywords": [], "reason": "existing prospect category fallback", "origin": "PROSPECT", "source_field": "category", "source_column": ""}
     return {"basis": "generic_fallback", "value": "", "label": "", "keywords": [], "reason": "no classification evidence supplied", "origin": "FALLBACK", "source_field": "", "source_column": ""}
+
+
+def evaluate_generic_generation_intelligence(prospect: Prospect) -> Dict[str, Any]:
+    """Deterministic minimum-data policy for universal/generic generation.
+
+    Generic generation is intentionally stricter than historical canonical
+    fallback availability: a company/display name plus location alone is not
+    enough to create credible advertising.  A prospect must have a usable
+    creative-facing company name and at least one meaningful business
+    classification signal (NAICS, keywords, industry/category, or safe website
+    classification already merged into canonical intelligence).
+    """
+    display_name = preferred_display_company_name(prospect)
+    classification = business_classification(prospect)
+    basis = _clean(classification.get("basis"))
+    label = _clean(classification.get("label"))
+    fields_used: list[str] = []
+    reasons: list[str] = []
+    if display_name:
+        fields_used.append("display_company_name")
+    else:
+        reasons.append("missing display/company name")
+    classification_usable = bool(_meaningful_classification_label(label) and basis in _GENERIC_CLASSIFICATION_BASES)
+    if classification_usable:
+        fields_used.append(str(classification.get("source_field") or basis))
+    else:
+        reasons.append("missing meaningful business classification evidence")
+    eligible = bool(display_name and classification_usable)
+    code = "GENERIC_FALLBACK_ELIGIBLE" if eligible else "GENERIC_FALLBACK_INSUFFICIENT_INTELLIGENCE"
+    return {
+        "eligible": eligible,
+        "code": code,
+        "reason": "; ".join(reasons) if reasons else "company/display name plus meaningful business classification evidence supplied",
+        "classification_basis": basis,
+        "classification_label": label,
+        "classification_source_field": str(classification.get("source_field") or ""),
+        "canonical_fields_used": sorted(set(fields_used)),
+        "classification": classification,
+    }
+
+
+def has_generic_generation_intelligence(prospect: Prospect) -> bool:
+    return bool(evaluate_generic_generation_intelligence(prospect)["eligible"])
+
+
+def generic_generation_policy_from_context(canonical: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Evaluate generic generation eligibility from an existing canonical dict."""
+    ctx = canonical if isinstance(canonical, dict) else {}
+    classification = ctx.get("classification") if isinstance(ctx.get("classification"), dict) else {}
+    display_name = _clean(ctx.get("display_company_name") or ctx.get("legal_company_name"))
+    basis = _clean(classification.get("basis"))
+    label = _clean(classification.get("label"))
+    classification_usable = bool(_meaningful_classification_label(label) and basis in _GENERIC_CLASSIFICATION_BASES)
+    reasons: list[str] = []
+    if not display_name:
+        reasons.append("missing display/company name")
+    if not classification_usable:
+        reasons.append("missing meaningful business classification evidence")
+    eligible = bool(display_name and classification_usable)
+    return {
+        "eligible": eligible,
+        "code": "GENERIC_FALLBACK_ELIGIBLE" if eligible else "GENERIC_FALLBACK_INSUFFICIENT_INTELLIGENCE",
+        "reason": "; ".join(reasons) if reasons else "company/display name plus meaningful business classification evidence supplied",
+        "classification_basis": basis,
+        "classification_label": label,
+        "classification_source_field": str(classification.get("source_field") or ""),
+        "canonical_fields_used": list(ctx.get("canonical_fields_used") or []),
+        "classification": classification,
+    }
 
 
 def location_context(prospect: Prospect) -> Dict[str, Any]:
@@ -267,6 +367,7 @@ def merge_canonical_with_scrape(data: Dict[str, Any], canonical: Dict[str, Any])
         meta.setdefault("website_enrichment_status", "enriched_with_canonical_intelligence")
         meta.setdefault("canonical_fallback_used", False)
     meta["canonical_prospect_intelligence"] = ctx
+    meta["generic_fallback_policy"] = generic_generation_policy_from_context(ctx)
     meta["canonical_fields_used"] = list(ctx.get("canonical_fields_used") or [])
     merged["metadata"] = meta
     return merged

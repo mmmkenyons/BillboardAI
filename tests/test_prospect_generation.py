@@ -77,7 +77,16 @@ def test_eligibility_unsupported_template(tmp_path) -> None:
     service = ProspectGenerationService(prospect_store=prospect_store, job_store=job_store, project_store=project_store)
     result = service.check_eligibility(prospect.prospect_id)
     assert result.eligible is False
-    assert "No supported template" in result.reasons
+    assert "GENERIC_FALLBACK_INSUFFICIENT_INTELLIGENCE" in result.reasons
+
+
+def test_eligibility_minimal_company_location_only_blocked(tmp_path) -> None:
+    prospect_store, job_store, project_store = _stores(tmp_path)
+    prospect = _seed_prospect(prospect_store, website="", category="", city="Omaha", state="NE")
+    service = ProspectGenerationService(prospect_store=prospect_store, job_store=job_store, project_store=project_store)
+    result = service.check_eligibility(prospect.prospect_id)
+    assert result.eligible is False
+    assert "GENERIC_FALLBACK_INSUFFICIENT_INTELLIGENCE" in result.reasons
 
 
 def test_job_persistence_and_updates(tmp_path) -> None:

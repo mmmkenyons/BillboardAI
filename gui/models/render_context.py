@@ -254,6 +254,10 @@ class RenderContext:
         classification = canonical.get("classification") if isinstance(canonical.get("classification"), dict) else {}
         selected_phone = canonical.get("selected_phone") if isinstance(canonical.get("selected_phone"), dict) else {}
         location_ctx = canonical.get("location") if isinstance(canonical.get("location"), dict) else {}
+        generic_policy = profile.source_metadata.get("generic_fallback_policy") if isinstance(profile.source_metadata, dict) else {}
+        generic_policy = generic_policy if isinstance(generic_policy, dict) else {}
+        template_selection = profile.source_metadata.get("generation_template_selection") if isinstance(profile.source_metadata, dict) else {}
+        template_selection = template_selection if isinstance(template_selection, dict) else {}
 
         return cls(
             version=RENDER_CONTEXT_VERSION,
@@ -297,6 +301,9 @@ class RenderContext:
                 "business_classification_source": classification.get("basis", ""),
                 "website_enrichment_status": profile.source_metadata.get("website_enrichment_status", ""),
                 "canonical_fallback_used": bool(profile.source_metadata.get("canonical_fallback_used", False)),
+                "generic_fallback_used": bool(template_name == "generic" or template_selection.get("generic_fallback_used")),
+                "generic_fallback_policy": dict(generic_policy),
+                "generation_template_selection": dict(template_selection),
                 "canonical_fields_used": list(profile.source_metadata.get("canonical_fields_used") or []),
             },
         )

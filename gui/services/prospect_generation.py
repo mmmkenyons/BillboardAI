@@ -29,6 +29,7 @@ from gui.services.profile_resolver import effective_scrape_url
 from gui.services.canonical_prospect_intelligence import (
     business_classification,
     canonical_context,
+    evaluate_generic_generation_intelligence,
     has_generation_intelligence,
 )
 from gui.services.email_enrichment import enrich_and_persist_prospect_email
@@ -40,7 +41,9 @@ class OpportunitySelectionError(ValueError):
 
 GenerationCallable = Callable[[MockupRequest], MockupResult]
 
-SUPPORTED_TEMPLATES = ("contractor", "dentist", "realtor")
+GENERIC_TEMPLATE = "generic"
+SUPPORTED_TEMPLATES = ("contractor", "dentist", "realtor", GENERIC_TEMPLATE)
+EXPLICIT_TEMPLATES = ("contractor", "dentist", "realtor")
 CATEGORY_TEMPLATE_MAP = {
     "roofing": "contractor",
     "contractor": "contractor",
@@ -114,9 +117,11 @@ class ProspectGenerationService:
         elif not is_valid_website(website):
             if not canonical_usable:
                 reasons.append("Invalid website")
-        resolved_template = self.resolve_template(prospect, explicit_template=template)
+        explicit_resolution = self.resolve_explicit_template(prospect, explicit_template=template)
+        generic_policy = evaluate_generic_generation_intelligence(prospect)
+        resolved_template = explicit_resolution or (GENERIC_TEMPLATE if generic_policy["eligible"] else "")
         if not resolved_template:
-            reasons.append("No supported template")
+            reasons.append(str(generic_policy["code"]))
         elif resolved_template not in SUPPORTED_TEMPLATES:
             reasons.append("Unsupported template")
         return GenerationEligibility(
@@ -127,9 +132,15 @@ class ProspectGenerationService:
         )
 
     def resolve_template(self, prospect: Prospect, explicit_template: str | None = None) -> str:
+        explicit = self.resolve_explicit_template(prospect, explicit_template=explicit_template)
+        if explicit:
+            return explicit
+        return GENERIC_TEMPLATE if evaluate_generic_generation_intelligence(prospect)["eligible"] else ""
+
+    def resolve_explicit_template(self, prospect: Prospect, explicit_template: str | None = None) -> str:
         if explicit_template:
             explicit = explicit_template.strip().lower()
-            return explicit if explicit in SUPPORTED_TEMPLATES else ""
+            return explicit if explicit in EXPLICIT_TEMPLATES else ""
         evidence = business_classification(prospect)
         candidates = [
             prospect.category,
@@ -166,6 +177,9 @@ class ProspectGenerationService:
         except OpportunitySelectionError as exc:
             return JobCreationResult(prospect_id, False, [str(exc)])
         effective_root = os.path.abspath(output_root or self._default_output_root)
+        generic_policy = evaluate_generic_generation_intelligence(prospect)
+        explicit_template = self.resolve_explicit_template(prospect, explicit_template=template)
+        generation_mode = "explicit_template" if explicit_template else "generic_fallback"
         job = ProspectGenerationJob(
             prospect_id=prospect.prospect_id,
             # Sprint 5Z: snapshot the effective scrape URL (manual -> resolved ->
@@ -183,6 +197,17 @@ class ProspectGenerationService:
                 "company_name": prospect.company_name,
                 "creative_company_name": prospect.preferred_display_company_name,
                 "canonical_fallback_eligible": has_generation_intelligence(prospect),
+                "generation_mode": generation_mode,
+                "template_selection": {
+                    "template": eligibility.resolved_template,
+                    "explicit_template": explicit_template,
+                    "generic_fallback_used": eligibility.resolved_template == GENERIC_TEMPLATE,
+                    "generic_fallback_reason": generic_policy["code"] if eligibility.resolved_template == GENERIC_TEMPLATE else "EXPLICIT_TEMPLATE_SELECTED",
+                    "classification_basis": generic_policy["classification_basis"],
+                    "classification_label": generic_policy["classification_label"],
+                    "classification_source_field": generic_policy["classification_source_field"],
+                    "canonical_fields_used": list(generic_policy["canonical_fields_used"]),
+                },
                 "opportunity_label": self._format_opportunity_label(opportunity_context),
             },
         )
@@ -261,6 +286,7 @@ class ProspectGenerationService:
         if canonical:
             options["canonical_prospect_intelligence"] = canonical
             options["allow_canonical_fallback"] = True
+            options["generation_template_selection"] = dict(job.metadata.get("template_selection") or {})
         request = MockupRequest(
             url=job.website,
             template=job.template,

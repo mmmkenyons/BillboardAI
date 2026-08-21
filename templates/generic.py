@@ -1,0 +1,11 @@
+"""Universal source-independent billboard fallback template."""
+
+TEMPLATE_NAME = "generic"
+BACKGROUND_COLOR = "#F7F8FA"
+PRIMARY_COLOR = "#1F2937"
+ACCENT_COLOR = "#2563EB"
+TEXT_COLOR = "#111827"
+BUTTON_COLOR = "#1D4ED8"
+FONT_FAMILY = "arial.ttf"
+LAYOUT_STYLE = "classic"
+CTA_TEXT = "Learn More"

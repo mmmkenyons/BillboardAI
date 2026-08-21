@@ -48,6 +48,7 @@ def _setup(tmp_path, fake_generate=None):
         Prospect(prospect_id="a", company_name="A Co", website="https://a.com", category="roofing"),
         Prospect(prospect_id="b", company_name="B Co", website="https://b.com", category="unknown"),
         Prospect(prospect_id="c", company_name="C Co", website="https://c.com", category="dentist"),
+        Prospect(prospect_id="d", company_name="D Co", website="https://d.com", company_keywords=["landscaping"]),
     ]:
         prospect_store.create(prospect)
     prospect_store.save()
@@ -70,7 +71,7 @@ def test_batch_page_constructs_and_populates(tmp_path) -> None:
     page.set_controller(batch_controller)
     prospect_controller.load()
     batch_controller.refresh()
-    assert page.prospect_table.rowCount() == 3
+    assert page.prospect_table.rowCount() == 4
     assert page.prospect_table.item(0, BatchPage.COL_COMPANY) is not None
 
 
@@ -91,8 +92,12 @@ def test_eligibility_renders_and_no_generation_on_open(tmp_path) -> None:
     page.set_controller(batch_controller)
     prospect_controller.load()
     batch_controller.refresh()
-    assert "Ready" in page.prospect_table.item(0, BatchPage.COL_ELIGIBILITY).text()
-    assert "No supported template" in page.prospect_table.item(1, BatchPage.COL_ELIGIBILITY).text()
+    assert page.prospect_table.item(0, BatchPage.COL_ELIGIBILITY).text() == "Ready"
+    assert page.prospect_table.item(1, BatchPage.COL_ELIGIBILITY).text() == "Not enough business information for generic generation."
+    assert page.prospect_table.item(3, BatchPage.COL_ELIGIBILITY).text() == "Ready"
+    generic_combo = page.prospect_table.cellWidget(3, BatchPage.COL_TEMPLATE)
+    assert generic_combo is not None
+    assert generic_combo.currentData() == "generic"
     assert page.prospect_table.item(0, BatchPage.COL_OPPORTUNITY).text() in {"Generic", "No opportunity"}
     assert calls == []
 
