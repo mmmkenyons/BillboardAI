@@ -157,6 +157,49 @@ SPRINT_SPECS: dict[str, SprintSpec] = {
         ),
         full_pytest_required=True,
     ),
+    "7I": SprintSpec(
+        sprint_name="7I",
+        expected_files=FileBoundarySpec(
+            modified=(
+                "gui/engine_bridge.py",
+                "gui/models/render_context.py",
+                "tools/finalization_specs.py",
+            ),
+            added=(
+                "gui/services/generic_creative_strategy.py",
+                "tests/test_sprint7i_generic_creative_quality.py",
+                "tools/sprint7i_verify.py",
+            ),
+        ),
+        focused_tests=(
+            _pytest("Sprint 7I focused tests", "tests/test_sprint7i_generic_creative_quality.py"),
+        ),
+        sprint_verifier=_verifier("Sprint 7I verifier", "tools/sprint7i_verify.py"),
+        regression_groups=(
+            _pytest(
+                "Generation/render/copy regressions",
+                "tests/test_sprint7e_universal_generation.py",
+                "tests/test_sprint7f_creative_quality.py",
+                "tests/test_prospect_generation.py",
+                "tests/test_ad_concept.py",
+                "tests/test_message_strategy.py",
+            ),
+            _pytest(
+                "Campaign/export regressions",
+                "tests/test_campaign_export.py",
+                "tests/test_campaign_package.py",
+                "tests/test_campaign_review.py",
+                "tests/test_sprint5ad_campaign_assembly.py",
+                "tests/test_sprint5w_campaign_run.py",
+                "tests/test_sprint5y_smartlead_export.py",
+            ),
+        ),
+        historical_verifiers=(
+            _verifier("Sprint 7F verifier", "tools/sprint7f_verify.py"),
+            _verifier("Sprint 7E verifier", "tools/sprint7e_verify.py"),
+        ),
+        full_pytest_required=True,
+    ),
 }
 
 

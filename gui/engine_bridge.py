@@ -28,6 +28,7 @@ from gui.models.mockup_request import MockupRequest
 from gui.models.mockup_result import MockupResult
 from gui.models.render_context import RenderContext, ensure_render_context
 from gui.services.canonical_prospect_intelligence import generic_generation_policy_from_context, merge_canonical_with_scrape
+from gui.services.generic_creative_strategy import derive_generic_creative_strategy
 
 
 logger = logging.getLogger(__name__)
@@ -127,12 +128,14 @@ def _canonical_fallback_data(request: MockupRequest, status: str) -> dict[str, A
     keywords = [str(k) for k in classification.get("keywords") or [] if str(k).strip()]
     services = ([label] if label else []) + [k for k in keywords if k != label]
     policy = generic_generation_policy_from_context(canonical)
+    strategy = derive_generic_creative_strategy(canonical, website=request.url or "")
+    strategy_dict = strategy.to_dict()
     template_selection = request.options.get("generation_template_selection") if isinstance(request.options, dict) else {}
     template_selection = dict(template_selection) if isinstance(template_selection, dict) else {}
     company = str(canonical.get("display_company_name") or canonical.get("legal_company_name") or "")
     location_label = str(location.get("label") or "")
-    headline = label
-    ad_copy_parts = [part for part in (label, location_label) if part]
+    headline = strategy.headline or label
+    ad_copy_parts = [part for part in (strategy.primary_service or label, strategy.subtitle or location_label) if part]
     ad_copy = " • ".join(ad_copy_parts) if ad_copy_parts else label
     return {
         "url": request.url or "",
@@ -145,9 +148,10 @@ def _canonical_fallback_data(request: MockupRequest, status: str) -> dict[str, A
             "website_enrichment_status": status,
             "canonical_fallback_used": True,
             "generic_fallback_policy": policy,
+            "generic_creative_strategy": strategy_dict,
             "generation_template_selection": template_selection,
             "canonical_fields_used": list(canonical.get("canonical_fields_used") or []),
-            "description": label,
+            "description": strategy.subtitle or label,
         },
         "business_intel": {
             "phone": str(selected_phone.get("phone") or ""),

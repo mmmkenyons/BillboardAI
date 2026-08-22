@@ -256,13 +256,41 @@ class RenderContext:
         location_ctx = canonical.get("location") if isinstance(canonical.get("location"), dict) else {}
         generic_policy = profile.source_metadata.get("generic_fallback_policy") if isinstance(profile.source_metadata, dict) else {}
         generic_policy = generic_policy if isinstance(generic_policy, dict) else {}
+        generic_strategy = profile.source_metadata.get("generic_creative_strategy") if isinstance(profile.source_metadata, dict) else {}
+        generic_strategy = generic_strategy if isinstance(generic_strategy, dict) else {}
         template_selection = profile.source_metadata.get("generation_template_selection") if isinstance(profile.source_metadata, dict) else {}
         template_selection = template_selection if isinstance(template_selection, dict) else {}
+        if template_name == "generic" and not generic_strategy:
+            from gui.services.generic_creative_strategy import derive_generic_creative_strategy
+
+            generic_strategy = derive_generic_creative_strategy(
+                canonical,
+                website=str(profile.website or ""),
+                brand_colors=[str(c) for c in brand_colors],
+                has_logo=bool(logo_path),
+                has_visual_asset=bool(hero_path or background_path),
+            ).to_dict()
+        if template_name == "generic" and generic_strategy:
+            if generic_strategy.get("headline"):
+                profile_headline = str(generic_strategy.get("headline") or "")
+            else:
+                profile_headline = str(profile.personalized_headline or profile.ad_copy or profile.headline or "")
+            cta = str(generic_strategy.get("cta") or cta or "Learn More")
+            subtitle = str(generic_strategy.get("subtitle") or subtitle or "")
+            visual_family = str(generic_strategy.get("visual_family") or "")
+            fallback_mode = str(generic_strategy.get("brand_fallback_mode") or "")
+            if fallback_mode in {"TYPOGRAPHY_FIRST", "BRAND_COLOR_TYPOGRAPHY"}:
+                hero_path = ""
+                background_path = ""
+        else:
+            profile_headline = str(profile.personalized_headline or profile.ad_copy or profile.headline or "")
+            visual_family = ""
+            fallback_mode = ""
 
         return cls(
             version=RENDER_CONTEXT_VERSION,
             company_name=str(profile.company_name or ""),
-            headline=str(profile.personalized_headline or profile.ad_copy or profile.headline or ""),
+            headline=profile_headline,
             cta=str(cta or ""),
             subtitle=str(subtitle or ""),
             template=template_name,
@@ -296,6 +324,11 @@ class RenderContext:
                 "personalized_cta": profile.personalized_cta,
                 "profile_summary": profile.profile_summary,
                 "canonical_prospect_intelligence": canonical,
+                "generic_creative_strategy": generic_strategy,
+                "creative_intent": generic_strategy.get("creative_intent", "") if generic_strategy else "",
+                "generic_visual_family": visual_family,
+                "brand_fallback_mode": fallback_mode,
+                "generic_strategy_provenance": generic_strategy.get("diagnostics", {}) if generic_strategy else {},
                 "creative_company_name_source": canonical.get("company_name", {}).get("source_field") if isinstance(canonical.get("company_name"), dict) else "",
                 "creative_phone_source": selected_phone.get("source_field", ""),
                 "business_classification_source": classification.get("basis", ""),
