@@ -8,8 +8,12 @@ Authoritative environment: D:\BillboardAI\bb_env
 Authoritative Python: D:\BillboardAI\bb_env\Scripts\python.exe
 
 Always use the authoritative bb_env Python for application commands, pytest, and verifiers.
+Never activate bb_env from Cline.
+Never invoke Activate.ps1 for project Python.
+Never use Set-ExecutionPolicy for project Python.
+Always invoke D:\BillboardAI\bb_env\Scripts\python.exe directly.
 Before diagnosing missing dependencies, verify:
-python -c "import sys; print(sys.executable)"
+D:\BillboardAI\bb_env\Scripts\python.exe -c "import sys; print(sys.executable)"
 
 ## Repository Is Authoritative
 Before substantial work:

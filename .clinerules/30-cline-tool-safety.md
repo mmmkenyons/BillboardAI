@@ -22,6 +22,8 @@ Reports must distinguish:
 - NOT RUN
 - BLOCKED
 - INFERRED
+- TEST_FAILURE
+- TOOL_EXECUTION_FAILURE
 
 Never describe skipped validation as passing.
 
@@ -31,6 +33,10 @@ Verify important edits by re-reading files.
 
 If an editor/tool operation fails, inspect actual file state before retrying.
 Do not enter repeated tool-call narration loops.
+Never repeat identical failed run_commands calls in a loop.
+Distinguish TEST_FAILURE from TOOL_EXECUTION_FAILURE.
+Never activate bb_env, invoke Activate.ps1, or use Set-ExecutionPolicy for project Python.
+Never redirect validation output into repository root.
 
 ## Large Sprint Workflow
 Use this order:
