@@ -43,6 +43,9 @@ COMPANY_NAME_MISMATCH = "COMPANY_NAME_MISMATCH"
 MISSING_HEADLINE = "MISSING_HEADLINE"
 MISSING_CTA = "MISSING_CTA"
 RENDER_QUALITY_PREFIX = "RENDER_"
+PERSON_MATCH = "PERSON_MATCH"
+PERSON_NOT_REFERENCED = "PERSON_NOT_REFERENCED"
+PERSON_MISMATCH = "PERSON_MISMATCH"
 
 _SUPERLATIVE_TERMS = (
     "fastest", "best", "#1", "number one", "top-rated", "top rated",
@@ -88,6 +91,53 @@ def _tokens(value: object) -> list[str]:
     return [t for t in _norm(value).split() if t]
 
 
+_HONORIFIC_TOKENS = {"mr", "mrs", "ms", "miss", "dr", "prof"}
+_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "realtor", "broker", "agent", "owner", "ceo", "cfo", "coo", "dds", "dmd", "md"}
+_NON_NAME_AFTER_FIRST = {"with", "for", "at", "from", "and", "or", "the", "a", "an", "i", "we", "your", "our", "let", "lets", "call", "contact", "work", "meet", "talk", "today", "now"}
+
+
+def _person_name_tokens(value: object) -> list[str]:
+    tokens = _tokens(value)
+    while tokens and tokens[0] in _HONORIFIC_TOKENS:
+        tokens.pop(0)
+    while len(tokens) > 2 and tokens[-1] in _SUFFIX_TOKENS:
+        tokens.pop()
+    return tokens
+
+
+def classify_person_identity(text: str, expected: str) -> str:
+    """Classify generated-copy person identity without aggressive fuzziness.
+
+    Exact intended full-name references match, intended first-name-only copy is a
+    safe non-mismatch, no person claim is non-referenced, and explicit different
+    first/last combinations block.  Similar names such as Julia/Julian are not
+    accepted as matches.
+    """
+    expected_tokens = _person_name_tokens(expected)
+    if len(expected_tokens) < 2:
+        return PERSON_NOT_REFERENCED
+    first, last = expected_tokens[0], expected_tokens[-1]
+    toks = _tokens(text)
+    if not toks:
+        return PERSON_NOT_REFERENCED
+
+    for i in range(len(toks) - 1):
+        pair = (toks[i], toks[i + 1])
+        if pair == (first, last):
+            return PERSON_MATCH
+        if pair[1] == last and pair[0] != first and pair[0] not in {"owner", "team"}:
+            return PERSON_MISMATCH
+        if pair[0] == first and pair[1] != last and pair[1] not in _SUFFIX_TOKENS and pair[1] not in _NON_NAME_AFTER_FIRST:
+            return PERSON_MISMATCH
+
+    # First-name-only creative (e.g. "Work With Julia", "Contact Julia") is a
+    # deliberate person claim in this product, but not a mismatch when it uses
+    # the intended first name and does not name another last name.
+    if first in toks:
+        return PERSON_MATCH
+    return PERSON_NOT_REFERENCED
+
+
 def _source_texts(prospect: Any, concept: Any, project: Any, row: Any) -> list[str]:
     texts: list[str] = []
     extra = getattr(concept, "extra", None)
@@ -116,18 +166,7 @@ def _numbers(value: str) -> list[str]:
 
 
 def _name_mismatch(text: str, expected: str) -> bool:
-    expected_tokens = _tokens(expected)
-    if len(expected_tokens) < 2:
-        return False
-    # If generated text names the first name with a different nearby last name,
-    # block.  This catches wrong-person contamination without requiring the copy
-    # to mention every intended person.
-    first, last = expected_tokens[0], expected_tokens[-1]
-    toks = _tokens(text)
-    for i, tok in enumerate(toks[:-1]):
-        if toks[i + 1] == last and tok != first and tok not in {"owner", "team"}:
-            return True
-    return False
+    return classify_person_identity(text, expected) == PERSON_MISMATCH
 
 
 def _company_mismatch(text: str, expected: str) -> bool:

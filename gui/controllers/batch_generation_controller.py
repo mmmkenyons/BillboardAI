@@ -66,11 +66,12 @@ class BatchGenerationController(QObject):
         self._package_service = CampaignPackageService(export_service=self._export_service)
         self._thread: Optional[QThread] = None
         self._worker: Optional[ProspectGenerationWorker] = None
+        self._is_running = False
         prospect_controller.prospects_changed.connect(self.refresh)
 
     @property
     def is_running(self) -> bool:
-        return self._thread is not None and self._thread.isRunning()
+        return self._is_running
 
     def refresh(self) -> None:
         self.prospects_changed.emit(self._build_prospect_rows())
@@ -138,6 +139,7 @@ class BatchGenerationController(QObject):
         thread.finished.connect(self._cleanup_worker)
         self._thread = thread
         self._worker = worker
+        self._is_running = True
         self.running_changed.emit(True)
         self.status_message.emit("Running batch generation queue...")
         self.refresh()
@@ -202,7 +204,6 @@ class BatchGenerationController(QObject):
         self.refresh()
 
     def _cleanup_worker(self) -> None:
-        self.running_changed.emit(False)
         if self._thread is not None:
             if self._thread.isRunning():
                 self._thread.quit()
@@ -212,6 +213,9 @@ class BatchGenerationController(QObject):
             self._worker.deleteLater()
         self._thread = None
         self._worker = None
+        self.refresh()
+        self._is_running = False
+        self.running_changed.emit(False)
 
     def _build_prospect_rows(self) -> list[dict]:
         rows: list[dict] = []

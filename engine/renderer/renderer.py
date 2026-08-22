@@ -9,6 +9,7 @@ template configuration files in assets/templates/.
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -55,14 +56,64 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
     return lines
 
 
-def _fit_text(draw: ImageDraw.ImageDraw, text: str, font_name: str, max_width: int, max_size: int, min_size: int = 18) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, List[str]]:
+def _fit_text(draw: ImageDraw.ImageDraw, text: str, font_name: str, max_width: int, max_size: int, min_size: int = 18, max_lines: int = 5, max_height: int | None = None) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, List[str], dict[str, Any]]:
+    attempts = 0
     for size in range(max_size, min_size - 1, -2):
+        attempts += 1
         font = _load_font(font_name, size)
         lines = _wrap_text(draw, text, font, max_width)
-        if all(draw.textbbox((0, 0), line, font=font)[2] <= max_width for line in lines) and len(lines) <= 5:
-            return font, lines
+        line_gap = max(4, size // 6)
+        total_height = sum(_line_height(draw, line, font) for line in lines) + line_gap * max(0, len(lines) - 1)
+        if (
+            all(draw.textbbox((0, 0), line, font=font)[2] <= max_width for line in lines)
+            and len(lines) <= max_lines
+            and (max_height is None or total_height <= max_height)
+        ):
+            return font, lines, {"attempts": attempts, "fits": True, "total_height": total_height}
     fallback_font = _load_font(font_name, min_size)
-    return fallback_font, _wrap_text(draw, text, fallback_font, max_width)
+    fallback_lines = _wrap_text(draw, text, fallback_font, max_width)
+    total_height = sum(_line_height(draw, line, fallback_font) for line in fallback_lines) + max(4, min_size // 6) * max(0, len(fallback_lines) - 1)
+    return fallback_font, fallback_lines, {"attempts": attempts, "fits": False, "total_height": total_height}
+
+
+def _text_block_height(draw: ImageDraw.ImageDraw, lines: List[str], font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> int:
+    if not lines:
+        return 0
+    gap = max(4, _font_size(font) // 6)
+    return sum(_line_height(draw, line, font) for line in lines) + gap * max(0, len(lines) - 1)
+
+
+def _semantic_headline_candidates(headline: str, spec: Dict[str, Any]) -> List[str]:
+    """Return deterministic, evidence-backed shorter headline candidates.
+
+    This removes common scrape/enrichment adornments (email/phone/contact
+    fragments) and falls back to structured business classification when present.
+    It never truncates blindly and never invents claims.
+    """
+    original = re.sub(r"\s+", " ", str(headline or "")).strip()
+    candidates: List[str] = []
+
+    def add(value: object) -> None:
+        text = re.sub(r"\s+", " ", str(value or "")).strip(" .")
+        if text and text.lower() not in {c.lower() for c in candidates}:
+            candidates.append(text)
+
+    add(original)
+    stripped = re.sub(r"\b(?:email|e-mail|call|phone|tel)\b\s*[:\-]?\s*\S+", "", original, flags=re.I)
+    stripped = re.sub(r"\b\S+@\S+\b", "", stripped)
+    stripped = re.sub(r"\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b", "", stripped)
+    add(stripped)
+    for part in re.split(r"[.!?]+", stripped):
+        add(part)
+    opportunity = spec.get("opportunity_context") if isinstance(spec.get("opportunity_context"), dict) else {}
+    canonical = opportunity.get("canonical_prospect_intelligence") if isinstance(opportunity.get("canonical_prospect_intelligence"), dict) else {}
+    classification = canonical.get("classification") if isinstance(canonical.get("classification"), dict) else {}
+    add(spec.get("business_classification"))
+    add(classification.get("label"))
+    keywords = classification.get("keywords") if isinstance(classification.get("keywords"), list) else []
+    for keyword in keywords:
+        add(keyword)
+    return candidates
 
 
 def _font_size(font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> int:
@@ -75,12 +126,17 @@ def _line_height(draw: ImageDraw.ImageDraw, line: str, font: ImageFont.FreeTypeF
 
 
 def get_last_render_quality() -> dict[str, Any]:
-    return {"status": _LAST_RENDER_QUALITY.get("status", RENDER_QUALITY_PASS), "reasons": list(_LAST_RENDER_QUALITY.get("reasons", []))}
+    result = {"status": _LAST_RENDER_QUALITY.get("status", RENDER_QUALITY_PASS), "reasons": list(_LAST_RENDER_QUALITY.get("reasons", []))}
+    if isinstance(_LAST_RENDER_QUALITY.get("diagnostics"), dict):
+        result["diagnostics"] = dict(_LAST_RENDER_QUALITY.get("diagnostics") or {})
+    return result
 
 
-def _set_last_render_quality(status: str, reasons: list[dict[str, Any]]) -> None:
+def _set_last_render_quality(status: str, reasons: list[dict[str, Any]], diagnostics: dict[str, Any] | None = None) -> None:
     global _LAST_RENDER_QUALITY
     _LAST_RENDER_QUALITY = {"status": status, "reasons": reasons}
+    if diagnostics is not None:
+        _LAST_RENDER_QUALITY["diagnostics"] = dict(diagnostics)
 
 
 def _apply_hero_effects(hero: Image.Image) -> Image.Image:
@@ -242,38 +298,85 @@ def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Imag
     card_fill = "#F8F8F8" if layout_style in ("premium", "white") else background_color
     draw.rectangle(card_rect, fill=card_fill, outline="#DDDDDD", width=2)
 
-    company_font = _load_font(spec.get("font_family", "arial.ttf"), 36)
-    headline_font, headline_lines = _fit_text(
-        draw, spec.get("headline", "Make your message unforgettable"), spec.get("font_family", "arial.ttf"),
-        width - 2 * (card_margin + 20), 48, min_size=24
-    )
-    subtitle_font, subtitle_lines = _fit_text(
-        draw, spec.get("subtitle", ""), spec.get("font_family", "arial.ttf"),
-        width - 2 * (card_margin + 20), 24, min_size=16
-    )
-    badge_font = _load_font(spec.get("font_family", "arial.ttf"), 20)
-
     text_x = card_margin + 30
     text_y = card_top + 30
     max_text_width = width - 2 * (card_margin + 20)
     content_bottom = card_bottom - 20
     quality_reasons: list[dict[str, Any]] = []
+    diagnostics: dict[str, Any] = {
+        "headline_font_size_requested": 48,
+        "headline_font_size_used": 0,
+        "headline_fit_attempts": 0,
+        "headline_wrapped_lines": 0,
+        "headline_fit_adjusted": False,
+        "headline_semantic_shortening_attempted": False,
+        "headline_text_used": "",
+        "cta_font_size_requested": 20,
+        "cta_font_size_used": 0,
+        "cta_fit_attempts": 0,
+        "cta_fit_adjusted": False,
+    }
 
     def add_reason(code: str, message: str, severity: str = RENDER_QUALITY_WARNING, **extra: Any) -> None:
         quality_reasons.append({"code": code, "message": message, "severity": severity, **extra})
 
+    font_name = spec.get("font_family", "arial.ttf")
+    company_font = _load_font(font_name, 36)
     draw.text((text_x, text_y), spec.get("company", "Brand"), font=company_font, fill=accent_color)
     company_height = draw.textbbox((0, 0), spec.get("company", "Brand"), font=company_font)[3]
     text_y += company_height + 10
+
+    subtitle_text = spec.get("subtitle", "")
+    subtitle_font, subtitle_lines, _subtitle_fit = _fit_text(
+        draw, subtitle_text, font_name, max_text_width, 24, min_size=16, max_lines=3
+    )
+    subtitle_height = _text_block_height(draw, subtitle_lines, subtitle_font) if subtitle_lines and any(line.strip() for line in subtitle_lines) else 0
+    reserved_after_headline = subtitle_height + (6 * max(0, len(subtitle_lines) - 1) if subtitle_height else 0) + 15 + 56
+    headline_max_height = max(1, content_bottom - text_y - reserved_after_headline)
+
+    headline_source = spec.get("headline", "Make your message unforgettable")
+    headline_font = _load_font(font_name, 24)
+    headline_lines: List[str] = []
+    headline_fit_meta: dict[str, Any] = {"attempts": 0, "fits": False, "total_height": 0}
+    headline_text_used = ""
+    for index, candidate in enumerate(_semantic_headline_candidates(headline_source, spec)):
+        if index > 0:
+            diagnostics["headline_semantic_shortening_attempted"] = True
+        candidate_font, candidate_lines, candidate_meta = _fit_text(
+            draw, candidate, font_name, max_text_width, 48, min_size=24, max_lines=4, max_height=headline_max_height
+        )
+        diagnostics["headline_fit_attempts"] += int(candidate_meta.get("attempts") or 0)
+        if candidate_meta.get("fits"):
+            headline_font = candidate_font
+            headline_lines = candidate_lines
+            headline_fit_meta = candidate_meta
+            headline_text_used = candidate
+            break
+        if not headline_lines:
+            headline_font = candidate_font
+            headline_lines = candidate_lines
+            headline_fit_meta = candidate_meta
+            headline_text_used = candidate
+
+    diagnostics["headline_font_size_used"] = _font_size(headline_font)
+    diagnostics["headline_wrapped_lines"] = len(headline_lines)
+    diagnostics["headline_fit_adjusted"] = bool(
+        headline_text_used != str(headline_source or "").strip()
+        or _font_size(headline_font) != diagnostics["headline_font_size_requested"]
+        or len(headline_lines) > 1
+    )
+    diagnostics["headline_text_used"] = headline_text_used
 
     for line in headline_lines:
         bbox = draw.textbbox((text_x, text_y), line, font=headline_font)
         if bbox[2] > text_x + max_text_width:
             add_reason(RENDER_HEADLINE_OVERFLOW, "Rendered headline exceeds its text bounds.", line=line)
         draw.text((text_x, text_y), line, font=headline_font, fill=text_color)
-        text_y += _line_height(draw, line, headline_font) + 8
+        text_y += _line_height(draw, line, headline_font) + max(4, _font_size(headline_font) // 6)
     if headline_lines and _font_size(headline_font) < 24:
         add_reason(RENDER_TEXT_UNREADABLE, "Headline required an unreadable font size.", RENDER_QUALITY_BLOCKED, font_size=_font_size(headline_font))
+    if not headline_fit_meta.get("fits"):
+        add_reason(RENDER_TEXT_CLIPPED, "Rendered headline cannot fit safely within the card bounds.", RENDER_QUALITY_BLOCKED, text=headline_text_used, font_size=_font_size(headline_font), lines=len(headline_lines))
 
     if subtitle_lines and any(line.strip() for line in subtitle_lines):
         for line in subtitle_lines:
@@ -281,9 +384,19 @@ def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Imag
             text_y += _line_height(draw, line, subtitle_font) + 6
 
     button_box = [text_x, text_y + 15, text_x + 220, text_y + 55]
+    badge_font = _load_font(font_name, 20)
+    for size in range(20, 13, -1):
+        diagnostics["cta_fit_attempts"] += 1
+        trial_font = _load_font(font_name, size)
+        cta_bbox_trial = draw.textbbox((0, 0), cta_text, font=trial_font)
+        if cta_bbox_trial[2] <= (button_box[2] - button_box[0] - 30) and cta_bbox_trial[3] <= (button_box[3] - button_box[1] - 4):
+            badge_font = trial_font
+            break
+    diagnostics["cta_font_size_used"] = _font_size(badge_font)
+    diagnostics["cta_fit_adjusted"] = diagnostics["cta_font_size_used"] != diagnostics["cta_font_size_requested"]
     cta_bbox = draw.textbbox((text_x + 20, text_y + 22), cta_text, font=badge_font)
     if cta_bbox[2] > button_box[2] - 10 or cta_bbox[3] > button_box[3] - 4:
-        add_reason(RENDER_CTA_OVERFLOW, "Rendered CTA exceeds its button bounds.", cta=cta_text)
+        add_reason(RENDER_CTA_OVERFLOW, "Rendered CTA exceeds its button bounds.", cta=cta_text, font_size=_font_size(badge_font))
     if button_box[3] > content_bottom:
         add_reason(RENDER_TEXT_CLIPPED, "Rendered text/button extends outside the card bounds.", RENDER_QUALITY_BLOCKED, bottom=button_box[3], limit=content_bottom)
     draw.rectangle(button_box, fill=button_color, outline=None)
@@ -300,7 +413,7 @@ def _generate_artwork(spec: Dict[str, Any], size: Tuple[int, int]) -> Image.Imag
             pass
 
     status = RENDER_QUALITY_BLOCKED if any(r.get("severity") == RENDER_QUALITY_BLOCKED for r in quality_reasons) else (RENDER_QUALITY_WARNING if quality_reasons else RENDER_QUALITY_PASS)
-    _set_last_render_quality(status, quality_reasons)
+    _set_last_render_quality(status, quality_reasons, diagnostics)
     return artwork
 
 
